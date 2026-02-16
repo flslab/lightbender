@@ -7,16 +7,17 @@ import matplotlib
 import logging
 import yaml
 import os
+import argparse  # Added for argument parsing
 from mpl_toolkits.mplot3d import Axes3D  # Required for 3D plotting
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
-from logger.logger import setup_logging
+# from logger.logger import setup_logging
 
 matplotlib.use('macosx')
 
-setup_logging()
+# setup_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ class ResolutionStrategy:
         self.placement = placement
         self.camera_pos = camera_pos
         self.threshold = threshold
-        self.layer_config = layer_config or {'count': 5, 'spacing': 2.0}
+        self.layer_config = layer_config or {'count': 5, 'spacing': 0.2}
 
     def resolve(self, graph: InterferenceGraph, points_to_move: List[int]) -> Dict[int, np.ndarray]:
         # 1. Determine Processing Order
@@ -525,14 +526,19 @@ def visualize_solution_2d(graph: InterferenceGraph,
             start = graph.initial_positions[pid][:2]
             end = final_positions[pid][:2]
             ax2.arrow(start[0], start[1], end[0] - start[0], end[1] - start[1],
-                      head_width=0.2, color='black', alpha=0.5, length_includes_head=True, zorder=2)
+                      head_width=0.02, color='black', alpha=0.5, length_includes_head=True, zorder=200)
 
     ax2.axis('equal')
     ax2.grid(True, alpha=0.3)
     ax2.legend()
 
     plt.tight_layout()
-    plt.show()
+
+    if args.save_viz:
+        plt.savefig(args.viz_2d_output_file, dpi=300)
+        plt.close()
+    else:
+        plt.show()
 
 
 def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray) -> Tuple[float, float]:
@@ -679,21 +685,59 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     ax.set_zlabel('Z')
     ax.set_title("3D Point Structure (Dotted=Max Limit, Solid=Scaled Length)")
     ax.set_aspect('equal')
-    plt.show()
+
+    if args.save_viz:
+        plt.savefig(args.viz_3d_output_file, dpi=300)
+        plt.close()
+    else:
+        plt.show()
 
 
 if __name__ == "__main__":
-    INPUT_FILE = "points_input.yaml"
-    OUTPUT_FILE = "points_output.yaml"
-    THRESHOLD = 0.16
-    CAMERA_POS = (2.3, 0.0, 0.8)
+    parser = argparse.ArgumentParser(description="Modular Interference Solver")
 
-    # 1. Generate Sample Data if it doesn't exist
-    if not os.path.exists(INPUT_FILE):
-        logger.info(f"Generating sample input file: {INPUT_FILE}")
+    # Files
+    parser.add_argument("--input_file", type=str, default="points_input.yaml", help="Path to input YAML file")
+    parser.add_argument("--output_file", type=str, default="points_output.yaml", help="Path to output YAML file")
+    parser.add_argument("--viz_2d_output_file", type=str, default="2d_viz.png", help="Path to output 2d visualization file")
+    parser.add_argument("--viz_3d_output_file", type=str, default="3d_viz.png", help="Path to output 3d visualization file")
+
+    # Parameters
+    parser.add_argument("--threshold", type=float, default=0.16, help="Interference threshold distance")
+    parser.add_argument("--camera_pos", type=float, nargs=3, default=[2.3, 0.0, 0.8], help="Camera position (x y z)")
+
+    # Algorithm Config Enums
+    parser.add_argument("--selection_method", type=str, default="GREEDY_MAX_DEGREE",
+                        choices=[e.name for e in SelectionMethod], help="Selection method")
+    parser.add_argument("--resolution_order", type=str, default="MAX_DEGREE",
+                        choices=[e.name for e in ResolutionOrder], help="Resolution order")
+    parser.add_argument("--trajectory_type", type=str, default="POINT_SPECIFIC",
+                        choices=[e.name for e in TrajectoryType], help="Trajectory type")
+    parser.add_argument("--move_direction", type=str, default="HYBRID",
+                        choices=[e.name for e in MoveDirection], help="Movement direction")
+    parser.add_argument("--placement_type", type=str, default="MIN_DISTANCE",
+                        choices=[e.name for e in PlacementType], help="Placement type")
+
+    parser.add_argument("--no_viz", action='store_true', help="Disable visualization")
+    parser.add_argument("--save_viz", action='store_true', help="Save visualization as files")
+
+    args = parser.parse_args()
+
+    # Convert args to Enums
+    sel_method = SelectionMethod[args.selection_method]
+    res_order = ResolutionOrder[args.resolution_order]
+    traj_type = TrajectoryType[args.trajectory_type]
+    move_dir = MoveDirection[args.move_direction]
+    place_type = PlacementType[args.placement_type]
+
+    CAMERA_POS = tuple(args.camera_pos)
+
+    # 1. Generate Sample Data if input file does not exist
+    if not os.path.exists(args.input_file):
+        logger.info(f"Input file {args.input_file} not found. Generating sample data at this path.")
         sample_points = []
         np.random.seed(42)
-        for i in range(4):
+        for i in range(10):  # Generated 10 points default
             sample_points.append({
                 'id': i,
                 'x': float(np.random.rand() * 10),
@@ -701,34 +745,38 @@ if __name__ == "__main__":
                 'z': float(np.random.rand() * 5 + 10),
                 'length_1': 1.5,
                 'length_2': 1.0,
-                'angle_1': float(np.random.rand() * 90),  # 0 to 90 deg
-                'angle_2': float(np.random.rand() * 90 + 180),  # 180 to 270 deg
+                'angle_1': float(np.random.rand() * 90),
+                'angle_2': float(np.random.rand() * 90 + 180),
                 'max_length_limit': 4.0
             })
-        with open(INPUT_FILE, 'w') as f:
-            yaml.dump({'points': sample_points}, f)
+        try:
+            with open(args.input_file, 'w') as f:
+                yaml.dump({'points': sample_points}, f)
+        except IOError as e:
+            logger.error(f"Failed to create sample input file: {e}")
+            exit(1)
 
     # 2. Load Data
-    points_data = load_points_from_yaml(INPUT_FILE)
+    points_data = load_points_from_yaml(args.input_file)
 
     if not points_data:
         logger.error("No points loaded. Exiting.")
-        exit()
+        exit(1)
 
     # 3. Build Graph
-    graph = InterferenceGraph(points_data, THRESHOLD)
+    graph = InterferenceGraph(points_data, args.threshold)
 
     # 4. Initialize Solver
     solver = ModularInterferenceSolver(graph, CAMERA_POS)
 
     # 5. Run with Configuration
-    logger.info("--- Configuration: Greedy Degree + Radial + HYBRID + Min Dist ---")
+    logger.info(f"--- Configuration: {sel_method.name} + {traj_type.name} + {move_dir.name} + {place_type.name} ---")
     moved, positions = solver.solve(
-        selection_method=SelectionMethod.GREEDY_MAX_DEGREE,
-        resolution_order=ResolutionOrder.MAX_DEGREE,
-        trajectory_type=TrajectoryType.POINT_SPECIFIC,
-        move_direction=MoveDirection.HYBRID,
-        placement_type=PlacementType.MIN_DISTANCE
+        selection_method=sel_method,
+        resolution_order=res_order,
+        trajectory_type=traj_type,
+        move_direction=move_dir,
+        placement_type=place_type
     )
 
     # 6. Validation Output
@@ -747,11 +795,11 @@ if __name__ == "__main__":
             f"  Perspective Scale: L1 {p.length_1:.2f}->{l1_new:.2f}, L2 {p.length_2:.2f}->{l2_new:.2f} (Max: {p.max_length_limit})")
 
     # 7. Save Results
-    save_points_to_yaml(OUTPUT_FILE, points_data, positions, np.array(CAMERA_POS))
+    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS))
 
-    # 8. Visualize Results
-    # 2D Before/After
-    visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
-
-    # 3D Structure Visualization
-    visualize_3d_structure(points_data, positions, np.array(CAMERA_POS))
+    # 8. Visualize Results (Optional)
+    if not args.no_viz:
+        # 2D Before/After
+        visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
+        # 3D Structure Visualization
+        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS))
