@@ -5,12 +5,14 @@ import itertools
 import matplotlib.pyplot as plt
 import matplotlib
 import logging
+import yaml
+import os
+from mpl_toolkits.mplot3d import Axes3D  # Required for 3D plotting
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
-from logger import setup_logging
-
+from logger.logger import setup_logging
 
 matplotlib.use('macosx')
 
@@ -29,8 +31,8 @@ class Point3D:
     z: float
     length_1: float
     length_2: float
-    angle_1: float  # New: Unused in algorithm but stored
-    angle_2: float  # New: Unused in algorithm but stored
+    angle_1: float  # Angle in degrees
+    angle_2: float  # Angle in degrees
     max_length_limit: float
 
     @property
@@ -111,6 +113,7 @@ class TrajectoryType(Enum):
 class MoveDirection(Enum):
     AWAY_FROM_CAMERA = auto()
     TOWARDS_CAMERA = auto()
+    HYBRID = auto()  # Try both directions
 
 
 class PlacementType(Enum):
@@ -256,6 +259,7 @@ class ResolutionStrategy:
             point_data = graph.points[pid]
 
             # Determine Trajectory Vector (normalized)
+            # This vector points AWAY from the camera by default
             if self.trajectory == TrajectoryType.POINT_SPECIFIC:
                 vec = original_pos - self.camera_pos
                 norm = np.linalg.norm(vec)
@@ -263,12 +267,22 @@ class ResolutionStrategy:
             else:
                 traj_vec = global_vec
 
-            # Flip if moving towards camera
+            # Determine signs to check based on MoveDirection
+            # +1.0 = Away, -1.0 = Towards
+            search_directions = []
+
             if self.direction == MoveDirection.TOWARDS_CAMERA:
-                traj_vec = -traj_vec
+                search_directions = [-1.0]
+            elif self.direction == MoveDirection.AWAY_FROM_CAMERA:
+                search_directions = [1.0]
+            elif self.direction == MoveDirection.HYBRID:
+                # Prefer Away (positive) first? Or check both at each step.
+                # The logic inside _find_position will handle stepping.
+                # passing both 1.0 and -1.0 allows the searcher to check both.
+                search_directions = [1.0, -1.0]
 
             # Find Position
-            new_pos = self._find_position(pid, point_data, traj_vec, final_positions, graph)
+            new_pos = self._find_position(pid, point_data, traj_vec, search_directions, final_positions, graph)
             final_positions[pid] = new_pos
 
         return final_positions
@@ -305,38 +319,44 @@ class ResolutionStrategy:
         l2_new = point_data.length_2 * scale_factor
 
         if l1_new > point_data.max_length_limit or l2_new > point_data.max_length_limit:
-            logger.debug(
-                f"      Perspective Limit Exceeded for Point {point_data.id}: L1={l1_new:.2f}, L2={l2_new:.2f} > Limit={point_data.max_length_limit}")
+            # We don't log this as debug constantly because HYBRID/TOWARDS might trigger it often
             return False
         return True
 
-    def _find_position(self, pid, point_data, traj_vec, placed_positions, graph):
+    def _find_position(self, pid, point_data, traj_vec, search_directions, placed_positions, graph):
         original_pos = graph.initial_positions[pid]
 
         # Define search steps
         step_size = 0.1
         max_steps = 400  # Safety break
 
-        logger.info(f"    Resolving Point {pid}. Trajectory: {traj_vec}")
+        logger.info(f"    Resolving Point {pid}. Trajectory: {traj_vec}, Directions: {search_directions}")
 
         if self.placement == PlacementType.MIN_DISTANCE:
             # Iterative search along vector
             for i in range(max_steps):
-                current_shift = i * step_size
-                candidate_pos = original_pos + (traj_vec * current_shift)
+                current_dist = i * step_size
 
-                # 1. Check Perspective Limit
-                if not self._check_perspective_constraint(point_data, original_pos, candidate_pos):
-                    if self.direction == MoveDirection.AWAY_FROM_CAMERA:
-                        logger.info(f"      Stopping search for Point {pid} due to perspective limit.")
-                        break
+                # Check all allowed directions at this distance
+                # For HYBRID, this means checking +dist and -dist at the same 'cost' (displacement)
+                for sign in search_directions:
+                    current_shift = current_dist * sign
+                    candidate_pos = original_pos + (traj_vec * current_shift)
 
-                        # 2. Check Interference (XY projection check)
-                if self._is_valid(candidate_pos, placed_positions, graph, current_id=pid):
-                    if i > 0:
-                        logger.debug(
-                            f"      Found valid position for Point {pid} at step {i} ({current_shift:.2f} units)")
-                    return candidate_pos
+                    # 1. Check Perspective Limit
+                    if not self._check_perspective_constraint(point_data, original_pos, candidate_pos):
+                        # If moving away violates perspective, stop checking this direction entirely
+                        # (further away will always violate)
+                        if sign > 0:
+                            pass  # We could remove 1.0 from search_directions to optimize, but logic is simple enough
+                        continue
+
+                    # 2. Check Interference (XY projection check)
+                    if self._is_valid(candidate_pos, placed_positions, graph, current_id=pid):
+                        if i > 0:
+                            logger.debug(
+                                f"      Found valid position for Point {pid} at step {i} (Shift: {current_shift:.2f})")
+                        return candidate_pos
 
             logger.info(f"      Failed to find valid position for Point {pid}. Returning original.")
             return original_pos
@@ -344,17 +364,21 @@ class ResolutionStrategy:
         elif self.placement == PlacementType.LAYERS:
             # Construct layers
             for d in range(self.layer_config['count']):
-                shift = d * self.layer_config['spacing']
-                candidate_pos = original_pos + (traj_vec * shift)
+                dist_abs = d * self.layer_config['spacing']
 
-                logger.info(f"      Testing Layer {d} (Shift: {shift})")
+                # Check allowed directions for this layer
+                for sign in search_directions:
+                    shift = dist_abs * sign
+                    candidate_pos = original_pos + (traj_vec * shift)
 
-                if not self._check_perspective_constraint(point_data, original_pos, candidate_pos):
-                    continue
+                    logger.debug(f"      Testing Layer {d} (Shift: {shift:.2f})")
 
-                if self._is_valid(candidate_pos, placed_positions, graph, current_id=pid):
-                    logger.info(f"      Found valid position for Point {pid} at Layer {d}")
-                    return candidate_pos
+                    if not self._check_perspective_constraint(point_data, original_pos, candidate_pos):
+                        continue
+
+                    if self._is_valid(candidate_pos, placed_positions, graph, current_id=pid):
+                        logger.info(f"      Found valid position for Point {pid} at Layer {d} (Shift: {shift:.2f})")
+                        return candidate_pos
 
             logger.info(f"      Failed to find valid position in layers for Point {pid}.")
             return original_pos
@@ -367,10 +391,6 @@ class ResolutionStrategy:
             neighbor_2d = neighbor_pos[:2]
             dist = np.linalg.norm(cand_2d - neighbor_2d)
             if dist < self.threshold:
-                # Only log if it's not self-interference (though placed_positions shouldn't contain current_id usually)
-                if current_id is not None and current_id != neighbor_id:
-                    logger.debug(
-                        f"      Interference: Point {current_id} overlaps with {neighbor_id} (Dist: {dist:.2f} < {self.threshold})")
                 return False
         return True
 
@@ -429,17 +449,46 @@ class ModularInterferenceSolver:
             raise ValueError(f"Unknown selection method: {method}")
 
 
-def visualize_solution(graph: InterferenceGraph,
-                       moved_indices: List[int],
-                       final_positions: Dict[int, np.ndarray],
-                       camera_pos: np.ndarray):
+# --- Input / Output Utilities ---
+
+def load_points_from_yaml(filepath: str) -> List[Point3D]:
+    """Reads points from a YAML file."""
+    if not os.path.exists(filepath):
+        logger.error(f"File {filepath} not found.")
+        return []
+
+    with open(filepath, 'r') as f:
+        data = yaml.safe_load(f)
+
+    points = []
+    # Assuming YAML structure is: {'points': [ {id: 1, x: 1.0, ...}, ... ]}
+    for p_data in data.get('points', []):
+        points.append(Point3D(
+            id=p_data['id'],
+            x=p_data['x'],
+            y=p_data['y'],
+            z=p_data['z'],
+            length_1=p_data.get('length_1', 1.0),
+            length_2=p_data.get('length_2', 1.0),
+            angle_1=p_data.get('angle_1', 0.0),
+            angle_2=p_data.get('angle_2', 0.0),
+            max_length_limit=p_data.get('max_length_limit', 10.0)
+        ))
+    logger.info(f"Loaded {len(points)} points from {filepath}")
+    return points
+
+
+def visualize_solution_2d(graph: InterferenceGraph,
+                          moved_indices: List[int],
+                          final_positions: Dict[int, np.ndarray],
+                          camera_pos: np.ndarray):
     """
     Visualizes the before and after states of the points in the XY plane.
     """
     try:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     except Exception as e:
-        logger.info(f"Visualization setup failed (plotting backend might be missing): {e}")
+        logger.info(f"Visualization setup failed: {e}")
         return
 
     # Extract data
@@ -450,15 +499,11 @@ def visualize_solution(graph: InterferenceGraph,
 
     # --- Plot 1: Before ---
     ax1.set_title(f"Before Resolution ({len(moved_indices)} conflicts)")
-
-    # Draw Camera
     ax1.plot(camera_pos[0], camera_pos[1], 'k*', markersize=15, label='Camera')
 
-    # Draw Points
     for i, pid in enumerate(all_ids):
         color = 'red' if pid in moved_set else 'blue'
         ax1.scatter(orig_coords[i, 0], orig_coords[i, 1], c=color, s=50, zorder=3)
-        # Draw threshold radius (0.5 * threshold radius)
         circle = plt.Circle(orig_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
         ax1.add_patch(circle)
         ax1.text(orig_coords[i, 0] + 0.1, orig_coords[i, 1] + 0.1, str(pid), fontsize=8)
@@ -474,12 +519,8 @@ def visualize_solution(graph: InterferenceGraph,
     for i, pid in enumerate(all_ids):
         color = 'orange' if pid in moved_set else 'blue'
         ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, s=50, zorder=3)
-
-        # Draw threshold radius
         circle = plt.Circle(final_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
         ax2.add_patch(circle)
-
-        # Draw movement vectors
         if pid in moved_set:
             start = graph.initial_positions[pid][:2]
             end = final_positions[pid][:2]
@@ -494,51 +535,223 @@ def visualize_solution(graph: InterferenceGraph,
     plt.show()
 
 
-# --- Example Usage ---
+def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray) -> Tuple[float, float]:
+    """Computes the physical lengths of lines after perspective scaling."""
+    orig_pos = np.array([point.x, point.y, point.z])
+    dist_old = np.linalg.norm(orig_pos - camera_pos)
+    dist_new = np.linalg.norm(new_pos - camera_pos)
+
+    if dist_old == 0:
+        return point.length_1, point.length_2
+
+    scale = dist_new / dist_old
+    return point.length_1 * scale, point.length_2 * scale
+
+
+def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[int, np.ndarray], camera_pos: np.ndarray):
+    """Saves the updated points (position and scaled lengths) to a YAML file."""
+    output_data = []
+    for p in points:
+        # Get new position (or original if not moved)
+        new_pos = positions.get(p.id, np.array([p.x, p.y, p.z]))
+
+        # Calculate new lengths based on perspective
+        l1_new, l2_new = calculate_scaled_lengths(p, new_pos, camera_pos)
+
+        p_dict = {
+            'id': p.id,
+            'x': float(new_pos[0]),
+            'y': float(new_pos[1]),
+            'z': float(new_pos[2]),
+            'length_1': float(l1_new),
+            'length_2': float(l2_new),
+            'angle_1': p.angle_1,
+            'angle_2': p.angle_2,
+            'max_length_limit': p.max_length_limit
+        }
+        output_data.append(p_dict)
+
+    try:
+        with open(filepath, 'w') as f:
+            yaml.dump({'points': output_data}, f, sort_keys=False)
+        logger.info(f"Saved {len(output_data)} updated points to {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to save output YAML: {e}")
+
+
+def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.ndarray], camera_pos: np.ndarray):
+    """
+    Visualizes points and their attached lines in 3D for both before and after states.
+    Shows the actual length (scaled by perspective) vs the max length limit.
+    """
+    try:
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+    except Exception as e:
+        logger.error(f"3D Visualization failed: {e}")
+        return
+
+    # Plot Camera
+    ax.scatter(camera_pos[0], camera_pos[1], camera_pos[2], c='k', marker='*', s=200, label='Camera')
+
+    # Helper to calculate vector tip based on body frame rules
+    def get_line_tip(cx, cy, cz, length, angle_deg):
+        # Body Frame Rotation: 0 deg = +Y, Axis = -X
+        rad = np.radians(angle_deg)
+        dy = length * np.cos(rad)
+        dz = -length * np.sin(rad)
+        dx = 0
+        return np.array([cx + dx, cy + dy, cz + dz])
+
+    def draw_structure(origin, length_1, length_2, max_len, angle_1, angle_2, color_main, alpha_main, style_main):
+        """Draws the lines for a point, showing filled length vs max length."""
+
+        # Line 1
+        # Max limit (Container)
+        tip1_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_1)
+        ax.plot([origin[0], tip1_max[0]], [origin[1], tip1_max[1]], [origin[2], tip1_max[2]],
+                color=color_main, alpha=0.15, linewidth=1, linestyle=':')
+
+        # Actual Length (Filler)
+        tip1_act = get_line_tip(origin[0], origin[1], origin[2], length_1, angle_1)
+        ax.plot([origin[0], tip1_act[0]], [origin[1], tip1_act[1]], [origin[2], tip1_act[2]],
+                color=color_main, alpha=alpha_main, linewidth=2, linestyle=style_main)
+
+        # Line 2
+        # Max limit (Container)
+        tip2_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_2)
+        ax.plot([origin[0], tip2_max[0]], [origin[1], tip2_max[1]], [origin[2], tip2_max[2]],
+                color=color_main, alpha=0.15, linewidth=1, linestyle=':')
+
+        # Actual Length (Filler)
+        tip2_act = get_line_tip(origin[0], origin[1], origin[2], length_2, angle_2)
+        ax.plot([origin[0], tip2_act[0]], [origin[1], tip2_act[1]], [origin[2], tip2_act[2]],
+                color=color_main, alpha=alpha_main, linewidth=2, linestyle=style_main)
+
+    for p in points:
+        orig_pos = np.array([p.x, p.y, p.z])
+        new_pos = final_positions.get(p.id, orig_pos)
+
+        has_moved = np.linalg.norm(orig_pos - new_pos) > 1e-6
+
+        # --- Plot Original State (Ghosted) ---
+        if has_moved:
+            ax.scatter(p.x, p.y, p.z, c='gray', marker='o', alpha=0.3)
+
+            # Draw Original Structure
+            # For the original state, physical length is exactly what is in p.length_1/_2
+            draw_structure(orig_pos, p.length_1, p.length_2, p.max_length_limit,
+                           p.angle_1, p.angle_2, 'gray', 0.3, '--')
+
+            # Arrow from Old to New
+            ax.plot([p.x, new_pos[0]], [p.y, new_pos[1]], [p.z, new_pos[2]],
+                    color='black', alpha=0.5, linestyle=':', linewidth=1)
+
+        # --- Plot Final State (Solid) ---
+        color = 'orange' if has_moved else 'blue'
+        ax.scatter(new_pos[0], new_pos[1], new_pos[2], c=color, marker='o', s=40,
+                   label=f"Point {p.id}" if p.id == 0 else "")
+        ax.text(new_pos[0], new_pos[1], new_pos[2], f" {p.id}", fontsize=9)
+
+        # Calculate new physical lengths based on perspective scaling
+        l1_final, l2_final = calculate_scaled_lengths(p, new_pos, camera_pos)
+
+        # Line 1 (Green-ish) - Max Limit then Actual
+        tip1_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_1)
+        ax.plot([new_pos[0], tip1_max[0]], [new_pos[1], tip1_max[1]], [new_pos[2], tip1_max[2]],
+                color='green', alpha=0.2, linewidth=1, linestyle=':')
+
+        tip1_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l1_final, p.angle_1)
+        ax.plot([new_pos[0], tip1_act[0]], [new_pos[1], tip1_act[1]], [new_pos[2], tip1_act[2]],
+                color='green', alpha=0.9, linewidth=2, linestyle='-')
+
+        # Line 2 (Magenta-ish) - Max Limit then Actual
+        tip2_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_2)
+        ax.plot([new_pos[0], tip2_max[0]], [new_pos[1], tip2_max[1]], [new_pos[2], tip2_max[2]],
+                color='magenta', alpha=0.2, linewidth=1, linestyle=':')
+
+        tip2_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l2_final, p.angle_2)
+        ax.plot([new_pos[0], tip2_act[0]], [new_pos[1], tip2_act[1]], [new_pos[2], tip2_act[2]],
+                color='magenta', alpha=0.9, linewidth=2, linestyle='-')
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title("3D Point Structure (Dotted=Max Limit, Solid=Scaled Length)")
+    ax.set_aspect('equal')
+    plt.show()
+
 
 if __name__ == "__main__":
-    # 1. Setup Data
-    points_data = []
-    np.random.seed(42)
-    for i in range(10):
-        points_data.append(Point3D(
-            id=i,
-            x=np.random.rand() * 10,
-            y=np.random.rand() * 10,
-            z=np.random.rand() * 5 + 10,
-            length_1=1.0,
-            length_2=0.5,
-            angle_1=np.random.rand() * 360,
-            angle_2=np.random.rand() * 360,
-            max_length_limit=4.0
-        ))
+    INPUT_FILE = "points_input.yaml"
+    OUTPUT_FILE = "points_output.yaml"
+    THRESHOLD = 0.16
+    CAMERA_POS = (2.3, 0.0, 0.8)
 
-    threshold = 2.0
-    camera = (5, 5, 0)
+    # 1. Generate Sample Data if it doesn't exist
+    if not os.path.exists(INPUT_FILE):
+        logger.info(f"Generating sample input file: {INPUT_FILE}")
+        sample_points = []
+        np.random.seed(42)
+        for i in range(4):
+            sample_points.append({
+                'id': i,
+                'x': float(np.random.rand() * 10),
+                'y': float(np.random.rand() * 10),
+                'z': float(np.random.rand() * 5 + 10),
+                'length_1': 1.5,
+                'length_2': 1.0,
+                'angle_1': float(np.random.rand() * 90),  # 0 to 90 deg
+                'angle_2': float(np.random.rand() * 90 + 180),  # 180 to 270 deg
+                'max_length_limit': 4.0
+            })
+        with open(INPUT_FILE, 'w') as f:
+            yaml.dump({'points': sample_points}, f)
 
-    # 2. Build Graph (Now computes adjacency internally)
-    graph = InterferenceGraph(points_data, threshold)
+    # 2. Load Data
+    points_data = load_points_from_yaml(INPUT_FILE)
 
-    # 3. Initialize Solver
-    solver = ModularInterferenceSolver(graph, camera)
+    if not points_data:
+        logger.error("No points loaded. Exiting.")
+        exit()
 
-    # 4. Run with Configuration
-    logger.info("--- Configuration 1: Greedy Degree + Radial + Away + Min Dist ---")
+    # 3. Build Graph
+    graph = InterferenceGraph(points_data, THRESHOLD)
+
+    # 4. Initialize Solver
+    solver = ModularInterferenceSolver(graph, CAMERA_POS)
+
+    # 5. Run with Configuration
+    logger.info("--- Configuration: Greedy Degree + Radial + HYBRID + Min Dist ---")
     moved, positions = solver.solve(
         selection_method=SelectionMethod.GREEDY_MAX_DEGREE,
         resolution_order=ResolutionOrder.MAX_DEGREE,
         trajectory_type=TrajectoryType.POINT_SPECIFIC,
-        move_direction=MoveDirection.AWAY_FROM_CAMERA,
+        move_direction=MoveDirection.HYBRID,
         placement_type=PlacementType.MIN_DISTANCE
     )
 
-    # Validation Output
+    # 6. Validation Output
     logger.info(f"Graph stats: {len(graph.nodes)} nodes, threshold {graph.threshold}")
     for pid in moved:
         orig = graph.initial_positions[pid]
         new = positions[pid]
         dist_3d = np.linalg.norm(new - orig)
-        logger.info(f"Point {pid} moved {dist_3d:.2f} units to {new}")
 
-    # Visualize results
-    visualize_solution(graph, moved, positions, np.array(camera))
+        # Calculate new lengths for reporting
+        p = graph.points[pid]
+        l1_new, l2_new = calculate_scaled_lengths(p, new, np.array(CAMERA_POS))
+
+        logger.info(f"Point {pid} moved {dist_3d:.2f} units to {new}")
+        logger.info(
+            f"  Perspective Scale: L1 {p.length_1:.2f}->{l1_new:.2f}, L2 {p.length_2:.2f}->{l2_new:.2f} (Max: {p.max_length_limit})")
+
+    # 7. Save Results
+    save_points_to_yaml(OUTPUT_FILE, points_data, positions, np.array(CAMERA_POS))
+
+    # 8. Visualize Results
+    # 2D Before/After
+    visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
+
+    # 3D Structure Visualization
+    visualize_3d_structure(points_data, positions, np.array(CAMERA_POS))
