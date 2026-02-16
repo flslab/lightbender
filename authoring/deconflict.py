@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
+
 # from logger.logger import setup_logging
 
 matplotlib.use('macosx')
@@ -560,9 +561,24 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
     for p in points:
         # Get new position (or original if not moved)
         new_pos = positions.get(p.id, np.array([p.x, p.y, p.z]))
+        orig_pos = np.array([p.x, p.y, p.z])
+
+        # Calculate distances
+        dist_old = np.linalg.norm(orig_pos - camera_pos)
+        dist_new = np.linalg.norm(new_pos - camera_pos)
+
+        # Determine scale factor
+        # Default to 1.0
+        scale_factor = 1.0
+
+        # Only calculate scale if point has effectively moved
+        if np.linalg.norm(new_pos - orig_pos) > 1e-6:
+            if dist_old > 1e-9:
+                scale_factor = dist_new / dist_old
 
         # Calculate new lengths based on perspective
-        l1_new, l2_new = calculate_scaled_lengths(p, new_pos, camera_pos)
+        l1_new = p.length_1 * scale_factor
+        l2_new = p.length_2 * scale_factor
 
         p_dict = {
             'id': p.id,
@@ -573,7 +589,8 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
             'length_2': float(l2_new),
             'angle_1': p.angle_1,
             'angle_2': p.angle_2,
-            'max_length_limit': p.max_length_limit
+            'max_length_limit': p.max_length_limit,
+            'scale_factor': float(scale_factor)
         }
         output_data.append(p_dict)
 
@@ -699,8 +716,10 @@ if __name__ == "__main__":
     # Files
     parser.add_argument("--input_file", type=str, default="points_input.yaml", help="Path to input YAML file")
     parser.add_argument("--output_file", type=str, default="points_output.yaml", help="Path to output YAML file")
-    parser.add_argument("--viz_2d_output_file", type=str, default="2d_viz.png", help="Path to output 2d visualization file")
-    parser.add_argument("--viz_3d_output_file", type=str, default="3d_viz.png", help="Path to output 3d visualization file")
+    parser.add_argument("--viz_2d_output_file", type=str, default="2d_viz.png",
+                        help="Path to output 2d visualization file")
+    parser.add_argument("--viz_3d_output_file", type=str, default="3d_viz.png",
+                        help="Path to output 3d visualization file")
 
     # Parameters
     parser.add_argument("--threshold", type=float, default=0.16, help="Interference threshold distance")
