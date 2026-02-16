@@ -14,8 +14,6 @@ class PerspectiveCamera:
         self.fov_deg = fov_deg
 
         # Intrinsic Parameters
-        # Assuming square pixels and center principal point
-        # fov = 2 * arctan(h / (2*f)) => f = h / (2 * tan(fov/2))
         self.f = (height / 2) / math.tan(math.radians(fov_deg / 2))
         self.cx = width / 2
         self.cy = height / 2
@@ -87,7 +85,7 @@ class SVGWriter:
         id_attr = f'id="{element_id}" ' if element_id else ''
         self.elements.append(
             f'<line {id_attr}x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-            f'stroke="{color}" stroke-width="{stroke_width}" stroke-opacity="{opacity}" />'
+            f'stroke="{color}" stroke-width="{stroke_width:.2f}" stroke-opacity="{opacity}" />'
         )
 
     def add_circle(self, cx, cy, r, color, fill_opacity=1.0):
@@ -147,7 +145,11 @@ def render_scene(yaml_input, svg_output, camera_pos):
     # 3. Setup SVG
     svg = SVGWriter(svg_output, WIDTH, HEIGHT)
 
+    # Base stroke width for lines
+    BASE_STROKE_WIDTH = 3.0
+
     # 4. Render
+    # Sort points by distance to camera
     points_with_dist = []
     for p in points_data:
         pos = np.array([p['x'], p['y'], p['z']])
@@ -160,6 +162,10 @@ def render_scene(yaml_input, svg_output, camera_pos):
         pid = p['id']
         origin = np.array([p['x'], p['y'], p['z']])
 
+        # Get scale factor (default 1.0 if not present)
+        scale_factor = p.get('scale_factor', 1.0)
+        current_stroke = BASE_STROKE_WIDTH * scale_factor
+
         proj_origin = cam.project_point(origin)
         if proj_origin is None:
             continue
@@ -170,7 +176,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         if proj_tip1:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip1[0], proj_tip1[1],
-                         color="green", stroke_width=3, opacity=0.8,
+                         color="green", stroke_width=current_stroke, opacity=0.8,
                          element_id=f"p{pid}_l1")
 
         # Line 2
@@ -179,7 +185,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         if proj_tip2:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip2[0], proj_tip2[1],
-                         color="magenta", stroke_width=3, opacity=0.8,
+                         color="magenta", stroke_width=current_stroke, opacity=0.8,
                          element_id=f"p{pid}_l2")
 
         svg.add_circle(proj_origin[0], proj_origin[1], 5, color="orange")
@@ -190,40 +196,51 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
 def compare_svgs(svg_file_1, svg_file_2):
     """
-    Parses two SVG files and reports the similarity (average pixel distance)
-    between corresponding line endpoints.
+    Parses two SVG files and reports the similarity based on:
+    1. Endpoint distance (pixels)
+    2. Stroke width difference (pixels)
+
+    Similarity is computed relative to the image diagonal to be resolution-independent.
     """
 
-    def parse_lines(filename):
+    def parse_svg_data(filename):
         if not os.path.exists(filename):
             print(f"Comparison File not found: {filename}")
-            return {}
+            return {}, 0.0
 
         try:
             tree = ET.parse(filename)
         except ET.ParseError as e:
             print(f"Failed to parse XML in {filename}: {e}")
-            return {}
+            return {}, 0.0
 
         root = tree.getroot()
-        # SVG elements are usually in a namespace
         ns = {'svg': 'http://www.w3.org/2000/svg'}
 
+        # Extract dimensions to calculate diagonal
+        try:
+            w = float(root.get('width', 1000))
+            h = float(root.get('height', 800))
+            diag = math.sqrt(w ** 2 + h ** 2)
+        except (ValueError, TypeError):
+            diag = 1280.6  # Default fallback diagonal
+
         lines = {}
-        # Find all lines in the default namespace
-        for line in root.findall('.//svg:line', ns):
+        # Try both namespaced and non-namespaced find
+        for line in root.findall('.//svg:line', ns) + root.findall('.//line'):
             lid = line.get('id')
             if lid:
                 try:
                     coords = [float(line.get(attr)) for attr in ['x1', 'y1', 'x2', 'y2']]
-                    lines[lid] = coords
+                    width = float(line.get('stroke-width', 1.0))
+                    lines[lid] = {'coords': coords, 'width': width}
                 except (ValueError, TypeError):
                     continue
-        return lines
+        return lines, diag
 
     print(f"\n--- Comparing SVG Files: {svg_file_1} vs {svg_file_2} ---")
-    set1 = parse_lines(svg_file_1)
-    set2 = parse_lines(svg_file_2)
+    set1, diag1 = parse_svg_data(svg_file_1)
+    set2, diag2 = parse_svg_data(svg_file_2)
 
     if not set1 or not set2:
         print("Comparison aborted: Could not extract lines from one or both files.")
@@ -234,27 +251,52 @@ def compare_svgs(svg_file_1, svg_file_2):
         print("No matching line IDs found. Ensure SVGs were generated with IDs.")
         return
 
-    total_diff = 0.0
-    num_endpoints = 0
+    # Use the diagonal from the first file (assuming identical resolution)
+    img_diagonal = diag1 if diag1 > 0 else 1.0
+
+    total_pos_diff = 0.0
+    total_width_diff = 0.0
+    num_lines = 0
 
     for lid in common_ids:
-        # l1 format: [x1, y1, x2, y2]
-        l1 = set1[lid]
-        l2 = set2[lid]
+        l1_data = set1[lid]
+        l2_data = set2[lid]
 
-        # Distance between Start Points
-        d_start = math.sqrt((l1[0] - l2[0]) ** 2 + (l1[1] - l2[1]) ** 2)
-        # Distance between End Points
-        d_end = math.sqrt((l1[2] - l2[2]) ** 2 + (l1[3] - l2[3]) ** 2)
+        c1 = l1_data['coords']
+        w1 = l1_data['width']
 
-        total_diff += (d_start + d_end)
-        num_endpoints += 2
+        c2 = l2_data['coords']
+        w2 = l2_data['width']
 
-    avg_diff = total_diff / num_endpoints if num_endpoints > 0 else 0.0
+        # Euclidean distance for endpoints
+        d_start = math.sqrt((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2)
+        d_end = math.sqrt((c1[2] - c2[2]) ** 2 + (c1[3] - c2[3]) ** 2)
 
-    print(f"Matched Lines: {len(common_ids)}")
-    print(f"Average Endpoint Difference: {avg_diff:.4f} pixels")
-    print(f"Similarity Score (1000 / (1000 + avg_diff)): {1000.0 / (1000.0 + avg_diff):.4f}")
+        # Absolute difference for width
+        d_width = abs(w1 - w2)
+
+        total_pos_diff += (d_start + d_end)
+        total_width_diff += d_width
+        num_lines += 1
+
+    # Metrics
+    # Average pixel error per feature
+    # Total features per line = 2 endpoints + 1 width check = 3
+    overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines * 3) if num_lines > 0 else 0.0
+
+    # Normalize error relative to image diagonal
+    normalized_error = overall_avg_pixel_error / img_diagonal
+
+    print(f"Matched Lines:           {len(common_ids)}")
+    print(f"Image Diagonal:          {img_diagonal:.2f} pixels")
+    print(f"Overall Avg Pixel Error: {overall_avg_pixel_error:.4f} pixels")
+    print(f"Normalized Error:        {normalized_error:.6f} (relative to diagonal)")
+
+    # Calculate score based on normalized error
+    # If error is 0, score is 1. If error is small (e.g. 1% of diagonal), score is ~0.99
+    score = 1.0 / (1.0 + normalized_error)
+
+    print(f"Similarity Score:        {score:.4f}")
     print("---------------------------------------------------")
 
 
