@@ -3,6 +3,8 @@ import yaml
 import math
 import os
 import xml.etree.ElementTree as ET
+import argparse
+import sys
 
 
 class PerspectiveCamera:
@@ -106,7 +108,6 @@ class SVGWriter:
             f.write(header + '\n')
             f.write('\n'.join(self.elements))
             f.write('\n' + footer)
-        print(f"SVG saved to {os.path.abspath(self.filename)}")
 
 
 def get_line_tip_geometry(cx, cy, cz, length, angle_deg):
@@ -124,7 +125,7 @@ def get_line_tip_geometry(cx, cy, cz, length, angle_deg):
 def render_scene(yaml_input, svg_output, camera_pos):
     # 1. Load Data
     if not os.path.exists(yaml_input):
-        print(f"Error: {yaml_input} not found.")
+        print(f"Error: {yaml_input} not found.", file=sys.stderr)
         return
 
     with open(yaml_input, 'r') as f:
@@ -132,14 +133,14 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
     points_data = data.get('points', [])
     if not points_data:
-        print("No points found in YAML.")
+        print("No points found in YAML.", file=sys.stderr)
         return
 
     # 2. Setup Camera
     positions = np.array([[p['x'], p['y'], p['z']] for p in points_data])
     centroid = np.mean(positions, axis=0)
 
-    WIDTH, HEIGHT = 1000, 800
+    WIDTH, HEIGHT = 1920, 1080
     cam = PerspectiveCamera(camera_pos, centroid, fov_deg=60, width=WIDTH, height=HEIGHT)
 
     # 3. Setup SVG
@@ -194,7 +195,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
     svg.save()
 
 
-def compare_svgs(svg_file_1, svg_file_2):
+def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     """
     Parses two SVG files and reports the similarity based on:
     1. Endpoint distance (pixels)
@@ -205,13 +206,13 @@ def compare_svgs(svg_file_1, svg_file_2):
 
     def parse_svg_data(filename):
         if not os.path.exists(filename):
-            print(f"Comparison File not found: {filename}")
+            if not csv_mode: print(f"Comparison File not found: {filename}")
             return {}, 0.0
 
         try:
             tree = ET.parse(filename)
         except ET.ParseError as e:
-            print(f"Failed to parse XML in {filename}: {e}")
+            if not csv_mode: print(f"Failed to parse XML in {filename}: {e}")
             return {}, 0.0
 
         root = tree.getroot()
@@ -219,11 +220,11 @@ def compare_svgs(svg_file_1, svg_file_2):
 
         # Extract dimensions to calculate diagonal
         try:
-            w = float(root.get('width', 1000))
-            h = float(root.get('height', 800))
+            w = float(root.get('width', 1920))
+            h = float(root.get('height', 1080))
             diag = math.sqrt(w ** 2 + h ** 2)
         except (ValueError, TypeError):
-            diag = 1280.6  # Default fallback diagonal
+            diag = math.sqrt(1920 ** 2 + 1080 ** 2)  # Default fallback diagonal
 
         lines = {}
         # Try both namespaced and non-namespaced find
@@ -238,17 +239,19 @@ def compare_svgs(svg_file_1, svg_file_2):
                     continue
         return lines, diag
 
-    print(f"\n--- Comparing SVG Files: {svg_file_1} vs {svg_file_2} ---")
+    if not csv_mode:
+        print(f"\n--- Comparing SVG Files: {svg_file_1} vs {svg_file_2} ---")
+
     set1, diag1 = parse_svg_data(svg_file_1)
     set2, diag2 = parse_svg_data(svg_file_2)
 
     if not set1 or not set2:
-        print("Comparison aborted: Could not extract lines from one or both files.")
+        if not csv_mode: print("Comparison aborted: Could not extract lines from one or both files.")
         return
 
     common_ids = set(set1.keys()) & set(set2.keys())
     if not common_ids:
-        print("No matching line IDs found. Ensure SVGs were generated with IDs.")
+        if not csv_mode: print("No matching line IDs found. Ensure SVGs were generated with IDs.")
         return
 
     # Use the diagonal from the first file (assuming identical resolution)
@@ -280,46 +283,78 @@ def compare_svgs(svg_file_1, svg_file_2):
         num_lines += 1
 
     # Metrics
-    # Average pixel error per feature
-    # Total features per line = 2 endpoints + 1 width check = 3
+    # Average position difference per endpoint (2 endpoints per line)
+    avg_pos_diff = total_pos_diff / (num_lines * 2) if num_lines > 0 else 0.0
+
+    # Average width difference per line
+    avg_width_diff = total_width_diff / num_lines if num_lines > 0 else 0.0
+
+    # Combined error (avg per feature: 2 endpoints + 1 width = 3)
     overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines * 3) if num_lines > 0 else 0.0
 
     # Normalize error relative to image diagonal
     normalized_error = overall_avg_pixel_error / img_diagonal
 
-    print(f"Matched Lines:           {len(common_ids)}")
-    print(f"Image Diagonal:          {img_diagonal:.2f} pixels")
-    print(f"Overall Avg Pixel Error: {overall_avg_pixel_error:.4f} pixels")
-    print(f"Normalized Error:        {normalized_error:.6f} (relative to diagonal)")
-
     # Calculate score based on normalized error
-    # If error is 0, score is 1. If error is small (e.g. 1% of diagonal), score is ~0.99
     score = 1.0 / (1.0 + normalized_error)
 
-    print(f"Similarity Score:        {score:.4f}")
-    print("---------------------------------------------------")
+    if csv_mode:
+        # CSV: MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore
+        print(
+            f"{len(common_ids)},{img_diagonal:.2f},{avg_pos_diff:.4f},{avg_width_diff:.4f},{overall_avg_pixel_error:.4f},{normalized_error:.6f},{score:.4f}")
+    else:
+        print(f"Matched Lines:           {len(common_ids)}")
+        print(f"Image Diagonal:          {img_diagonal:.2f} pixels")
+        print(f"Avg Endpoint Diff:       {avg_pos_diff:.4f} pixels")
+        print(f"Avg Stroke Width Diff:   {avg_width_diff:.4f} pixels")
+        print(f"Overall Avg Pixel Error: {overall_avg_pixel_error:.4f} pixels")
+        print(f"Normalized Error:        {normalized_error:.6f} (relative to diagonal)")
+        print(f"Similarity Score:        {score:.4f}")
+        print("---------------------------------------------------")
 
 
 if __name__ == "__main__":
-    # Configuration
-    CAMERA_POSITION = (2.3, 0.0, 0.8)
+    parser = argparse.ArgumentParser(description="Perspective Camera & SVG Comparison Tool")
 
-    FILE_BEFORE_YAML = "points_input.yaml"
-    FILE_AFTER_YAML = "points_output.yaml"
+    # Modes
+    parser.add_argument("--action", choices=['render', 'compare', 'demo'], default='demo',
+                        help="Action to perform: 'render' yaml to svg, 'compare' two svgs, or 'demo' default behavior")
 
-    SVG_BEFORE = "before.svg"
-    SVG_AFTER = "after.svg"
+    # Arguments
+    parser.add_argument("--input", type=str, help="Input file (YAML for render, SVG 1 for compare)")
+    parser.add_argument("--output", type=str, help="Output file (SVG for render, SVG 2 for compare)")
+    parser.add_argument("--camera_pos", type=float, nargs=3, default=[2.3, 0.0, 0.8], help="Camera Position x y z")
+    parser.add_argument("--csv", action="store_true", help="Output comparison metrics in CSV format")
 
-    # 1. Render 'Before' state if available
-    if os.path.exists(FILE_BEFORE_YAML):
-        print(f"Rendering Before State: {FILE_BEFORE_YAML}")
-        render_scene(FILE_BEFORE_YAML, SVG_BEFORE, CAMERA_POSITION)
+    args = parser.parse_args()
 
-    # 2. Render 'After' state if available
-    if os.path.exists(FILE_AFTER_YAML):
-        print(f"Rendering After State: {FILE_AFTER_YAML}")
-        render_scene(FILE_AFTER_YAML, SVG_AFTER, CAMERA_POSITION)
+    CAMERA_POS = tuple(args.camera_pos)
 
-    # 3. Compare if both SVGs exist
-    if os.path.exists(SVG_BEFORE) and os.path.exists(SVG_AFTER):
-        compare_svgs(SVG_BEFORE, SVG_AFTER)
+    if args.action == 'render':
+        if not args.input or not args.output:
+            print("Error: --input (YAML) and --output (SVG) required for render mode.")
+        else:
+            render_scene(args.input, args.output, CAMERA_POS)
+
+    elif args.action == 'compare':
+        if not args.input or not args.output:
+            print("Error: --input (SVG 1) and --output (SVG 2) required for compare mode.")
+        else:
+            compare_svgs(args.input, args.output, csv_mode=args.csv)
+
+    elif args.action == 'demo':
+        FILE_BEFORE_YAML = "points_input.yaml"
+        FILE_AFTER_YAML = "points_output.yaml"
+        SVG_BEFORE = "before.svg"
+        SVG_AFTER = "after.svg"
+
+        if os.path.exists(FILE_BEFORE_YAML):
+            print(f"Rendering Before State: {FILE_BEFORE_YAML}")
+            render_scene(FILE_BEFORE_YAML, SVG_BEFORE, CAMERA_POS)
+
+        if os.path.exists(FILE_AFTER_YAML):
+            print(f"Rendering After State: {FILE_AFTER_YAML}")
+            render_scene(FILE_AFTER_YAML, SVG_AFTER, CAMERA_POS)
+
+        if os.path.exists(SVG_BEFORE) and os.path.exists(SVG_AFTER):
+            compare_svgs(SVG_BEFORE, SVG_AFTER)
