@@ -377,8 +377,13 @@ class SwarmOrchestrator:
                 msg = self.pull_socket.recv_json()
                 if msg.get('status') == 'LANDED':
                     self._handle_landed_msg(msg)
+                if msg.get('status') == 'LOWBATTERY':
+                    self._handle_lowbattery_msg(msg)
             except zmq.Again:
                 continue
+
+    def _handle_lowbattery_msg(self, msg):
+        self.pub_socket.send_json({"cmd": "START"})
 
     def _handle_landed_msg(self, msg):
         d_id = msg['id']

@@ -124,6 +124,7 @@ class Controller:
         self.voltage = None
         self.deck_attached_event = Event()
         self.battery_critical = Event()
+        self.fake_battery_critical = Event()
         self.mission_start_time = 0
         self.mission_duration = 0
         self.animation_start_time = 0
@@ -634,9 +635,14 @@ class Controller:
                 target_time = self.animation_start_time + elapsed_time + duration
                 sleep_duration = target_time - time.time()
                 elapsed_time += duration
+
+                # Fake battery critical
+                if i == 2:
+                    self.fake_battery_critical.set()
+
                 # If we are ahead of schedule, sleep the difference
                 if sleep_duration > 0:
-                    self._safe_sleep(sleep_duration)
+                    self._safe_sleep(sleep_duration, waypoints, i)
                 else:
                     # If sleep_duration is negative, we are lagging behind!
                     logger.warning(f"Lagging behind by {abs(sleep_duration):.3f}s")
@@ -723,7 +729,7 @@ class Controller:
         if self.led:
             self.led.show_single_color((230, 20, 20))
 
-    def _safe_sleep_orchestrated(self, duration):
+    def _safe_sleep_orchestrated(self, duration, waypoints, waypoint_idx):
         """
         Sleeps for 'duration' seconds, but interrupts IMMEDIATELY for:
         1. Low Battery
@@ -744,6 +750,17 @@ class Controller:
             if self.battery_critical.is_set():
                 self._prepare_for_emergency_landing()
                 raise LowBatteryException(f"Battery Critical: {self.voltage:.2f}V")
+            
+            if self.fake_battery_critical.is_set():
+
+                try:
+                    self.push_socket.send_json({
+                        "id": self.args.drone_id,
+                        "status": "LOWBATTERY",
+                    })
+                    logger.info("Sent low battery message to orchestrator")
+                except Exception as e:
+                    logger.exception(f"Failed to send low battery message: {e}")
 
             # Wait for ZMQ Message OR Timeout
             # take the smaller of: 100ms OR remaining time
