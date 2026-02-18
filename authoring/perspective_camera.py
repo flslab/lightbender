@@ -179,7 +179,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         # Get scale factor (default 1.0 if not present)
         scale_factor = p.get('scale_factor', 1.0)
-        current_stroke = BASE_STROKE_WIDTH * scale_factor
+        current_stroke = BASE_STROKE_WIDTH / scale_factor
 
         proj_origin = cam.project_point(origin)
         if proj_origin is None:
