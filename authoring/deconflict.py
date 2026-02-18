@@ -329,7 +329,7 @@ class ResolutionStrategy:
         original_pos = graph.initial_positions[pid]
 
         # Define search steps
-        step_size = 0.1
+        step_size = 0.01
         max_steps = 400  # Safety break
 
         logger.info(f"    Resolving Point {pid}. Trajectory: {traj_vec}, Directions: {search_directions}")
@@ -751,6 +751,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--no_viz", action='store_true', help="Disable visualization")
     parser.add_argument("--save_viz", action='store_true', help="Save visualization as files")
+    parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()
 
@@ -811,12 +812,19 @@ if __name__ == "__main__":
         placement_type=place_type
     )
 
-    # 6. Validation Output
+    # 6. Validation Output & Metrics
     logger.info(f"Graph stats: {len(graph.nodes)} nodes, threshold {graph.threshold}")
+
+    moved_distances = []
+
     for pid in moved:
         orig = graph.initial_positions[pid]
         new = positions[pid]
         dist_3d = np.linalg.norm(new - orig)
+
+        # Track distance if actually moved
+        if dist_3d > 1e-6:
+            moved_distances.append(dist_3d)
 
         # Calculate new lengths for reporting
         p = graph.points[pid]
@@ -825,6 +833,32 @@ if __name__ == "__main__":
         logger.info(f"Point {pid} moved {dist_3d:.2f} units to {new}")
         logger.info(
             f"  Perspective Scale: L1 {p.length_1:.2f}->{l1_new:.2f}, L2 {p.length_2:.2f}->{l2_new:.2f} (Max: {p.max_length_limit})")
+
+    # Metrics Calculation
+    num_selected = len(moved)
+    num_moved = len(moved_distances)
+
+    if num_moved > 0:
+        avg_dist = float(np.mean(moved_distances))
+        min_dist = float(np.min(moved_distances))
+        max_dist = float(np.max(moved_distances))
+    else:
+        avg_dist = 0.0
+        min_dist = 0.0
+        max_dist = 0.0
+
+    if args.csv:
+        # CSV format: PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
+        print(f"{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+    else:
+        logger.info("=" * 40)
+        logger.info("METRICS SUMMARY")
+        logger.info(f"Points Selected to Move: {num_selected}")
+        logger.info(f"Points Actually Moved:   {num_moved}")
+        logger.info(f"Travel Distance - Avg:   {avg_dist:.4f}")
+        logger.info(f"Travel Distance - Min:   {min_dist:.4f}")
+        logger.info(f"Travel Distance - Max:   {max_dist:.4f}")
+        logger.info("=" * 40)
 
     # 7. Save Results
     save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS))
