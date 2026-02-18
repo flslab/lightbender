@@ -110,16 +110,29 @@ class SVGWriter:
             f.write('\n' + footer)
 
 
-def get_line_tip_geometry(cx, cy, cz, length, angle_deg):
+def get_line_tip_geometry(cx, cy, cz, length, angle_deg, yaw_deg):
     """
-    Reconstructs the 3D tip of the line based on Body Frame rules.
-    Rule: 0 deg = +Y, Axis = -X.
+    Reconstructs the 3D tip of the line based on Body Frame rules + Yaw.
+    Rule: Body Frame 0 deg = +Y, Axis = -X.
+    Yaw: Rotation about Global +Z.
     """
     rad = np.radians(angle_deg)
-    dy = length * np.cos(rad)
-    dz = -length * np.sin(rad)
-    dx = 0
-    return np.array([cx + dx, cy + dy, cz + dz])
+    # Local Body Frame
+    dy_local = length * np.cos(rad)
+    dz_local = -length * np.sin(rad)
+    dx_local = 0.0
+
+    # Apply Yaw Rotation (around +Z)
+    rad_yaw = np.radians(yaw_deg)
+    cos_y = np.cos(rad_yaw)
+    sin_y = np.sin(rad_yaw)
+
+    # RotZ * [dx, dy, dz]^T
+    dx_rot = dx_local * cos_y - dy_local * sin_y
+    dy_rot = dx_local * sin_y + dy_local * cos_y
+    dz_rot = dz_local
+
+    return np.array([cx + dx_rot, cy + dy_rot, cz + dz_rot])
 
 
 def render_scene(yaml_input, svg_output, camera_pos):
@@ -162,6 +175,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
     for _, p in points_with_dist:
         pid = p['id']
         origin = np.array([p['x'], p['y'], p['z']])
+        yaw = p.get('yaw', 0.0)  # Default yaw is 0
 
         # Get scale factor (default 1.0 if not present)
         scale_factor = p.get('scale_factor', 1.0)
@@ -172,7 +186,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
             continue
 
         # Line 1
-        tip1_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_1'], p['angle_1'])
+        tip1_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_1'], p['angle_1'], yaw)
         proj_tip1 = cam.project_point(tip1_3d)
 
         if proj_tip1:
@@ -181,7 +195,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
                          element_id=f"p{pid}_l1")
 
         # Line 2
-        tip2_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_2'], p['angle_2'])
+        tip2_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_2'], p['angle_2'], yaw)
         proj_tip2 = cam.project_point(tip2_3d)
 
         if proj_tip2:
@@ -201,7 +215,8 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     1. Endpoint distance (pixels)
     2. Stroke width difference (pixels)
 
-    Similarity is computed relative to the image diagonal to be resolution-independent.
+    Similarity is computed using Exponential Decay on the normalized error.
+    Score = exp(- Sensitivity * NormalizedError)
     """
 
     def parse_svg_data(filename):
@@ -283,7 +298,8 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         num_lines += 1
 
     # Metrics
-    # Average position difference per endpoint (2 endpoints per line)
+    # Average pixel error per feature
+    # Total features per line = 2 endpoints + 1 width check = 3
     avg_pos_diff = total_pos_diff / (num_lines * 2) if num_lines > 0 else 0.0
 
     # Average width difference per line
@@ -295,8 +311,13 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     # Normalize error relative to image diagonal
     normalized_error = overall_avg_pixel_error / img_diagonal
 
-    # Calculate score based on normalized error
-    score = 1.0 / (1.0 + normalized_error)
+    # --- Score Calculation (Exponential Decay) ---
+    # Sensitivity factor: Determines how fast the score drops.
+    # Alpha = 100 means:
+    #   Normalized Error = 0.01 (1%)  -> Score ~ 0.36
+    #   Normalized Error = 0.001 (0.1%) -> Score ~ 0.90
+    sensitivity_alpha = 100.0
+    score = math.exp(-sensitivity_alpha * normalized_error)
 
     if csv_mode:
         # CSV: MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore
@@ -309,7 +330,7 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         print(f"Avg Stroke Width Diff:   {avg_width_diff:.4f} pixels")
         print(f"Overall Avg Pixel Error: {overall_avg_pixel_error:.4f} pixels")
         print(f"Normalized Error:        {normalized_error:.6f} (relative to diagonal)")
-        print(f"Similarity Score:        {score:.4f}")
+        print(f"Similarity Score:        {score:.4f} (Exponential Decay)")
         print("---------------------------------------------------")
 
 
