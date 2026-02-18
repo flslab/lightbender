@@ -7,13 +7,12 @@ import matplotlib
 import logging
 import yaml
 import os
-import argparse  # Added for argument parsing
+import argparse
 from mpl_toolkits.mplot3d import Axes3D  # Required for 3D plotting
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
-
 # from logger.logger import setup_logging
 
 matplotlib.use('macosx')
@@ -35,6 +34,7 @@ class Point3D:
     length_2: float
     angle_1: float  # Angle in degrees
     angle_2: float  # Angle in degrees
+    yaw: float  # Yaw in degrees (Rotation about +Z)
     max_length_limit: float
 
     @property
@@ -474,6 +474,7 @@ def load_points_from_yaml(filepath: str) -> List[Point3D]:
             length_2=p_data.get('length_2', 1.0),
             angle_1=p_data.get('angle_1', 0.0),
             angle_2=p_data.get('angle_2', 0.0),
+            yaw=p_data.get('yaw', 0.0),  # Default Yaw is 0.0
             max_length_limit=p_data.get('max_length_limit', 10.0)
         ))
     logger.info(f"Loaded {len(points)} points from {filepath}")
@@ -568,7 +569,6 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
         dist_new = np.linalg.norm(new_pos - camera_pos)
 
         # Determine scale factor
-        # Default to 1.0
         scale_factor = 1.0
 
         # Only calculate scale if point has effectively moved
@@ -589,6 +589,7 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
             'length_2': float(l2_new),
             'angle_1': p.angle_1,
             'angle_2': p.angle_2,
+            'yaw': p.yaw,  # Preserve yaw
             'max_length_limit': p.max_length_limit,
             'scale_factor': float(scale_factor)
         }
@@ -617,37 +618,48 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     # Plot Camera
     ax.scatter(camera_pos[0], camera_pos[1], camera_pos[2], c='k', marker='*', s=200, label='Camera')
 
-    # Helper to calculate vector tip based on body frame rules
-    def get_line_tip(cx, cy, cz, length, angle_deg):
-        # Body Frame Rotation: 0 deg = +Y, Axis = -X
+    # Helper to calculate vector tip based on body frame rules + Yaw
+    def get_line_tip(cx, cy, cz, length, angle_deg, yaw_deg):
+        # 1. Local Body Frame (Rotation axis -X, Zero Angle +Y)
         rad = np.radians(angle_deg)
-        dy = length * np.cos(rad)
-        dz = -length * np.sin(rad)
-        dx = 0
-        return np.array([cx + dx, cy + dy, cz + dz])
+        dy_local = length * np.cos(rad)
+        dz_local = -length * np.sin(rad)
+        dx_local = 0.0
 
-    def draw_structure(origin, length_1, length_2, max_len, angle_1, angle_2, color_main, alpha_main, style_main):
+        # 2. Apply Yaw Rotation (around +Z)
+        rad_yaw = np.radians(yaw_deg)
+        cos_y = np.cos(rad_yaw)
+        sin_y = np.sin(rad_yaw)
+
+        # RotZ * [dx, dy, dz]^T
+        dx_rot = dx_local * cos_y - dy_local * sin_y
+        dy_rot = dx_local * sin_y + dy_local * cos_y
+        dz_rot = dz_local
+
+        return np.array([cx + dx_rot, cy + dy_rot, cz + dz_rot])
+
+    def draw_structure(origin, length_1, length_2, max_len, angle_1, angle_2, yaw, color_main, alpha_main, style_main):
         """Draws the lines for a point, showing filled length vs max length."""
 
         # Line 1
         # Max limit (Container)
-        tip1_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_1)
+        tip1_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_1, yaw)
         ax.plot([origin[0], tip1_max[0]], [origin[1], tip1_max[1]], [origin[2], tip1_max[2]],
                 color=color_main, alpha=0.15, linewidth=1, linestyle=':')
 
         # Actual Length (Filler)
-        tip1_act = get_line_tip(origin[0], origin[1], origin[2], length_1, angle_1)
+        tip1_act = get_line_tip(origin[0], origin[1], origin[2], length_1, angle_1, yaw)
         ax.plot([origin[0], tip1_act[0]], [origin[1], tip1_act[1]], [origin[2], tip1_act[2]],
                 color=color_main, alpha=alpha_main, linewidth=2, linestyle=style_main)
 
         # Line 2
         # Max limit (Container)
-        tip2_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_2)
+        tip2_max = get_line_tip(origin[0], origin[1], origin[2], max_len, angle_2, yaw)
         ax.plot([origin[0], tip2_max[0]], [origin[1], tip2_max[1]], [origin[2], tip2_max[2]],
                 color=color_main, alpha=0.15, linewidth=1, linestyle=':')
 
         # Actual Length (Filler)
-        tip2_act = get_line_tip(origin[0], origin[1], origin[2], length_2, angle_2)
+        tip2_act = get_line_tip(origin[0], origin[1], origin[2], length_2, angle_2, yaw)
         ax.plot([origin[0], tip2_act[0]], [origin[1], tip2_act[1]], [origin[2], tip2_act[2]],
                 color=color_main, alpha=alpha_main, linewidth=2, linestyle=style_main)
 
@@ -664,7 +676,7 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
             # Draw Original Structure
             # For the original state, physical length is exactly what is in p.length_1/_2
             draw_structure(orig_pos, p.length_1, p.length_2, p.max_length_limit,
-                           p.angle_1, p.angle_2, 'gray', 0.3, '--')
+                           p.angle_1, p.angle_2, p.yaw, 'gray', 0.3, '--')
 
             # Arrow from Old to New
             ax.plot([p.x, new_pos[0]], [p.y, new_pos[1]], [p.z, new_pos[2]],
@@ -680,20 +692,20 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
         l1_final, l2_final = calculate_scaled_lengths(p, new_pos, camera_pos)
 
         # Line 1 (Green-ish) - Max Limit then Actual
-        tip1_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_1)
+        tip1_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_1, p.yaw)
         ax.plot([new_pos[0], tip1_max[0]], [new_pos[1], tip1_max[1]], [new_pos[2], tip1_max[2]],
                 color='green', alpha=0.2, linewidth=1, linestyle=':')
 
-        tip1_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l1_final, p.angle_1)
+        tip1_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l1_final, p.angle_1, p.yaw)
         ax.plot([new_pos[0], tip1_act[0]], [new_pos[1], tip1_act[1]], [new_pos[2], tip1_act[2]],
                 color='green', alpha=0.9, linewidth=2, linestyle='-')
 
         # Line 2 (Magenta-ish) - Max Limit then Actual
-        tip2_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_2)
+        tip2_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_2, p.yaw)
         ax.plot([new_pos[0], tip2_max[0]], [new_pos[1], tip2_max[1]], [new_pos[2], tip2_max[2]],
                 color='magenta', alpha=0.2, linewidth=1, linestyle=':')
 
-        tip2_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l2_final, p.angle_2)
+        tip2_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l2_final, p.angle_2, p.yaw)
         ax.plot([new_pos[0], tip2_act[0]], [new_pos[1], tip2_act[1]], [new_pos[2], tip2_act[2]],
                 color='magenta', alpha=0.9, linewidth=2, linestyle='-')
 
@@ -766,6 +778,7 @@ if __name__ == "__main__":
                 'length_2': 1.0,
                 'angle_1': float(np.random.rand() * 90),
                 'angle_2': float(np.random.rand() * 90 + 180),
+                'yaw': float(np.random.rand() * 360),  # Random Yaw
                 'max_length_limit': 4.0
             })
         try:
