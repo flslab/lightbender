@@ -89,6 +89,45 @@ class InterferenceGraph:
         return self.points[node_id].z
 
 
+# --- Helper Functions for Perspective Logic ---
+
+def get_optical_axis(points: List[Point3D], camera_pos: np.ndarray) -> np.ndarray:
+    """Computes the optical axis by connecting camera to points centroid."""
+    if not points:
+        return np.array([0, 0, 1])
+    positions = np.array([p.position for p in points])
+    centroid = np.mean(positions, axis=0)
+    axis = centroid - camera_pos
+    norm = np.linalg.norm(axis)
+    if norm < 1e-9:
+        return np.array([0, 0, 1])
+    return axis / norm
+
+
+def calculate_perspective_scale(orig_pos: np.ndarray, new_pos: np.ndarray, camera_pos: np.ndarray,
+                                optical_axis: np.ndarray) -> float:
+    """
+    Calculates scale factor based on distance projected along the optical axis.
+    Scale = Dist_New / Dist_Old (where Dist is projection onto optical axis).
+    """
+    # Project vector from camera to point onto the optical axis
+    dist_old = np.dot(orig_pos - camera_pos, optical_axis)
+    dist_new = np.dot(new_pos - camera_pos, optical_axis)
+
+    if dist_old <= 1e-9:
+        return 1.0  # Avoid division by zero
+
+    return dist_new / dist_old
+
+
+def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray, optical_axis: np.ndarray) -> \
+Tuple[float, float]:
+    """Computes the physical lengths of lines after perspective scaling using optical axis distance."""
+    orig_pos = np.array([point.x, point.y, point.z])
+    scale = calculate_perspective_scale(orig_pos, new_pos, camera_pos, optical_axis)
+    return point.length_1 * scale, point.length_2 * scale
+
+
 # --- Enums for Configuration ---
 
 class SelectionMethod(Enum):
@@ -226,6 +265,7 @@ class ResolutionStrategy:
                  direction: MoveDirection,
                  placement: PlacementType,
                  camera_pos: np.ndarray,
+                 optical_axis: np.ndarray,
                  threshold: float,
                  layer_config: dict = None):
         self.order = order
@@ -233,6 +273,7 @@ class ResolutionStrategy:
         self.direction = direction
         self.placement = placement
         self.camera_pos = camera_pos
+        self.optical_axis = optical_axis
         self.threshold = threshold
         self.layer_config = layer_config or {'count': 5, 'spacing': 0.2}
 
@@ -248,12 +289,8 @@ class ResolutionStrategy:
         # Pre-calculate global vector if needed
         global_vec = None
         if self.trajectory == TrajectoryType.GLOBAL_CENTROID:
-            centroid = np.mean([p.position for p in graph.points.values()], axis=0)
-            global_vec = centroid - self.camera_pos
-            if np.linalg.norm(global_vec) > 0:
-                global_vec /= np.linalg.norm(global_vec)
-            else:
-                global_vec = np.array([0, 0, 1])
+            # Global Centroid vector is simply the optical axis
+            global_vec = self.optical_axis
 
         # 3. Process each point
         for pid in ordered_points:
@@ -307,18 +344,13 @@ class ResolutionStrategy:
     def _check_perspective_constraint(self, point_data: Point3D, current_pos: np.ndarray, new_pos: np.ndarray) -> bool:
         """
         Checks if the new position violates the max length constraint based on perspective scaling.
-        L_new = L_original * (dist_new / dist_original)
+        L_new = L_original * (dist_new / dist_original) using optical axis distance.
         """
-        dist_old = np.linalg.norm(current_pos - self.camera_pos)
-        dist_new = np.linalg.norm(new_pos - self.camera_pos)
-
-        if dist_old == 0: return True
-
-        scale_factor = dist_new / dist_old
+        scale = calculate_perspective_scale(current_pos, new_pos, self.camera_pos, self.optical_axis)
 
         # Check both lengths
-        l1_new = point_data.length_1 * scale_factor
-        l2_new = point_data.length_2 * scale_factor
+        l1_new = point_data.length_1 * scale
+        l2_new = point_data.length_2 * scale
 
         if l1_new > point_data.max_length_limit or l2_new > point_data.max_length_limit:
             # We don't log this as debug constantly because HYBRID/TOWARDS might trigger it often
@@ -405,6 +437,9 @@ class ModularInterferenceSolver:
                  camera_pos: Tuple[float, float, float]):
         self.graph = graph
         self.camera_pos = np.array(camera_pos)
+        # Compute optical axis once at initialization
+        self.optical_axis = get_optical_axis(list(graph.points.values()), self.camera_pos)
+        logger.info(f"Optical Axis Computed: {self.optical_axis}")
 
     def solve(self,
               selection_method: SelectionMethod,
@@ -428,6 +463,7 @@ class ModularInterferenceSolver:
             direction=move_direction,
             placement=placement_type,
             camera_pos=self.camera_pos,
+            optical_axis=self.optical_axis,
             threshold=self.graph.threshold,
             layer_config=layer_config
         )
@@ -479,6 +515,45 @@ def load_points_from_yaml(filepath: str) -> List[Point3D]:
         ))
     logger.info(f"Loaded {len(points)} points from {filepath}")
     return points
+
+
+def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[int, np.ndarray], camera_pos: np.ndarray,
+                        optical_axis: np.ndarray):
+    """Saves the updated points (position and scaled lengths) to a YAML file."""
+    output_data = []
+    for p in points:
+        # Get new position (or original if not moved)
+        new_pos = positions.get(p.id, np.array([p.x, p.y, p.z]))
+        orig_pos = np.array([p.x, p.y, p.z])
+
+        # Determine scale factor based on optical axis distance
+        scale_factor = calculate_perspective_scale(orig_pos, new_pos, camera_pos, optical_axis)
+
+        # Calculate new lengths based on perspective
+        l1_new = p.length_1 * scale_factor
+        l2_new = p.length_2 * scale_factor
+
+        p_dict = {
+            'id': p.id,
+            'x': float(new_pos[0]),
+            'y': float(new_pos[1]),
+            'z': float(new_pos[2]),
+            'length_1': float(l1_new),
+            'length_2': float(l2_new),
+            'angle_1': p.angle_1,
+            'angle_2': p.angle_2,
+            'yaw': p.yaw,  # Preserve yaw
+            'max_length_limit': p.max_length_limit,
+            'scale_factor': float(scale_factor)
+        }
+        output_data.append(p_dict)
+
+    try:
+        with open(filepath, 'w') as f:
+            yaml.dump({'points': output_data}, f, sort_keys=False)
+        logger.info(f"Saved {len(output_data)} updated points to {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to save output YAML: {e}")
 
 
 def visualize_solution_2d(graph: InterferenceGraph,
@@ -543,67 +618,8 @@ def visualize_solution_2d(graph: InterferenceGraph,
         plt.show()
 
 
-def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray) -> Tuple[float, float]:
-    """Computes the physical lengths of lines after perspective scaling."""
-    orig_pos = np.array([point.x, point.y, point.z])
-    dist_old = np.linalg.norm(orig_pos - camera_pos)
-    dist_new = np.linalg.norm(new_pos - camera_pos)
-
-    if dist_old == 0:
-        return point.length_1, point.length_2
-
-    scale = dist_new / dist_old
-    return point.length_1 * scale, point.length_2 * scale
-
-
-def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[int, np.ndarray], camera_pos: np.ndarray):
-    """Saves the updated points (position and scaled lengths) to a YAML file."""
-    output_data = []
-    for p in points:
-        # Get new position (or original if not moved)
-        new_pos = positions.get(p.id, np.array([p.x, p.y, p.z]))
-        orig_pos = np.array([p.x, p.y, p.z])
-
-        # Calculate distances
-        dist_old = np.linalg.norm(orig_pos - camera_pos)
-        dist_new = np.linalg.norm(new_pos - camera_pos)
-
-        # Determine scale factor
-        scale_factor = 1.0
-
-        # Only calculate scale if point has effectively moved
-        if np.linalg.norm(new_pos - orig_pos) > 1e-6:
-            if dist_old > 1e-9:
-                scale_factor = dist_new / dist_old
-
-        # Calculate new lengths based on perspective
-        l1_new = p.length_1 * scale_factor
-        l2_new = p.length_2 * scale_factor
-
-        p_dict = {
-            'id': p.id,
-            'x': float(new_pos[0]),
-            'y': float(new_pos[1]),
-            'z': float(new_pos[2]),
-            'length_1': float(l1_new),
-            'length_2': float(l2_new),
-            'angle_1': p.angle_1,
-            'angle_2': p.angle_2,
-            'yaw': p.yaw,  # Preserve yaw
-            'max_length_limit': p.max_length_limit,
-            'scale_factor': float(scale_factor)
-        }
-        output_data.append(p_dict)
-
-    try:
-        with open(filepath, 'w') as f:
-            yaml.dump({'points': output_data}, f, sort_keys=False)
-        logger.info(f"Saved {len(output_data)} updated points to {filepath}")
-    except Exception as e:
-        logger.error(f"Failed to save output YAML: {e}")
-
-
-def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.ndarray], camera_pos: np.ndarray):
+def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.ndarray], camera_pos: np.ndarray,
+                           optical_axis: np.ndarray):
     """
     Visualizes points and their attached lines in 3D for both before and after states.
     Shows the actual length (scaled by perspective) vs the max length limit.
@@ -617,6 +633,9 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
 
     # Plot Camera
     ax.scatter(camera_pos[0], camera_pos[1], camera_pos[2], c='k', marker='*', s=200, label='Camera')
+
+    # Plot Optical Axis (optional, for debugging)
+    # ax.quiver(camera_pos[0], camera_pos[1], camera_pos[2], optical_axis[0], optical_axis[1], optical_axis[2], length=2.0, color='r', alpha=0.5, label="Optical Axis")
 
     # Helper to calculate vector tip based on body frame rules + Yaw
     def get_line_tip(cx, cy, cz, length, angle_deg, yaw_deg):
@@ -674,7 +693,6 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
             ax.scatter(p.x, p.y, p.z, c='gray', marker='o', alpha=0.3)
 
             # Draw Original Structure
-            # For the original state, physical length is exactly what is in p.length_1/_2
             draw_structure(orig_pos, p.length_1, p.length_2, p.max_length_limit,
                            p.angle_1, p.angle_2, p.yaw, 'gray', 0.3, '--')
 
@@ -688,8 +706,8 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
                    label=f"Point {p.id}" if p.id == 0 else "")
         ax.text(new_pos[0], new_pos[1], new_pos[2], f" {p.id}", fontsize=9)
 
-        # Calculate new physical lengths based on perspective scaling
-        l1_final, l2_final = calculate_scaled_lengths(p, new_pos, camera_pos)
+        # Calculate new physical lengths based on perspective scaling using optical axis
+        l1_final, l2_final = calculate_scaled_lengths(p, new_pos, camera_pos, optical_axis)
 
         # Line 1 (Green-ish) - Max Limit then Actual
         tip1_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_1, p.yaw)
@@ -817,6 +835,9 @@ if __name__ == "__main__":
 
     moved_distances = []
 
+    # Retrieve computed optical axis from solver for consistent reporting
+    OPTICAL_AXIS = solver.optical_axis
+
     for pid in moved:
         orig = graph.initial_positions[pid]
         new = positions[pid]
@@ -828,7 +849,7 @@ if __name__ == "__main__":
 
         # Calculate new lengths for reporting
         p = graph.points[pid]
-        l1_new, l2_new = calculate_scaled_lengths(p, new, np.array(CAMERA_POS))
+        l1_new, l2_new = calculate_scaled_lengths(p, new, np.array(CAMERA_POS), OPTICAL_AXIS)
 
         logger.info(f"Point {pid} moved {dist_3d:.2f} units to {new}")
         logger.info(
@@ -861,11 +882,11 @@ if __name__ == "__main__":
         logger.info("=" * 40)
 
     # 7. Save Results
-    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS))
+    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
 
     # 8. Visualize Results (Optional)
     if not args.no_viz:
         # 2D Before/After
         visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
         # 3D Structure Visualization
-        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS))
+        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
