@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "HA",
-    "version": (1, 8),
+    "version": (1, 11),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create light-element drones, animate LEDs with pointers, and export YAML",
@@ -10,6 +10,7 @@ bl_info = {
 
 import bpy
 import math
+import bmesh
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
     CollectionProperty
 from bpy.app.handlers import persistent
@@ -28,7 +29,7 @@ class LEDPointer(bpy.types.PropertyGroup):
         description="Index location of the pointer",
         default=10.0,
         soft_min=0.0,
-        soft_max=50.0
+        soft_max=59.0
     )
     # Color expression for the segment starting at this pointer
     color_expression: StringProperty(
@@ -43,8 +44,10 @@ class DroneProperties(bpy.types.PropertyGroup):
         name="Type",
         description="Light Element Type",
         items=[
-            ('TYPE_H', "Type H (0-180, 180-360)", "Segment 1: 0-180, Segment 2: 180-360"),
-            ('TYPE_V', "Type V (90-270, 270-450)", "Segment 1: 90-270, Segment 2: 270-450"),
+            ('TYPE_H', "Type H (Rod)", "Segment 1: 0-180, Segment 2: 180-360"),
+            ('TYPE_V', "Type V (Rod)", "Segment 1: 90-270, Segment 2: 270-450"),
+            ('TYPE_SEMI_H', "Semicircle H", "Arc: 0-180 (One Servo)"),
+            ('TYPE_SEMI_V', "Semicircle V", "Arc: 90-270 (One Servo)"),
         ],
         default='TYPE_H'
     )
@@ -135,114 +138,266 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         items=[
             ('TYPE_H', "Type H", "Segment 1: 0-180, Segment 2: 180-360"),
             ('TYPE_V', "Type V", "Segments 1: 90-270, Segment 2: 270-450"),
+            ('TYPE_SEMI_H', "Semicircle H", "Arc: 0-180"),
+            ('TYPE_SEMI_V', "Semicircle V", "Arc: 90-270"),
         ],
         default='TYPE_H'
     )
 
+    def create_arc_geometry(self, context, drone_base):
+        """Creates the Semicircle geometry and LEDs using BMesh"""
+        # Specs: R_outer=150mm, R_inner=147mm. Thickness=3mm.
+        # Mid Radius = 148.5mm = 0.1485m
+        R = 0.1485
+        W = 0.003
+        THICK = 0.003
+
+        # Shift Factor: Move rotation center to the midpoint of the arc.
+        # Original logic centered the circle at (0,0,0).
+        # Midpoint of arc (at angle pi/2) was at z = -R.
+        # To make midpoint (0,0,0), we add R to Z coordinates.
+        Z_SHIFT = R
+
+        # Create Mesh for the Arc Structure
+        mesh = bpy.data.meshes.new("Semicircle_Arc")
+        bm = bmesh.new()
+
+        # Geometry Math:
+        # Range: 3 o'clock (-Y) -> 6 o'clock (-Z) -> 9 o'clock (+Y)
+        # This matches angle 0 to 180 degrees (0 to pi radians)
+        # Y = -R * cos(alpha)
+        # Z = -R * sin(alpha) + Z_SHIFT
+
+        segments = 64
+        angle_start = 0
+        angle_end = math.pi
+
+        # Build the tube
+        # We create a square profile at each step
+        prev_verts = []
+
+        for i in range(segments + 1):
+            t = i / segments
+            alpha = angle_start + t * (angle_end - angle_start)
+
+            # Simple math for limits:
+            r_in = 0.147
+            r_out = 0.150
+            x_half = W / 2
+
+            # Vertices for square profile in YZ plane, centered at angle alpha
+            # Rotation of cross section:
+            # Radial vector: (0, -cos(alpha), -sin(alpha))
+            # Tangent vector: (0, sin(alpha), -cos(alpha))
+            # We want uniform thickness along Radial direction
+
+            # Points at this angle:
+            y_in = -r_in * math.cos(alpha)
+            z_in = -r_in * math.sin(alpha) + Z_SHIFT
+
+            y_out = -r_out * math.cos(alpha)
+            z_out = -r_out * math.sin(alpha) + Z_SHIFT
+
+            # 4 verts per segment (Front-Out, Back-Out, Back-In, Front-In) along X
+            v1 = bm.verts.new((-x_half, y_out, z_out))
+            v2 = bm.verts.new((x_half, y_out, z_out))
+            v3 = bm.verts.new((x_half, y_in, z_in))
+            v4 = bm.verts.new((-x_half, y_in, z_in))
+
+            current_verts = [v1, v2, v3, v4]
+
+            if prev_verts:
+                # Make faces
+                bm.faces.new((prev_verts[0], prev_verts[1], v2, v1))  # Outer Face
+                bm.faces.new((prev_verts[1], prev_verts[2], v3, v2))  # Side
+                bm.faces.new((prev_verts[2], prev_verts[3], v4, v3))  # Inner Face
+                bm.faces.new((prev_verts[3], prev_verts[0], v1, v4))  # Side
+
+            prev_verts = current_verts
+
+        # Cap ends
+        if len(prev_verts) == 4:
+            # End cap
+            bm.faces.new((prev_verts[0], prev_verts[1], prev_verts[2], prev_verts[3]))
+
+        # Start cap requires finding first verts again, simplified for now
+
+        bm.to_mesh(mesh)
+        bm.free()
+
+        obj = bpy.data.objects.new("Arc_Structure", mesh)
+        context.collection.objects.link(obj)
+        obj.parent = drone_base
+
+        # LEDs
+        # 59 LEDs distributed along the arc on the OUTER surface
+        # 2mm padding at start and end
+        led_mat = get_led_material()
+
+        # LED Dimensions: 2x4x1.5mm
+        # 1.5mm along X (Thickness)
+        # 4mm along Tangent
+        # 2mm along Radial
+        led_scale = (0.0015, 0.004, 0.002)
+
+        # Placement Radius
+        # Surface is at 150mm. LED is 2mm radial. Center is at 150 + 1 = 151mm
+        r_led_center = 0.151
+
+        # Calculate Angular Offset for 2mm padding
+        # Arc Length = r * theta. theta = arc / r
+        # arc = 0.002m, r = 0.151m
+        led_angle_padding = 0.002 / r_led_center
+
+        # Effective range for LEDs
+        led_angle_start = angle_start + led_angle_padding
+        led_angle_end = angle_end - led_angle_padding
+
+        # Slightly offset in X? Prompt says 1.5mm along X.
+        # Assuming centered on the 3mm rim thickness (X=0)
+        x_pos = 0
+
+        num_leds = 59
+
+        for i in range(num_leds):
+            bpy.ops.mesh.primitive_cube_add(size=1)  # Create Unit Cube
+            led = context.active_object
+            led.name = f"Arc_LED_{i}"
+            led["led_index"] = i
+            led.data.materials.append(led_mat)
+            led.scale = led_scale
+
+            # Distribute
+            t = i / (num_leds - 1)
+            alpha = led_angle_start + t * (led_angle_end - led_angle_start)
+
+            # Position (apply Z_SHIFT)
+            y = -r_led_center * math.cos(alpha)
+            z = -r_led_center * math.sin(alpha) + Z_SHIFT
+
+            led.location = (x_pos, y, z)
+
+            # Rotation
+            # We want Local Z to be Radial (Outward)
+            # We want Local Y to be Tangent
+            # We want Local X to be Global X
+            # Rotation (alpha + 90deg, 0, 0) achieves this based on derivation
+            led.rotation_euler = (alpha + math.pi / 2, 0, 0)
+
+            led.parent = obj
+
+        return obj
+
     def execute(self, context):
-        # 1. Create Main Drone Body (Empty - No Geometry)
+        # 1. Create Main Drone Body
         bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
         drone_base = context.active_object
         drone_base.name = "Drone_Base"
 
-        # Add Custom Properties to Base for Animation
-        drone_base["servo_1"] = 0.0
-        drone_base["servo_2"] = 180.0 if self.drone_type == 'TYPE_H' else 270.0
-
-        # UI Property definitions for limits
-        mgr = drone_base.id_properties_ui("servo_1")
-        if self.drone_type == 'TYPE_H':
-            mgr.update(min=0.0, max=180.0, soft_min=0.0, soft_max=180.0)
-        else:
-            mgr.update(min=90.0, max=270.0, soft_min=90.0, soft_max=270.0)
-
-        mgr = drone_base.id_properties_ui("servo_2")
-        if self.drone_type == 'TYPE_H':
-            mgr.update(min=180.0, max=360.0, soft_min=180.0, soft_max=360.0)
-        else:  # Type V
-            mgr.update(min=270.0, max=450.0, soft_min=270.0, soft_max=450.0)
-
-        # Attach our custom property group
+        # 2. Add Properties
         drone_base.drone_props.drone_type = self.drone_type
 
-        # Constants
-        ROD_LEN = 0.15  # 15 cm
-        LED_SIZE = 0.002  # 2 mm
-        LED_SPACING = 0.00624  # 6.24 mm
-        ROD_THICKNESS = 0.003
+        is_semi = 'SEMI' in self.drone_type
 
-        # Get Material
+        # Servo 1
+        drone_base["servo_1"] = 0.0
+        mgr = drone_base.id_properties_ui("servo_1")
+        if 'TYPE_H' in self.drone_type or 'TYPE_SEMI_H' in self.drone_type:
+            mgr.update(min=0.0, max=180.0)
+        else:
+            mgr.update(min=90.0, max=270.0)
+
+        # Servo 2 (Only meaningful for Rod types, but kept for schema compatibility)
+        drone_base["servo_2"] = 180.0 if 'TYPE_H' in self.drone_type else 270.0
+        mgr = drone_base.id_properties_ui("servo_2")
+        if 'TYPE_H' in self.drone_type:
+            mgr.update(min=180.0, max=360.0)
+        elif 'TYPE_V' in self.drone_type:
+            mgr.update(min=270.0, max=450.0)
+        else:
+            # Semicircle doesn't use servo 2, hide limits or keep defaults
+            pass
+
+        # 3. Create Geometry
         led_mat = get_led_material()
 
-        # 3. Create Rod 1 (26 LEDs)
-        bpy.ops.mesh.primitive_cube_add(size=1, location=(0, ROD_LEN / 2, 0))
-        rod1 = context.active_object
-        rod1.name = "Rod_1"
-        rod1.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-        bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
-        rod1.parent = drone_base
+        if is_semi:
+            # --- Semicircle Logic ---
+            arc_obj = self.create_arc_geometry(context, drone_base)
 
-        # Add visual "LEDs" to Rod 1 (Indices 0-25)
-        for i in range(26):
-            bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
-            led = context.active_object
-            led.name = f"R1_LED_{i}"
+            # Add Driver to Arc (Servo 1)
+            # Rotates around X axis
+            d = arc_obj.driver_add("rotation_euler", 0)
+            var = d.driver.variables.new()
+            var.name = "angle"
+            var.type = 'SINGLE_PROP'
+            var.targets[0].id = drone_base
+            var.targets[0].data_path = '["servo_1"]'
+            d.driver.expression = "-radians(angle)"
 
-            # Store Index for animation
-            led["led_index"] = i
-            led.data.materials.append(led_mat)
+        else:
+            # --- Rod Logic (Legacy) ---
+            ROD_LEN = 0.15
+            LED_SIZE = 0.002
+            LED_SPACING = 0.00624
+            ROD_THICKNESS = 0.003
 
-            # 26th (index 25) is at center (0).
-            dist_from_center = (25 - i) * LED_SPACING
-            y_pos = dist_from_center
-            led.location = (ROD_THICKNESS / 2 + LED_SIZE / 2, y_pos, 0)
-            led.parent = rod1
+            # Rod 1
+            bpy.ops.mesh.primitive_cube_add(size=1, location=(0, ROD_LEN / 2, 0))
+            rod1 = context.active_object
+            rod1.name = "Rod_1"
+            rod1.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+            bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
+            rod1.parent = drone_base
 
-        # 4. Create Rod 2 (24 LEDs)
-        bpy.ops.mesh.primitive_cube_add(size=1, location=(0, ROD_LEN / 2, 0))
-        rod2 = context.active_object
-        rod2.name = "Rod_2"
-        rod2.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-        bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
-        rod2.parent = drone_base
+            for i in range(26):
+                bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
+                led = context.active_object
+                led.name = f"R1_LED_{i}"
+                led["led_index"] = i
+                led.data.materials.append(led_mat)
+                dist_from_center = (25 - i) * LED_SPACING
+                led.location = (ROD_THICKNESS / 2 + LED_SIZE / 2, dist_from_center, 0)
+                led.parent = rod1
 
-        # Add visual "LEDs" to Rod 2 (Indices 26-49)
-        for i in range(24):
-            bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
-            led = context.active_object
-            led.name = f"R2_LED_{i}"
+            # Rod 2
+            bpy.ops.mesh.primitive_cube_add(size=1, location=(0, ROD_LEN / 2, 0))
+            rod2 = context.active_object
+            rod2.name = "Rod_2"
+            rod2.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+            bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
+            rod2.parent = drone_base
 
-            # Store Index (Continuous: 26 + i)
-            led["led_index"] = 26 + i
-            led.data.materials.append(led_mat)
+            for i in range(24):
+                bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
+                led = context.active_object
+                led.name = f"R2_LED_{i}"
+                led["led_index"] = 26 + i
+                led.data.materials.append(led_mat)
+                y_pos = ((i + 1) * LED_SPACING)
+                led.location = (ROD_THICKNESS / 2 + LED_SIZE / 2, y_pos, 0)
+                led.parent = rod2
 
-            # i=0 is center.
-            y_pos = ((i + 1) * LED_SPACING)
-            led.location = (ROD_THICKNESS / 2 + LED_SIZE / 2, y_pos, 0)
-            led.parent = rod2
+            # Drivers
+            d = rod1.driver_add("rotation_euler", 0)
+            var = d.driver.variables.new()
+            var.name = "angle"
+            var.type = 'SINGLE_PROP'
+            var.targets[0].id = drone_base
+            var.targets[0].data_path = '["servo_1"]'
+            d.driver.expression = "-radians(angle)"
 
-        # -------------------------------------------------------------
-        # 5. Add Drivers for Rotation
-        # -------------------------------------------------------------
-        d = rod1.driver_add("rotation_euler", 0)
-        var = d.driver.variables.new()
-        var.name = "angle"
-        var.type = 'SINGLE_PROP'
-        var.targets[0].id = drone_base
-        var.targets[0].data_path = '["servo_1"]'
-        d.driver.expression = "-radians(angle)"
+            d = rod2.driver_add("rotation_euler", 0)
+            var = d.driver.variables.new()
+            var.name = "angle"
+            var.type = 'SINGLE_PROP'
+            var.targets[0].id = drone_base
+            var.targets[0].data_path = '["servo_2"]'
+            d.driver.expression = "-radians(angle)"
 
-        d = rod2.driver_add("rotation_euler", 0)
-        var = d.driver.variables.new()
-        var.name = "angle"
-        var.type = 'SINGLE_PROP'
-        var.targets[0].id = drone_base
-        var.targets[0].data_path = '["servo_2"]'
-        d.driver.expression = "-radians(angle)"
-
-        # Select the base
+        # Select Base
         bpy.ops.object.select_all(action='DESELECT')
         drone_base.select_set(True)
         context.view_layer.objects.active = drone_base
@@ -325,81 +480,69 @@ def evaluate_leds(scene):
 
         if mode == 'POINTERS':
             base_expr = props.led_base_color
-            # Collect pointers and sort by current value
-            # We must evaluate value here because it might be animated
-            # Note: Animation on collection items requires evaluating the property
-            # For simplicity in this handler, we read the current property value which Blender updates
-
             raw_pointers = []
             for ptr in props.led_pointers:
                 raw_pointers.append({
                     'val': ptr.value,
                     'expr': ptr.color_expression
                 })
-
             # Sort by position value
             sorted_pointers = sorted(raw_pointers, key=lambda x: x['val'])
         else:
             # Expression Mode
             base_expr = props.led_formula
 
-        # Traverse children to find LEDs
-        # Hierarchy: Drone -> Rods -> LEDs
-        for rod in drone.children:
-            if not (rod.name.startswith("Rod_1") or rod.name.startswith("Rod_2")):
-                continue
+        # Traverse children to find LEDs (Recursively to handle hierarchy depth)
 
-            for led in rod.children:
-                if "led_index" not in led:
-                    continue
+        # Helper to find all LEDs in hierarchy
+        def recursive_update(obj_list):
+            for child in obj_list:
+                if "led_index" in child:
+                    update_one_led(child, t, mode, base_expr, sorted_pointers)
 
-                i = led["led_index"]  # 0-49
-                N = 50  # Total LEDs
+                if child.children:
+                    recursive_update(child.children)
 
-                # Determine formula for this specific LED based on Mode
-                active_formula = ""
+        recursive_update(drone.children)
 
-                if mode == 'EXPRESSION':
-                    active_formula = base_expr
-                elif mode == 'POINTERS':
-                    # Find interval
-                    # Default to base
-                    active_formula = base_expr
 
-                    # Iterate sorted pointers to find which segment we are in
-                    # Logic: if i >= pointer.value, we adopt that pointer's color
-                    # Since sorted, the last one we satisfy is the correct one
-                    for ptr in sorted_pointers:
-                        if i >= ptr['val']:
-                            active_formula = ptr['expr']
-                        else:
-                            # Since sorted, if i < current, it is < all subsequent
-                            break
+def update_one_led(led, t, mode, base_expr, sorted_pointers):
+    i = led["led_index"]  # 0-49 or 0-58
+    N = 50
+    # Attempt to detect if it's a semicircle to set N=59
+    if i > 49: N = 59
 
-                # Evaluate
-                ctx = {"i": i, "t": t, "N": N, "math": math}
+    # Determine formula
+    active_formula = ""
 
-                try:
-                    raw_color = eval(active_formula, {}, ctx)
+    if mode == 'EXPRESSION':
+        active_formula = base_expr
+    elif mode == 'POINTERS':
+        active_formula = base_expr
+        for ptr in sorted_pointers:
+            if i >= ptr['val']:
+                active_formula = ptr['expr']
+            else:
+                break
 
-                    if isinstance(raw_color, (list, tuple)) and len(raw_color) >= 3:
-                        r, g, b = raw_color[0], raw_color[1], raw_color[2]
+    # Evaluate
+    ctx = {"i": i, "t": t, "N": N, "math": math}
 
-                        # Normalize
-                        if max(r, g, b) > 1.0:
-                            r /= 255.0
-                            g /= 255.0
-                            b /= 255.0
+    try:
+        raw_color = eval(active_formula, {}, ctx)
 
-                        # Clamp
-                        r = max(0.0, min(1.0, r))
-                        g = max(0.0, min(1.0, g))
-                        b = max(0.0, min(1.0, b))
-
-                        led.color = (r, g, b, 1.0)
-
-                except Exception as e:
-                    pass
+        if isinstance(raw_color, (list, tuple)) and len(raw_color) >= 3:
+            r, g, b = raw_color[0], raw_color[1], raw_color[2]
+            if max(r, g, b) > 1.0:
+                r /= 255.0
+                g /= 255.0
+                b /= 255.0
+            r = max(0.0, min(1.0, r))
+            g = max(0.0, min(1.0, g))
+            b = max(0.0, min(1.0, b))
+            led.color = (r, g, b, 1.0)
+    except Exception:
+        pass
 
 
 @persistent
@@ -507,7 +650,12 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
                 x, y, z = round(loc.x, 4), round(loc.y, 4), round(loc.z, 4)
                 rot_euler = drone.matrix_world.to_euler('XYZ')
                 yaw = round(rot_euler.z, 4)
+
+                # Check drone type for Semicircle vs Rod
+                is_semi = 'SEMI' in drone.drone_props.drone_type
+
                 s1 = round(drone["servo_1"], 2)
+                # If semicircle, s2 is irrelevant/dummy, but we export it for schema consistency
                 s2 = round(drone["servo_2"], 2)
 
                 # Capture Pointers
@@ -539,30 +687,20 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
             if props.led_mode == 'EXPRESSION':
                 final_formula = props.led_formula
             elif props.led_mode == 'POINTERS':
-                # Compile pointers into a single nested Python ternary expression using variables p0, p1...
-
+                # Compile pointers
                 raw_ptrs = []
                 for idx, ptr in enumerate(props.led_pointers):
-                    # Store index-based variable name 'p{idx}' and value/color
                     raw_ptrs.append({'id': f"p{idx}", 'v': ptr.value, 'c': ptr.color_expression})
-
-                # Sort by value to establish the logical nesting hierarchy (A < B < C)
-                # We use the current frame's values to determine the structure of the ternary nest.
                 raw_ptrs.sort(key=lambda x: x['v'])
 
                 if not raw_ptrs:
                     final_formula = props.led_base_color
                 else:
-                    # Start with the last "else" which is the color of the last pointer
                     current_str = f"({raw_ptrs[-1]['c']})"
-
-                    # Iterate backwards
                     for j in range(len(raw_ptrs) - 2, -1, -1):
                         p_curr = raw_ptrs[j]
                         p_next = raw_ptrs[j + 1]
-                        # Use variable name {p_next['id']} instead of literal value
                         current_str = f"({p_curr['c']}) if i < {p_next['id']} else {current_str}"
-
                     p0 = raw_ptrs[0]
                     final_formula = f"({props.led_base_color}) if i < {p0['id']} else {current_str}"
 
@@ -607,12 +745,18 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         if obj and "servo_1" in obj:
             props = obj.drone_props
+            is_semi = 'SEMI' in props.drone_type
 
             layout.label(text=f"Selected: {obj.name}")
             col = layout.column(align=True)
             col.label(text="Servo Angles (deg):")
-            col.prop(obj, '["servo_1"]', text="Angle 1")
-            col.prop(obj, '["servo_2"]', text="Angle 2")
+
+            # Show Angle 1
+            col.prop(obj, '["servo_1"]', text="Angle 1" if not is_semi else "Arc Angle")
+
+            # Hide Angle 2 if Semicircle
+            if not is_semi:
+                col.prop(obj, '["servo_2"]', text="Angle 2")
 
             layout.separator()
             layout.label(text="LED Configuration:")
