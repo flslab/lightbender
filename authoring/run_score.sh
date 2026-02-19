@@ -54,7 +54,6 @@ for yaml_file in "$AFTER_DIR"/*.yaml; do
     if [ ! -z "$STATS" ]; then
         filename=$(basename "$yaml_file")
         echo "$filename,$STATS" >> "$OUTPUT_CSV"
-        # Score is now the 7th element (AvgPos is 3rd, AvgWidth is 4th)
         score=$(echo $STATS | cut -d',' -f7)
         echo "  Processed: $filename -> Score: $score"
     else

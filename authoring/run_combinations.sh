@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Default Input files (if not provided as args)
-INPUT_FILES=("authoring/s.yaml")
+INPUT_FILES=("points_input.yaml")
 
 # If arguments provided, use them as input files
 if [ "$#" -gt 0 ]; then
@@ -9,10 +9,12 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Directory for results
-mkdir -p authoring/results
-mkdir -p authoring/results/2d
-mkdir -p authoring/results/3d
+mkdir -p results
 
+# Output CSV for metrics
+METRICS_CSV="solver_metrics.csv"
+# Initialize CSV Header
+echo "InputFile,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,PlacementType,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist" > "$METRICS_CSV"
 
 # --- Configuration Arrays ---
 SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
@@ -24,7 +26,6 @@ TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
 
 MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
 
-#PLACEMENT_TYPES=("LAYERS")
 PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
 
 # --- Execution ---
@@ -56,7 +57,9 @@ for input_file in "${INPUT_FILES[@]}"; do
 
                         echo "Running Config: Sel=$sel Res=$res Traj=$traj Move=$move Place=$place"
 
-                        python authoring/deconflict.py \
+                        # Run Python script with --csv flag.
+                        # Separate stdout (CSV data) from stderr (Logs).
+                        STATS=$(python authoring/deconflict.py \
                             --input_file "$input_file" \
                             --output_file "$out_name" \
                             --viz_2d_output_file "$viz_2d_out_name" \
@@ -66,7 +69,16 @@ for input_file in "${INPUT_FILES[@]}"; do
                             --trajectory_type "$traj" \
                             --move_direction "$move" \
                             --placement_type "$place" \
-                            --save_viz
+                            --save_viz \
+                            --csv | tail -n 1)
+
+                        # Check if STATS contains comma (rudimentary check for valid CSV)
+                        if [[ "$STATS" == *","* ]]; then
+                            # Append to CSV
+                            echo "$input_file,$sel,$res,$traj,$move,$place,$STATS" >> "$METRICS_CSV"
+                        else
+                            echo "Warning: Failed to parse metrics for config."
+                        fi
 
                     done
                 done
@@ -75,4 +87,4 @@ for input_file in "${INPUT_FILES[@]}"; do
     done
 done
 
-echo "All combinations completed."
+echo "All combinations completed. Metrics saved to $METRICS_CSV."
