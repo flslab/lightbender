@@ -406,7 +406,7 @@ class SetCoverStrategy(AllocationStrategy):
             covered_chunk_ids = set()
             for e_idx, (c_start, c_end) in cand['edge_coverages'].items():
                 for b_start, b_end, ch_id in edge_chunks[e_idx]:
-                    # Using mathematical tolerance so tiny snapped chunks are safely marked as covered
+                    # Using tolerance so tiny snapped chunks are marked as covered
                     if c_start <= b_start + TOLERANCE and c_end >= b_end - TOLERANCE:
                         covered_chunk_ids.add(ch_id)
             cand['covered'] = covered_chunk_ids
@@ -555,8 +555,8 @@ class SetCoverStrategy(AllocationStrategy):
                 # Calculate how much redundancy this candidate introduces
                 added_overlap = bin(current_mask & c_mask).count('1')
 
-                # Lookahead Pruning: If taking this candidate puts us AT the size limit,
-                # but the overlap is already worse than our best record, prune it immediately!
+                # Lookahead Pruning: If taking this candidate puts us at the size limit,
+                # but the overlap is already worse than our best record, prune it
                 if len(current_solution) == best_size - 1 and (current_overlap + added_overlap) >= best_overlap:
                     pass
                 else:
