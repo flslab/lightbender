@@ -447,11 +447,11 @@ class SetCoverStrategy(AllocationStrategy):
 
                     if n1 > 1e-6 and n2 > 1e-6:
                         if abs(np.dot(vec1 / n1, vec2 / n2) - 1.0) < 1e-4:
-                            adj[u].remove(n);
+                            adj[u].remove(n)
                             adj[v].remove(n)
-                            adj[u].add(v);
+                            adj[u].add(v)
                             adj[v].add(u)
-                            del adj[n];
+                            del adj[n]
                             del nodes[n]
                             merged = True
                             break
@@ -678,7 +678,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="allocated_points.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="SET_COVER",
                         help="Placement policy")
     parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
