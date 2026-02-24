@@ -44,7 +44,7 @@ class TargetGraph:
             data = yaml.safe_load(f)
 
         for n in data.get('nodes', []):
-            self.nodes[n['id']] = np.array([n['x'], n['y'], n['z']], dtype=float)
+            self.nodes[n['id']] = args.scale * np.array([n['x'], n['y'], n['z']], dtype=float)
 
         for e in data.get('edges', []):
             self.edges.append((e['source'], e['target']))
@@ -157,26 +157,107 @@ class VertexStrategy(AllocationStrategy):
     def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
+
+        # 1. Subdivide edges to ensure all are <= max_length
+        new_nodes = {k: v.copy() for k, v in graph.nodes.items()}
+        new_edges = []
+        next_node_id = max(new_nodes.keys()) + 1 if new_nodes else 0
+
         for u, v in graph.edges:
-            A, B = graph.nodes[u], graph.nodes[v]
+            A, B = new_nodes[u], new_nodes[v]
             vec = B - A
             L = np.linalg.norm(vec)
             if L < 1e-6: continue
-            dir_vec = vec / L
 
-            num_segments = math.ceil(L / max_length)
-            for i in range(num_segments):
-                body = A + i * max_length * dir_vec
-                rem_len = min(max_length, L - i * max_length)
-                tip1 = body + rem_len * dir_vec
+            if L > max_length + 1e-6:
+                num_segments = math.ceil(L / max_length)
+                seg_vec = vec / num_segments
+                prev_node = u
+                for i in range(1, num_segments):
+                    mid_node_id = next_node_id
+                    next_node_id += 1
+                    new_nodes[mid_node_id] = A + i * seg_vec
+                    new_edges.append((prev_node, mid_node_id))
+                    prev_node = mid_node_id
+                new_edges.append((prev_node, v))
+            else:
+                new_edges.append((u, v))
 
-                yaw, l1, l2, a1, a2 = compute_lightbender_params(body, tip1, None)
-                lightbenders.append(Point3D(lb_id, body[0], body[1], body[2], l1, l2, a1, a2, yaw, max_length))
+        # 2. Build adjacency list for subdivided graph
+        adj = {n: [] for n in new_nodes}
+        for e_idx, (u, v) in enumerate(new_edges):
+            adj[u].append((e_idx, v))
+            adj[v].append((e_idx, u))
+
+        covered_edges = set()
+
+        # Traverse the graph via BFS to get vertices in order of incidence
+        visited_nodes = set()
+        ordered_vertices = []
+        for u, v in new_edges:
+            for start_node in (u, v):
+                if start_node not in visited_nodes:
+                    queue = [start_node]
+                    visited_nodes.add(start_node)
+                    while queue:
+                        curr = queue.pop(0)
+                        ordered_vertices.append(curr)
+                        for _, neighbor in adj[curr]:
+                            if neighbor not in visited_nodes:
+                                visited_nodes.add(neighbor)
+                                queue.append(neighbor)
+
+        # 3. Pass A: Prioritize 2-edge coverage at vertices using incidence order
+        for V_id in ordered_vertices:
+            incident = adj[V_id]
+            V_pos = new_nodes[V_id]
+            for i in range(len(incident)):
+                for j in range(i + 1, len(incident)):
+                    e1_idx, a_id = incident[i]
+                    e2_idx, b_id = incident[j]
+
+                    if e1_idx in covered_edges or e2_idx in covered_edges:
+                        continue
+
+                    vec1 = new_nodes[a_id] - V_pos
+                    vec2 = new_nodes[b_id] - V_pos
+
+                    n1 = np.linalg.norm(vec1[:2])
+                    n2 = np.linalg.norm(vec2[:2])
+
+                    is_valid = False
+                    if n1 < 1e-4 or n2 < 1e-4:
+                        is_valid = True
+                    else:
+                        dot = np.dot(vec1[:2] / n1, vec2[:2] / n2)
+                        if abs(abs(dot) - 1.0) < 1e-3:
+                            is_valid = True
+
+                    if is_valid:
+                        tip1 = new_nodes[a_id]
+                        tip2 = new_nodes[b_id]
+                        yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, tip2)
+
+                        lightbenders.append(
+                            Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, max_length))
+                        lb_id += 1
+                        covered_edges.add(e1_idx)
+                        covered_edges.add(e2_idx)
+
+        # 4. Pass B: Cover remaining single edges
+        for e_idx, (u, v) in enumerate(new_edges):
+            if e_idx not in covered_edges:
+                V_pos = new_nodes[u]
+                tip1 = new_nodes[v]
+                yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, None)
+                lightbenders.append(Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, max_length))
                 lb_id += 1
+                covered_edges.add(e_idx)
+
         return lightbenders
 
 
-class OptimizedStrategy(AllocationStrategy):
+class SetCoverStrategy(AllocationStrategy):
     """
     Uses Exact Set Cover with a Secondary Objective to minimize Overlap.
     """
@@ -502,8 +583,8 @@ class Allocator:
             strategy = MidpointStrategy()
         elif policy.upper() == "VERTEX":
             strategy = VertexStrategy()
-        elif policy.upper() == "OPTIMIZED":
-            strategy = OptimizedStrategy()
+        elif policy.upper() == "SET_COVER":
+            strategy = SetCoverStrategy()
         else:
             raise ValueError(f"Unknown allocation policy: {policy}")
 
@@ -557,7 +638,7 @@ def visualize_allocation(graph: TargetGraph, lightbenders: List[Point3D]):
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
-    ax.set_title("Allocation Output: Graph vs LightBenders")
+    ax.set_title(f"Policy: {args.policy}")
 
     extents = np.array([getattr(ax, f'get_{dim}lim')() for dim in 'xyz'])
     sz = extents[:, 1] - extents[:, 0]
@@ -597,9 +678,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="allocated_points.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'OPTIMIZED'], default="OPTIMIZED",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
                         help="Placement policy")
     parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
+    parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
 
     args = parser.parse_args()
