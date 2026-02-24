@@ -44,13 +44,13 @@ class TargetGraph:
             data = yaml.safe_load(f)
 
         for n in data.get('nodes', []):
-            self.nodes[n['id']] = 2*np.array([n['x'], n['y'], n['z']], dtype=float)
+            self.nodes[n['id']] = np.array([n['x'], n['y'], n['z']], dtype=float)
 
         for e in data.get('edges', []):
             self.edges.append((e['source'], e['target']))
 
     def _generate_sample_graph(self, filepath: str):
-        # Generates the user-provided 7-edge graph where the optimal cover is exactly 4 LightBenders
+        # Generates the user-provided 7-edge zigzag graph
         self.nodes = {
             0: np.array([0.0, 0.1386, 1.24]),
             1: np.array([0.0, 0.0, 1.32]),
@@ -178,19 +178,17 @@ class VertexStrategy(AllocationStrategy):
 
 class OptimizedStrategy(AllocationStrategy):
     """
-    Uses Global Optimization (Exact Set Cover) to find the absolute minimum number of LightBenders.
+    Uses Exact Set Cover with a Secondary Objective to minimize Overlap.
     """
 
     def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
-        # 1. Simplify Graph (Merge collinear 3D edges)
+        MIN_CHUNK_LEN = 1e-2
+        DUPLICATE_THRESH = 1e-2
+        TOLERANCE = MIN_CHUNK_LEN * 1.5
+
         merged_nodes, merged_edges = self._merge_collinear_edges(graph)
 
-        # 2. Discretize edges into chunks
-        chunks = []  # List of tuples: (edge_idx, midpoint_dist)
-        edge_data = []  # Store L and dir_vec
-
-        CHUNK_SIZE = max_length / 4.0  # High resolution overlapping
-
+        edge_data = []
         for e_idx, (u, v) in enumerate(merged_edges):
             A, B = merged_nodes[u], merged_nodes[v]
             vec = B - A
@@ -198,39 +196,50 @@ class OptimizedStrategy(AllocationStrategy):
             dir_vec = vec / L if L > 1e-6 else np.zeros(3)
             edge_data.append({'u': u, 'v': v, 'A': A, 'B': B, 'L': L, 'dir': dir_vec})
 
-            num_chunks = max(1, math.ceil(L / CHUNK_SIZE))
-            chunk_len = L / num_chunks
-            for c in range(num_chunks):
-                chunks.append((e_idx, (c + 0.5) * chunk_len))
-
-        # 3. Generate Candidate Placements
         candidates = []
 
-        # A. Edge Sliding Candidates
+        # A. Edge Sliding Candidates (Endpoint-Anchored)
         for e_idx, ed in enumerate(edge_data):
             L = ed['L']
-            num_points = max(2, math.ceil(L / CHUNK_SIZE))
-            for i in range(num_points):
-                d = i * L / (num_points - 1) if num_points > 1 else 0
-                body = ed['A'] + d * ed['dir']
+            edge_d_candidates = []
 
+            if L <= 2 * max_length:
+                # One candidate perfectly covers the whole edge
+                edge_d_candidates.append(L / 2.0)
+            else:
+                # Spanning from Endpoint A
+                d = max_length
+                while d < L:
+                    edge_d_candidates.append(d)
+                    d += 1 * max_length
+
+                # Spanning from Endpoint B
+                d_b = max_length
+                while d_b < L:
+                    d_from_a = L - d_b
+                    # Do not create duplicate candidates if they land too close to an existing one
+                    is_duplicate = any(
+                        abs(existing_d - d_from_a) < DUPLICATE_THRESH for existing_d in edge_d_candidates)
+                    if not is_duplicate:
+                        edge_d_candidates.append(d_from_a)
+                    d_b += 1 * max_length
+
+            for d in edge_d_candidates:
+                body = ed['A'] + d * ed['dir']
                 len_fwd = min(max_length, L - d)
                 len_bwd = min(max_length, d)
 
                 tip1 = body + len_fwd * ed['dir']
                 tip2 = body - len_bwd * ed['dir'] if len_bwd > 1e-6 else None
 
-                # Find covered chunks
-                covered = {i for i, (ce, cd) in enumerate(chunks) if
-                           ce == e_idx and (d - max_length) <= cd <= (d + max_length)}
+                edge_coverages = {e_idx: (d - len_bwd, d + len_fwd)}
+                candidates.append({'body': body, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages})
 
-                candidates.append({'body': body, 'tip1': tip1, 'tip2': tip2, 'covered': covered})
-
-        # B. Vertex Spanning Candidates (Two XY-collinear edges)
+        # B. Vertex Spanning Candidates
         adj = {n: [] for n in merged_nodes}
         for e_idx, ed in enumerate(edge_data):
-            adj[ed['u']].append((e_idx, ed['v'], True))  # True = pointing away
-            adj[ed['v']].append((e_idx, ed['u'], False))  # False = pointing towards
+            adj[ed['u']].append((e_idx, ed['v'], True))
+            adj[ed['v']].append((e_idx, ed['u'], False))
 
         for v_id, incident in adj.items():
             V_pos = merged_nodes[v_id]
@@ -245,10 +254,9 @@ class OptimizedStrategy(AllocationStrategy):
                     n1 = np.linalg.norm(vec1[:2])
                     n2 = np.linalg.norm(vec2[:2])
 
-                    # Check XY Coplanarity (Parallel, Anti-parallel, or Vertical Line)
                     is_valid = False
                     if n1 < 1e-4 or n2 < 1e-4:
-                        is_valid = True  # One is purely vertical, so yaw can adapt
+                        is_valid = True
                     else:
                         dot = np.dot(vec1[:2] / n1, vec2[:2] / n2)
                         if abs(abs(dot) - 1.0) < 1e-3:
@@ -261,27 +269,69 @@ class OptimizedStrategy(AllocationStrategy):
                         tip1 = V_pos + (vec1 / np.linalg.norm(vec1)) * L1
                         tip2 = V_pos + (vec2 / np.linalg.norm(vec2)) * L2
 
-                        covered = set()
-                        # Find chunks on both incident edges
-                        for ch_idx, (ce, cd) in enumerate(chunks):
-                            if ce == e1_idx:
-                                E1_L = edge_data[e1_idx]['L']
-                                if is_fwd1 and cd <= max_length:
-                                    covered.add(ch_idx)
-                                elif not is_fwd1 and cd >= (E1_L - max_length):
-                                    covered.add(ch_idx)
+                        edge_coverages = {}
+                        if is_fwd1:
+                            edge_coverages[e1_idx] = (0.0, L1)
+                        else:
+                            E1_L = edge_data[e1_idx]['L']
+                            edge_coverages[e1_idx] = (E1_L - L1, E1_L)
 
-                            if ce == e2_idx:
-                                E2_L = edge_data[e2_idx]['L']
-                                if is_fwd2 and cd <= max_length:
-                                    covered.add(ch_idx)
-                                elif not is_fwd2 and cd >= (E2_L - max_length):
-                                    covered.add(ch_idx)
+                        if is_fwd2:
+                            edge_coverages[e2_idx] = (0.0, L2)
+                        else:
+                            E2_L = edge_data[e2_idx]['L']
+                            edge_coverages[e2_idx] = (E2_L - L2, E2_L)
 
-                        candidates.append({'body': V_pos, 'tip1': tip1, 'tip2': tip2, 'covered': covered})
+                        candidates.append({'body': V_pos, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages})
 
-        # 4. Solve Exact Set Cover (Branch and Bound)
-        chosen_indices = self._solve_set_cover(candidates, len(chunks))
+        # C. Define Chunks dynamically based on LightBender tips
+        edge_chunks = {}
+        global_chunk_id = 0
+
+        for e_idx, ed in enumerate(edge_data):
+            L = ed['L']
+            raw_boundaries = [0.0, L]
+            for cand in candidates:
+                if e_idx in cand['edge_coverages']:
+                    c_start, c_end = cand['edge_coverages'][e_idx]
+                    raw_boundaries.extend([c_start, c_end])
+
+            raw_boundaries = sorted(list(set(raw_boundaries)))
+            boundaries = [0.0]
+
+            # Merge small slivers into valid boundaries
+            for b in raw_boundaries:
+                if b <= 0.0 or b >= L:
+                    continue
+                if b - boundaries[-1] >= MIN_CHUNK_LEN:
+                    boundaries.append(b)
+
+            if L - boundaries[-1] < MIN_CHUNK_LEN:
+                if len(boundaries) > 1:
+                    boundaries[-1] = L
+                else:
+                    boundaries.append(L)
+            else:
+                boundaries.append(L)
+
+            chunks_for_edge = []
+            for i in range(len(boundaries) - 1):
+                chunks_for_edge.append((boundaries[i], boundaries[i + 1], global_chunk_id))
+                global_chunk_id += 1
+            edge_chunks[e_idx] = chunks_for_edge
+
+        # D. Map candidates to their corresponding chunks
+        for cand in candidates:
+            covered_chunk_ids = set()
+            for e_idx, (c_start, c_end) in cand['edge_coverages'].items():
+                for b_start, b_end, ch_id in edge_chunks[e_idx]:
+                    # Using mathematical tolerance so tiny snapped chunks are safely marked as covered
+                    if c_start <= b_start + TOLERANCE and c_end >= b_end - TOLERANCE:
+                        covered_chunk_ids.add(ch_id)
+            cand['covered'] = covered_chunk_ids
+
+        # E. Solve Exact Set Cover with Overlap Penalty
+        chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
 
         # 5. Extract Final LightBenders
         lightbenders = []
@@ -315,12 +365,12 @@ class OptimizedStrategy(AllocationStrategy):
                     n2 = np.linalg.norm(vec2)
 
                     if n1 > 1e-6 and n2 > 1e-6:
-                        if abs(np.dot(vec1 / n1, vec2 / n2) - 1.0) < 1e-4:  # 3D Collinear
-                            adj[u].remove(n)
+                        if abs(np.dot(vec1 / n1, vec2 / n2) - 1.0) < 1e-4:
+                            adj[u].remove(n);
                             adj[v].remove(n)
-                            adj[u].add(v)
+                            adj[u].add(v);
                             adj[v].add(u)
-                            del adj[n]
+                            del adj[n];
                             del nodes[n]
                             merged = True
                             break
@@ -337,33 +387,8 @@ class OptimizedStrategy(AllocationStrategy):
         return nodes, edges
 
     def _solve_set_cover(self, candidates, num_chunks):
-        """
-        An exact Branch and Bound Set Cover solver.
-        Mathematically guarantees the absolute minimum number of candidates are chosen.
-        """
+        target_mask = (1 << num_chunks) - 1
 
-        # 1. Provide an initial upper bound using Greedy approach
-        def solve_greedy():
-            covered = set()
-            chosen = []
-            all_chunks = set(range(num_chunks))
-            while covered != all_chunks:
-                best_idx = -1
-                best_cover = set()
-                for i, cand in enumerate(candidates):
-                    if i in chosen: continue
-                    new_cover = cand['covered'] - covered
-                    if len(new_cover) > len(best_cover):
-                        best_cover = new_cover
-                        best_idx = i
-                if best_idx == -1: break
-                chosen.append(best_idx)
-                covered |= best_cover
-            return chosen
-
-        greedy_sol = solve_greedy()
-
-        # 2. Setup Exact Branch and Bound
         valid_indices = []
         cand_masks = []
 
@@ -375,16 +400,33 @@ class OptimizedStrategy(AllocationStrategy):
             cand_masks.append(mask)
             valid_indices.append(i)
 
-        target_mask = (1 << num_chunks) - 1
+        # Initial Greedy Bound
+        greedy_sol = []
+        greedy_covered = 0
+        greedy_overlap = 0
+        temp_masks = cand_masks[:]
 
-        # Sort candidates descending by coverage for faster pruning
+        while greedy_covered != target_mask:
+            best_idx = -1
+            best_gain = -1
+            for i, mask in enumerate(temp_masks):
+                gain = bin(mask & ~greedy_covered).count('1')
+                if gain > best_gain:
+                    best_gain = gain
+                    best_idx = i
+            if best_idx == -1: break
+            greedy_sol.append(best_idx)
+            greedy_overlap += bin(temp_masks[best_idx] & greedy_covered).count('1')
+            greedy_covered |= temp_masks[best_idx]
+
+        best_size = len(greedy_sol)
+        best_overlap = greedy_overlap
+        best_solution = greedy_sol
+
+        # Sort for B&B
         cand_order = list(range(len(valid_indices)))
         cand_order.sort(key=lambda x: bin(cand_masks[x]).count('1'), reverse=True)
 
-        best_solution = greedy_sol
-        best_size = len(greedy_sol)
-
-        # Precompute the maximum coverage possible for remaining subsets
         rem_masks = [0] * len(cand_order)
         accum = 0
         for i in reversed(range(len(cand_order))):
@@ -394,8 +436,8 @@ class OptimizedStrategy(AllocationStrategy):
         iters = 0
         MAX_ITERS = 100000
 
-        def backtrack(cand_idx, current_mask, current_solution):
-            nonlocal best_solution, best_size, iters
+        def backtrack(cand_idx, current_mask, current_solution, current_overlap):
+            nonlocal best_solution, best_size, best_overlap, iters
 
             iters += 1
             if iters > MAX_ITERS:
@@ -403,13 +445,16 @@ class OptimizedStrategy(AllocationStrategy):
 
             # If all chunks covered, check if it's the best so far
             if current_mask == target_mask:
-                if len(current_solution) < best_size:
+                # Primary Obj: Minimize Size. Secondary Obj: Minimize Overlap.
+                if len(current_solution) < best_size or (
+                        len(current_solution) == best_size and current_overlap < best_overlap):
                     best_size = len(current_solution)
-                    best_solution = [valid_indices[i] for i in current_solution]
+                    best_overlap = current_overlap
+                    best_solution = list(current_solution)
                 return
 
-            # Prune if taking another makes us tie or worse than the best size
-            if len(current_solution) >= best_size - 1:
+            # Prune if adding one more candidate will exceed the best known size
+            if len(current_solution) >= best_size:
                 return
 
             # Prune if no more candidates to check
@@ -422,21 +467,28 @@ class OptimizedStrategy(AllocationStrategy):
 
             c_id = cand_order[cand_idx]
             c_mask = cand_masks[c_id]
-
             new_mask = current_mask | c_mask
 
-            # Branch 1: Try Taking the Candidate (Only if it adds new coverage)
+            # Branch 1: Take candidate (only if it adds coverage)
             if new_mask != current_mask:
-                current_solution.append(c_id)
-                backtrack(cand_idx + 1, new_mask, current_solution)
-                current_solution.pop()
+                # Calculate how much redundancy this candidate introduces
+                added_overlap = bin(current_mask & c_mask).count('1')
 
-            # Branch 2: Skip Candidate
-            backtrack(cand_idx + 1, current_mask, current_solution)
+                # Lookahead Pruning: If taking this candidate puts us AT the size limit,
+                # but the overlap is already worse than our best record, prune it immediately!
+                if len(current_solution) == best_size - 1 and (current_overlap + added_overlap) >= best_overlap:
+                    pass
+                else:
+                    current_solution.append(c_id)
+                    backtrack(cand_idx + 1, new_mask, current_solution, current_overlap + added_overlap)
+                    current_solution.pop()
 
-        # Run exact solver
-        backtrack(0, 0, [])
-        return best_solution
+            # Branch 2: Skip candidate
+            backtrack(cand_idx + 1, current_mask, current_solution, current_overlap)
+
+        backtrack(0, 0, [], 0)
+
+        return [valid_indices[i] for i in best_solution]
 
 
 # --- Allocation Processor ---
