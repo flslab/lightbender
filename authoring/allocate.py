@@ -569,6 +569,9 @@ class SetCoverStrategy(AllocationStrategy):
 
         backtrack(0, 0, [], 0)
 
+        print(f"Total Candidates:   {len(cand_order)}")
+        print(f"Total Chunks:       {num_chunks}")
+        print(f"Total Iterations:   {iters}")
         return [valid_indices[i] for i in best_solution]
 
 
