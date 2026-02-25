@@ -120,18 +120,31 @@ def compute_lightbender_params(body: np.ndarray, tip1: np.ndarray, tip2: Optiona
     return yaw, L1, L2, a1, a2
 
 
+def get_best_max_length(l1: float, l2: float, allowed_lengths: List[float]) -> float:
+    """
+    Finds the smallest allowed max_length that can accommodate the required lengths.
+    """
+    required = max(l1, l2)
+    for m in sorted(allowed_lengths):
+        if m >= required - 1e-5:
+            return m
+    return max(allowed_lengths)
+
+
 # --- Allocation Strategies ---
 
 class AllocationStrategy(ABC):
     @abstractmethod
-    def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
+    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         pass
 
 
 class MidpointStrategy(AllocationStrategy):
-    def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
+    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
+        max_limit = max(max_lengths)
+
         for u, v in graph.edges:
             A, B = graph.nodes[u], graph.nodes[v]
             vec = B - A
@@ -139,7 +152,7 @@ class MidpointStrategy(AllocationStrategy):
             if L < 1e-6: continue
             dir_vec = vec / L
 
-            num_segments = math.ceil(L / (2.0 * max_length))
+            num_segments = math.ceil(L / (2.0 * max_limit))
             seg_len = L / num_segments
 
             for i in range(num_segments):
@@ -148,17 +161,20 @@ class MidpointStrategy(AllocationStrategy):
                 tip2 = center - (seg_len / 2.0) * dir_vec
 
                 yaw, l1, l2, a1, a2 = compute_lightbender_params(center, tip1, tip2)
-                lightbenders.append(Point3D(lb_id, center[0], center[1], center[2], l1, l2, a1, a2, yaw, max_length))
+                assigned_ml = get_best_max_length(l1, l2, max_lengths)
+
+                lightbenders.append(Point3D(lb_id, center[0], center[1], center[2], l1, l2, a1, a2, yaw, assigned_ml))
                 lb_id += 1
         return lightbenders
 
 
 class VertexStrategy(AllocationStrategy):
-    def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
+    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
+        max_limit = max(max_lengths)
 
-        # 1. Subdivide edges to ensure all are <= max_length
+        # 1. Subdivide edges to ensure all are <= max_limit
         new_nodes = {k: v.copy() for k, v in graph.nodes.items()}
         new_edges = []
         next_node_id = max(new_nodes.keys()) + 1 if new_nodes else 0
@@ -169,8 +185,8 @@ class VertexStrategy(AllocationStrategy):
             L = np.linalg.norm(vec)
             if L < 1e-6: continue
 
-            if L > max_length + 1e-6:
-                num_segments = math.ceil(L / max_length)
+            if L > max_limit + 1e-6:
+                num_segments = math.ceil(L / max_limit)
                 seg_vec = vec / num_segments
                 prev_node = u
                 for i in range(1, num_segments):
@@ -237,9 +253,10 @@ class VertexStrategy(AllocationStrategy):
                         tip1 = new_nodes[a_id]
                         tip2 = new_nodes[b_id]
                         yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, tip2)
+                        assigned_ml = get_best_max_length(l1, l2, max_lengths)
 
                         lightbenders.append(
-                            Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, max_length))
+                            Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, assigned_ml))
                         lb_id += 1
                         covered_edges.add(e1_idx)
                         covered_edges.add(e2_idx)
@@ -250,7 +267,9 @@ class VertexStrategy(AllocationStrategy):
                 V_pos = new_nodes[u]
                 tip1 = new_nodes[v]
                 yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, None)
-                lightbenders.append(Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, max_length))
+                assigned_ml = get_best_max_length(l1, l2, max_lengths)
+
+                lightbenders.append(Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, assigned_ml))
                 lb_id += 1
                 covered_edges.add(e_idx)
 
@@ -259,10 +278,11 @@ class VertexStrategy(AllocationStrategy):
 
 class SetCoverStrategy(AllocationStrategy):
     """
-    Uses Exact Set Cover with a Secondary Objective to minimize Overlap.
+    Uses Exact Set Cover with a Secondary Objective to minimize Overlap,
+    and Tertiary Objective to minimize sum of utilized max_lengths.
     """
 
-    def allocate(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
+    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         MIN_CHUNK_LEN = 1e-2
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
@@ -282,39 +302,43 @@ class SetCoverStrategy(AllocationStrategy):
         # A. Edge Sliding Candidates (Endpoint-Anchored)
         for e_idx, ed in enumerate(edge_data):
             L = ed['L']
-            edge_d_candidates = []
 
-            if L <= 2 * max_length:
-                # One candidate perfectly covers the whole edge
-                edge_d_candidates.append(L / 2.0)
-            else:
-                # Spanning from Endpoint A
-                d = max_length
-                while d < L:
-                    edge_d_candidates.append(d)
-                    d += 1 * max_length
+            # Generate overlapping options for EVERY allowed size
+            for ml in sorted(max_lengths):
+                edge_d_candidates = []
 
-                # Spanning from Endpoint B
-                d_b = max_length
-                while d_b < L:
-                    d_from_a = L - d_b
-                    # Do not create duplicate candidates if they land too close to an existing one
-                    is_duplicate = any(
-                        abs(existing_d - d_from_a) < DUPLICATE_THRESH for existing_d in edge_d_candidates)
-                    if not is_duplicate:
-                        edge_d_candidates.append(d_from_a)
-                    d_b += 1 * max_length
+                if L <= 2 * ml:
+                    # One candidate perfectly covers the whole edge
+                    edge_d_candidates.append(L / 2.0)
+                else:
+                    # Spanning from Endpoint A
+                    d = ml
+                    while d < L:
+                        edge_d_candidates.append(d)
+                        d += 1 * ml
 
-            for d in edge_d_candidates:
-                body = ed['A'] + d * ed['dir']
-                len_fwd = min(max_length, L - d)
-                len_bwd = min(max_length, d)
+                    # Spanning from Endpoint B
+                    d_b = ml
+                    while d_b < L:
+                        d_from_a = L - d_b
+                        # Do not create duplicate candidates if they land too close to an existing one
+                        is_duplicate = any(
+                            abs(existing_d - d_from_a) < DUPLICATE_THRESH for existing_d in edge_d_candidates)
+                        if not is_duplicate:
+                            edge_d_candidates.append(d_from_a)
+                        d_b += 1 * ml
 
-                tip1 = body + len_fwd * ed['dir']
-                tip2 = body - len_bwd * ed['dir'] if len_bwd > 1e-6 else None
+                for d in edge_d_candidates:
+                    body = ed['A'] + d * ed['dir']
+                    len_fwd = min(ml, L - d)
+                    len_bwd = min(ml, d)
 
-                edge_coverages = {e_idx: (d - len_bwd, d + len_fwd)}
-                candidates.append({'body': body, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages})
+                    tip1 = body + len_fwd * ed['dir']
+                    tip2 = body - len_bwd * ed['dir'] if len_bwd > 1e-6 else None
+
+                    edge_coverages = {e_idx: (d - len_bwd, d + len_fwd)}
+                    candidates.append(
+                        {'body': body, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages, 'ml': ml})
 
         # B. Vertex Spanning Candidates
         adj = {n: [] for n in merged_nodes}
@@ -344,28 +368,31 @@ class SetCoverStrategy(AllocationStrategy):
                             is_valid = True
 
                     if is_valid:
-                        L1 = min(max_length, np.linalg.norm(vec1))
-                        L2 = min(max_length, np.linalg.norm(vec2))
+                        # Create a valid pair candidate for every size option
+                        for ml in sorted(max_lengths):
+                            L1 = min(ml, np.linalg.norm(vec1))
+                            L2 = min(ml, np.linalg.norm(vec2))
 
-                        tip1 = V_pos + (vec1 / np.linalg.norm(vec1)) * L1
-                        tip2 = V_pos + (vec2 / np.linalg.norm(vec2)) * L2
+                            tip1 = V_pos + (vec1 / np.linalg.norm(vec1)) * L1
+                            tip2 = V_pos + (vec2 / np.linalg.norm(vec2)) * L2
 
-                        edge_coverages = {}
-                        if is_fwd1:
-                            edge_coverages[e1_idx] = (0.0, L1)
-                        else:
-                            E1_L = edge_data[e1_idx]['L']
-                            edge_coverages[e1_idx] = (E1_L - L1, E1_L)
+                            edge_coverages = {}
+                            if is_fwd1:
+                                edge_coverages[e1_idx] = (0.0, L1)
+                            else:
+                                E1_L = edge_data[e1_idx]['L']
+                                edge_coverages[e1_idx] = (E1_L - L1, E1_L)
 
-                        if is_fwd2:
-                            edge_coverages[e2_idx] = (0.0, L2)
-                        else:
-                            E2_L = edge_data[e2_idx]['L']
-                            edge_coverages[e2_idx] = (E2_L - L2, E2_L)
+                            if is_fwd2:
+                                edge_coverages[e2_idx] = (0.0, L2)
+                            else:
+                                E2_L = edge_data[e2_idx]['L']
+                                edge_coverages[e2_idx] = (E2_L - L2, E2_L)
 
-                        candidates.append({'body': V_pos, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages})
+                            candidates.append(
+                                {'body': V_pos, 'tip1': tip1, 'tip2': tip2, 'edge_coverages': edge_coverages, 'ml': ml})
 
-        # C. Define Chunks dynamically based on LightBender tips
+        # C. Define Chunks dynamically based on all potential LightBender tips
         edge_chunks = {}
         global_chunk_id = 0
 
@@ -422,7 +449,7 @@ class SetCoverStrategy(AllocationStrategy):
             lb = Point3D(
                 id=lb_id, x=cand['body'][0], y=cand['body'][1], z=cand['body'][2],
                 length_1=l1, length_2=l2, angle_1=a1, angle_2=a2,
-                yaw=yaw, max_length_limit=max_length
+                yaw=yaw, max_length_limit=cand['ml']
             )
             lightbenders.append(lb)
 
@@ -470,22 +497,34 @@ class SetCoverStrategy(AllocationStrategy):
     def _solve_set_cover(self, candidates, num_chunks):
         target_mask = (1 << num_chunks) - 1
 
-        valid_indices = []
         cand_masks = []
-
-        for i, cand in enumerate(candidates):
-            if not cand['covered']: continue
+        for cand in candidates:
             mask = 0
-            for c in cand['covered']:
-                mask |= (1 << c)
+            if 'covered' in cand:
+                for c in cand['covered']:
+                    mask |= (1 << c)
             cand_masks.append(mask)
-            valid_indices.append(i)
+
+        # Optimization: Drop redundant larger LB options if they cover the EXACT same chunks
+        # as a smaller LB option (happens at corners or short edges).
+        unique_masks = {}
+        for i, mask in enumerate(cand_masks):
+            if mask == 0: continue
+            if mask not in unique_masks:
+                unique_masks[mask] = i
+            else:
+                existing_idx = unique_masks[mask]
+                if candidates[i]['ml'] < candidates[existing_idx]['ml']:
+                    unique_masks[mask] = i
+
+        valid_indices = list(unique_masks.values())
+        filtered_masks = [cand_masks[i] for i in valid_indices]
 
         # Initial Greedy Bound
         greedy_sol = []
         greedy_covered = 0
         greedy_overlap = 0
-        temp_masks = cand_masks[:]
+        temp_masks = filtered_masks[:]
 
         while greedy_covered != target_mask:
             best_idx = -1
@@ -495,6 +534,11 @@ class SetCoverStrategy(AllocationStrategy):
                 if gain > best_gain:
                     best_gain = gain
                     best_idx = i
+                # Tiebreaker: smaller length
+                elif gain == best_gain and gain > 0:
+                    if candidates[valid_indices[i]]['ml'] < candidates[valid_indices[best_idx]]['ml']:
+                        best_idx = i
+
             if best_idx == -1: break
             greedy_sol.append(best_idx)
             greedy_overlap += bin(temp_masks[best_idx] & greedy_covered).count('1')
@@ -502,23 +546,24 @@ class SetCoverStrategy(AllocationStrategy):
 
         best_size = len(greedy_sol)
         best_overlap = greedy_overlap
+        best_len_sum = sum(candidates[valid_indices[i]]['ml'] for i in greedy_sol)
         best_solution = greedy_sol
 
-        # Sort for B&B
+        # Sort for B&B (most chunks covered first)
         cand_order = list(range(len(valid_indices)))
-        cand_order.sort(key=lambda x: bin(cand_masks[x]).count('1'), reverse=True)
+        cand_order.sort(key=lambda x: bin(filtered_masks[x]).count('1'), reverse=True)
 
         rem_masks = [0] * len(cand_order)
         accum = 0
         for i in reversed(range(len(cand_order))):
-            accum |= cand_masks[cand_order[i]]
+            accum |= filtered_masks[cand_order[i]]
             rem_masks[i] = accum
 
         iters = 0
         MAX_ITERS = 100000
 
-        def backtrack(cand_idx, current_mask, current_solution, current_overlap):
-            nonlocal best_solution, best_size, best_overlap, iters
+        def backtrack(cand_idx, current_mask, current_solution, current_overlap, current_len_sum):
+            nonlocal best_solution, best_size, best_overlap, best_len_sum, iters
 
             iters += 1
             if iters > MAX_ITERS:
@@ -526,11 +571,20 @@ class SetCoverStrategy(AllocationStrategy):
 
             # If all chunks covered, check if it's the best so far
             if current_mask == target_mask:
-                # Primary Obj: Minimize Size. Secondary Obj: Minimize Overlap.
-                if len(current_solution) < best_size or (
-                        len(current_solution) == best_size and current_overlap < best_overlap):
+                # Hierarchy of Objectives
+                is_better = False
+                if len(current_solution) < best_size:
+                    is_better = True
+                elif len(current_solution) == best_size:
+                    if current_overlap < best_overlap:
+                        is_better = True
+                    elif current_overlap == best_overlap and current_len_sum < best_len_sum:
+                        is_better = True
+
+                if is_better:
                     best_size = len(current_solution)
                     best_overlap = current_overlap
+                    best_len_sum = current_len_sum
                     best_solution = list(current_solution)
                 return
 
@@ -547,7 +601,8 @@ class SetCoverStrategy(AllocationStrategy):
                 return
 
             c_id = cand_order[cand_idx]
-            c_mask = cand_masks[c_id]
+            c_mask = filtered_masks[c_id]
+            cand_ml = candidates[valid_indices[c_id]]['ml']
             new_mask = current_mask | c_mask
 
             # Branch 1: Take candidate (only if it adds coverage)
@@ -555,19 +610,25 @@ class SetCoverStrategy(AllocationStrategy):
                 # Calculate how much redundancy this candidate introduces
                 added_overlap = bin(current_mask & c_mask).count('1')
 
-                # Lookahead Pruning: If taking this candidate puts us at the size limit,
-                # but the overlap is already worse than our best record, prune it
-                if len(current_solution) == best_size - 1 and (current_overlap + added_overlap) >= best_overlap:
-                    pass
-                else:
+                # Lookahead Pruning:
+                should_prune = False
+                if len(current_solution) == best_size - 1:
+                    if (current_overlap + added_overlap) > best_overlap:
+                        should_prune = True
+                    elif (current_overlap + added_overlap) == best_overlap and (
+                            current_len_sum + cand_ml) >= best_len_sum:
+                        should_prune = True
+
+                if not should_prune:
                     current_solution.append(c_id)
-                    backtrack(cand_idx + 1, new_mask, current_solution, current_overlap + added_overlap)
+                    backtrack(cand_idx + 1, new_mask, current_solution, current_overlap + added_overlap,
+                              current_len_sum + cand_ml)
                     current_solution.pop()
 
             # Branch 2: Skip candidate
-            backtrack(cand_idx + 1, current_mask, current_solution, current_overlap)
+            backtrack(cand_idx + 1, current_mask, current_solution, current_overlap, current_len_sum)
 
-        backtrack(0, 0, [], 0)
+        backtrack(0, 0, [], 0, 0)
 
         return [valid_indices[i] for i in best_solution]
 
@@ -575,8 +636,8 @@ class SetCoverStrategy(AllocationStrategy):
 # --- Allocation Processor ---
 
 class Allocator:
-    def __init__(self, max_length_limit: float):
-        self.max_length_limit = max_length_limit
+    def __init__(self, max_lengths: List[float]):
+        self.max_lengths = max_lengths
 
     def run(self, graph: TargetGraph, policy: str) -> List[Point3D]:
         if policy.upper() == "MIDPOINT":
@@ -589,7 +650,7 @@ class Allocator:
             raise ValueError(f"Unknown allocation policy: {policy}")
 
         print(f"Running Allocation with {policy} policy...")
-        return strategy.allocate(graph, self.max_length_limit)
+        return strategy.allocate(graph, self.max_lengths)
 
 
 # --- Visualization ---
@@ -623,7 +684,7 @@ def visualize_allocation(graph: TargetGraph, lightbenders: List[Point3D]):
         body = np.array([lb.x, lb.y, lb.z])
         ax.scatter(*body, color='orange', s=80, edgecolors='red', zorder=5,
                    label='LightBender Body' if lb.id == 0 else "")
-        ax.text(lb.x, lb.y, lb.z + 0.05, f"LB{lb.id}", fontsize=8)
+        ax.text(lb.x, lb.y, lb.z + 0.05, f"LB{lb.id} (L={lb.max_length_limit})", fontsize=8)
 
         if lb.length_1 > 0:
             t1 = get_line_tip(lb.x, lb.y, lb.z, lb.length_1, lb.angle_1, lb.yaw)
@@ -678,9 +739,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="allocated_points.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="SET_COVER",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
                         help="Placement policy")
-    parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
+    parser.add_argument("--max_lens", type=float, nargs='+', default=[0.08, 0.16, 0.32],
+                        help="List of allowed maximum lengths for rods")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
 
@@ -688,7 +750,7 @@ if __name__ == "__main__":
 
     graph = TargetGraph(args.input)
 
-    allocator = Allocator(max_length_limit=args.max_len)
+    allocator = Allocator(max_lengths=args.max_lens)
     lightbenders = allocator.run(graph, args.policy)
 
     # Metrics
@@ -697,12 +759,13 @@ if __name__ == "__main__":
         1 for lb in lightbenders if lb.length_2 > 1e-3)
     total_length = sum(lb.length_1 + lb.length_2 for lb in lightbenders)
 
-    max_capacity = total_lbs * 2 * args.max_len
+    max_capacity = sum(lb.max_length_limit * 2 for lb in lightbenders)
     utilization = (total_length / max_capacity * 100) if max_capacity > 0 else 0
     avg_rod_len = (total_length / total_rods) if total_rods > 0 else 0
 
     print("\n--- Allocation Metrics ---")
     print(f"Policy:                 {args.policy}")
+    print(f"Available Max Lengths:  {args.max_lens}")
     print(f"Total LightBenders:     {total_lbs}")
     print(f"Total Rods Activated:   {total_rods}")
     print(f"Average Rod Length:     {avg_rod_len:.2f}")
