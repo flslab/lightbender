@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
+
 # from logger.logger import setup_logging
 
 matplotlib.use('macosx')
@@ -42,6 +43,16 @@ class Point3D:
         return np.array([self.x, self.y, self.z])
 
 
+def check_downwash(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
+    """Checks if two points violate the XY projection (downwash) threshold."""
+    return np.linalg.norm(p1[:2] - p2[:2]) < threshold
+
+
+def check_collision(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
+    """Checks if two points violate the 3D distance (collision) threshold."""
+    return np.linalg.norm(p1 - p2) < threshold
+
+
 class InterferenceGraph:
     def __init__(self, points: List[Point3D], threshold: float):
         """
@@ -52,6 +63,9 @@ class InterferenceGraph:
         self.points = {p.id: p for p in points}
         self.threshold = threshold
         self.initial_positions = {p.id: p.position for p in points}
+        self.total_collision = 0
+        self.total_downwash = 0
+        self.edge_types = {}  # Store edge conflict type: 'collision' or 'downwash'
         self.adjacency = self._compute_adjacency()
 
     def _compute_adjacency(self) -> Dict[int, Set[int]]:
@@ -60,19 +74,33 @@ class InterferenceGraph:
         ids = list(self.points.keys())
         n = len(ids)
 
+        total_collision = 0
+        total_downwash = 0
         for i in range(n):
             for j in range(i + 1, n):
                 id_i, id_j = ids[i], ids[j]
 
-                # Use only X and Y for distance calculation
-                p1 = self.points[id_i].position[:2]
-                p2 = self.points[id_j].position[:2]
+                p1_3d = self.points[id_i].position
+                p2_3d = self.points[id_j].position
 
-                dist = np.linalg.norm(p1 - p2)
+                is_col = check_collision(p1_3d, p2_3d, self.threshold)
+                is_dw = check_downwash(p1_3d, p2_3d, self.threshold)
 
-                if dist < self.threshold:
+                if is_col:
                     adj[id_i].add(id_j)
                     adj[id_j].add(id_i)
+                    total_collision += 1
+                    self.edge_types[(id_i, id_j)] = 'collision'
+                    self.edge_types[(id_j, id_i)] = 'collision'
+                elif is_dw:
+                    adj[id_i].add(id_j)
+                    adj[id_j].add(id_i)
+                    total_downwash += 1
+                    self.edge_types[(id_i, id_j)] = 'downwash'
+                    self.edge_types[(id_j, id_i)] = 'downwash'
+
+        self.total_collision = total_collision
+        self.total_downwash = total_downwash
         return adj
 
     @property
@@ -121,7 +149,7 @@ def calculate_perspective_scale(orig_pos: np.ndarray, new_pos: np.ndarray, camer
 
 
 def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray, optical_axis: np.ndarray) -> \
-Tuple[float, float]:
+        Tuple[float, float]:
     """Computes the physical lengths of lines after perspective scaling using optical axis distance."""
     orig_pos = np.array([point.x, point.y, point.z])
     scale = calculate_perspective_scale(orig_pos, new_pos, camera_pos, optical_axis)
@@ -419,12 +447,9 @@ class ResolutionStrategy:
 
     def _is_valid(self, candidate_pos, placed_positions, graph, current_id=None):
         """Checks if candidate_pos interferes with any placed points in XY plane."""
-        cand_2d = candidate_pos[:2]  # X, Y only
-
         for neighbor_id, neighbor_pos in placed_positions.items():
-            neighbor_2d = neighbor_pos[:2]
-            dist = np.linalg.norm(cand_2d - neighbor_2d)
-            if dist < self.threshold:
+            if check_collision(candidate_pos, neighbor_pos, self.threshold) or \
+                    check_downwash(candidate_pos, neighbor_pos, self.threshold):
                 return False
         return True
 
@@ -556,6 +581,82 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
         logger.error(f"Failed to save output YAML: {e}")
 
 
+def visualize_interference_graph(graph: InterferenceGraph,
+                                 moved_indices: List[int],
+                                 final_positions: Dict[int, np.ndarray]):
+    """
+    Visualizes the initial interference graph in 3D.
+    Shows different edge colors for downwash vs. collision conflicts.
+    Marks nodes based on selection and movement status.
+    """
+    try:
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+    except Exception as e:
+        logger.info(f"Visualization setup failed: {e}")
+        return
+
+    moved_set = set(moved_indices)
+    actual_moved = set()
+    selected_not_moved = set()
+
+    for pid in moved_set:
+        orig = graph.initial_positions[pid]
+        new = final_positions.get(pid, orig)
+        if np.linalg.norm(new - orig) > 1e-6:
+            actual_moved.add(pid)
+        else:
+            selected_not_moved.add(pid)
+
+    # Draw nodes
+    for pid in graph.nodes:
+        pos = graph.initial_positions[pid]
+        if pid in actual_moved:
+            ax.scatter(pos[0], pos[1], pos[2], c='green', marker='^', s=100, label='Selected & Moved')
+        elif pid in selected_not_moved:
+            ax.scatter(pos[0], pos[1], pos[2], c='red', marker='X', s=100, label='Selected & NOT Moved')
+        else:
+            ax.scatter(pos[0], pos[1], pos[2], c='blue', marker='o', s=50, label='Fixed (Not Selected)')
+        ax.text(pos[0], pos[1], pos[2] + 0.01, f" {pid}", fontsize=9)
+
+    # Draw edges
+    drawn_edges = set()
+    for u in graph.nodes:
+        for v in graph.get_neighbors(u):
+            edge = tuple(sorted((u, v)))
+            if edge not in drawn_edges:
+                drawn_edges.add(edge)
+                pos_u = graph.initial_positions[u]
+                pos_v = graph.initial_positions[v]
+                etype = graph.edge_types.get(edge, 'downwash')
+
+                if etype == 'collision':
+                    ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
+                            c='red', linewidth=2, label='Collision Edge')
+                else:
+                    ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
+                            c='orange', linewidth=2, linestyle='--', label='Downwash Edge')
+
+    ax.set_title(
+        f"Initial Interference Graph\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    # Deduplicate legend items since we draw lines inside a loop
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys())
+    ax.set_aspect('equal')
+    ax.view_init(elev=0, azim=0)
+
+    if args.save_viz:
+        plt.savefig(args.viz_graph_output_file, dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+
 def visualize_solution_2d(graph: InterferenceGraph,
                           moved_indices: List[int],
                           final_positions: Dict[int, np.ndarray],
@@ -576,7 +677,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     moved_set = set(moved_indices)
 
     # --- Plot 1: Before ---
-    ax1.set_title(f"Before Resolution ({len(moved_indices)} conflicts)")
+    ax1.set_title(f"Before Resolution ({len(moved_indices)} selected)")
     ax1.plot(camera_pos[0], camera_pos[1], 'k*', markersize=15, label='Camera')
 
     for i, pid in enumerate(all_ids):
@@ -732,6 +833,7 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     ax.set_zlabel('Z')
     ax.set_title("3D Point Structure (Dotted=Max Limit, Solid=Scaled Length)")
     ax.set_aspect('equal')
+    # ax.view_init(elev=0, azim=0)
 
     if args.save_viz:
         plt.savefig(args.viz_3d_output_file, dpi=300)
@@ -750,6 +852,8 @@ if __name__ == "__main__":
                         help="Path to output 2d visualization file")
     parser.add_argument("--viz_3d_output_file", type=str, default="3d_viz.png",
                         help="Path to output 3d visualization file")
+    parser.add_argument("--viz_graph_output_file", type=str, default="graph_viz.png",
+                        help="Path to output graph visualization file")
 
     # Parameters
     parser.add_argument("--threshold", type=float, default=0.16, help="Interference threshold distance")
@@ -858,6 +962,8 @@ if __name__ == "__main__":
     # Metrics Calculation
     num_selected = len(moved)
     num_moved = len(moved_distances)
+    num_conflicts = graph.total_downwash
+    num_collisions = graph.total_collision
 
     if num_moved > 0:
         avg_dist = float(np.mean(moved_distances))
@@ -869,11 +975,14 @@ if __name__ == "__main__":
         max_dist = 0.0
 
     if args.csv:
-        # CSV format: PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
-        print(f"{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+        # CSV format: TotalConflicts,Collisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
+        print(
+            f"{num_conflicts},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
     else:
         logger.info("=" * 40)
         logger.info("METRICS SUMMARY")
+        logger.info(f"Conflicts:               {num_conflicts}")
+        logger.info(f"Collisions:              {num_collisions}")
         logger.info(f"Points Selected to Move: {num_selected}")
         logger.info(f"Points Actually Moved:   {num_moved}")
         logger.info(f"Travel Distance - Avg:   {avg_dist:.4f}")
@@ -886,6 +995,8 @@ if __name__ == "__main__":
 
     # 8. Visualize Results (Optional)
     if not args.no_viz:
+        # Interference Graph Visualization
+        visualize_interference_graph(graph, moved, positions)
         # 2D Before/After
         visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
         # 3D Structure Visualization
