@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import yaml
 import os
@@ -287,6 +288,10 @@ class SetCoverStrategy(AllocationStrategy):
             if L <= 2 * max_length:
                 # One candidate perfectly covers the whole edge
                 edge_d_candidates.append(L / 2.0)
+                # edge_d_candidates.append(0)
+                # edge_d_candidates.append(max_length)
+                # edge_d_candidates.append(L - max_length)
+                # edge_d_candidates.append(L)
             else:
                 # Spanning from Endpoint A
                 d = max_length
@@ -532,6 +537,7 @@ class SetCoverStrategy(AllocationStrategy):
                     best_size = len(current_solution)
                     best_overlap = current_overlap
                     best_solution = list(current_solution)
+                    print("A better solution than greedy is found.")
                 return
 
             # Prune if adding one more candidate will exceed the best known size
@@ -572,6 +578,7 @@ class SetCoverStrategy(AllocationStrategy):
         print(f"Total Candidates:   {len(cand_order)}")
         print(f"Total Chunks:       {num_chunks}")
         print(f"Total Iterations:   {iters}")
+        print(f"Greedy Solution:    {best_size}")
         return [valid_indices[i] for i in best_solution]
 
 
@@ -642,6 +649,7 @@ def visualize_allocation(graph: TargetGraph, lightbenders: List[Point3D]):
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title(f"Policy: {args.policy}")
+    ax.view_init(elev=0, azim=0)
 
     extents = np.array([getattr(ax, f'get_{dim}lim')() for dim in 'xyz'])
     sz = extents[:, 1] - extents[:, 0]
@@ -692,7 +700,9 @@ if __name__ == "__main__":
     graph = TargetGraph(args.input)
 
     allocator = Allocator(max_length_limit=args.max_len)
+    start_time = time.time()
     lightbenders = allocator.run(graph, args.policy)
+    end_time = time.time()
 
     # Metrics
     total_lbs = len(lightbenders)
@@ -706,6 +716,7 @@ if __name__ == "__main__":
 
     print("\n--- Allocation Metrics ---")
     print(f"Policy:                 {args.policy}")
+    print(f"Execution Time:         {end_time - start_time}")
     print(f"Total LightBenders:     {total_lbs}")
     print(f"Total Rods Activated:   {total_rods}")
     print(f"Average Rod Length:     {avg_rod_len:.2f}")
