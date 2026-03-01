@@ -66,6 +66,8 @@ class InterferenceGraph:
         self.total_collision = 0
         self.total_downwash = 0
         self.edge_types = {}  # Store edge conflict type: 'collision' or 'downwash'
+        self.node_collisions = {pid: 0 for pid in self.points}
+        self.node_downwashes = {pid: 0 for pid in self.points}
         self.adjacency = self._compute_adjacency()
 
     def _compute_adjacency(self) -> Dict[int, Set[int]]:
@@ -92,12 +94,16 @@ class InterferenceGraph:
                     total_collision += 1
                     self.edge_types[(id_i, id_j)] = 'collision'
                     self.edge_types[(id_j, id_i)] = 'collision'
+                    self.node_collisions[id_i] += 1
+                    self.node_collisions[id_j] += 1
                 elif is_dw:
                     adj[id_i].add(id_j)
                     adj[id_j].add(id_i)
                     total_downwash += 1
                     self.edge_types[(id_i, id_j)] = 'downwash'
                     self.edge_types[(id_j, id_i)] = 'downwash'
+                    self.node_downwashes[id_i] += 1
+                    self.node_downwashes[id_j] += 1
 
         self.total_collision = total_collision
         self.total_downwash = total_downwash
@@ -638,7 +644,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
                             c='orange', linewidth=2, linestyle='--', label='Downwash Edge')
 
     ax.set_title(
-        f"Initial Interference Graph\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+        f"Initial Conflict Graph\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
@@ -652,6 +658,45 @@ def visualize_interference_graph(graph: InterferenceGraph,
 
     if args.save_viz:
         plt.savefig(args.viz_graph_output_file, dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+
+def visualize_conflict_bar_chart(graph: InterferenceGraph):
+    """
+    Visualizes the number of downwash and collision conflicts per point using a grouped bar chart.
+    """
+    try:
+        fig, ax = plt.subplots(figsize=(12, 6))
+    except Exception as e:
+        logger.info(f"Visualization setup failed: {e}")
+        return
+
+    nodes = sorted(graph.nodes)
+    collisions = [graph.node_collisions[pid] for pid in nodes]
+    downwashes = [graph.node_downwashes[pid] for pid in nodes]
+
+    x = np.arange(len(nodes))
+    width = 0.35
+
+    ax.bar(x - width / 2, downwashes, width, label='Downwash', color='orange')
+    ax.bar(x + width / 2, collisions, width, label='Collision', color='red')
+
+    ax.set_ylabel('Number of Conflicts')
+    ax.set_xlabel('LightBender ID')
+    ax.set_title('Conflicts per LightBender (Collision vs Downwash)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(nodes)
+    ax.legend()
+
+    # Add grid for easier visual reading
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    plt.tight_layout()
+
+    if args.save_viz:
+        plt.savefig(args.viz_bar_output_file, dpi=300)
         plt.close()
     else:
         plt.show()
@@ -831,7 +876,7 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
-    ax.set_title("3D Point Structure (Dotted=Max Limit, Solid=Scaled Length)")
+    ax.set_title("3D LightBender Structure (Dotted=Max Limit, Solid=Scaled Length)")
     ax.set_aspect('equal')
     # ax.view_init(elev=0, azim=0)
 
@@ -854,6 +899,8 @@ if __name__ == "__main__":
                         help="Path to output 3d visualization file")
     parser.add_argument("--viz_graph_output_file", type=str, default="graph_viz.png",
                         help="Path to output graph visualization file")
+    parser.add_argument("--viz_bar_output_file", type=str, default="bar_viz.png",
+                        help="Path to output conflict bar chart file")
 
     # Parameters
     parser.add_argument("--threshold", type=float, default=0.16, help="Interference threshold distance")
@@ -979,16 +1026,16 @@ if __name__ == "__main__":
         print(
             f"{num_conflicts},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
     else:
-        logger.info("=" * 40)
-        logger.info("METRICS SUMMARY")
-        logger.info(f"Conflicts:               {num_conflicts}")
-        logger.info(f"Collisions:              {num_collisions}")
-        logger.info(f"Points Selected to Move: {num_selected}")
-        logger.info(f"Points Actually Moved:   {num_moved}")
-        logger.info(f"Travel Distance - Avg:   {avg_dist:.4f}")
-        logger.info(f"Travel Distance - Min:   {min_dist:.4f}")
-        logger.info(f"Travel Distance - Max:   {max_dist:.4f}")
-        logger.info("=" * 40)
+        print("=" * 40)
+        print("METRICS SUMMARY")
+        print(f"Downwash conflicts:            {num_conflicts}")
+        print(f"Collision Conflicts:           {num_collisions}")
+        print(f"LightBenders Selected to Move: {num_selected}")
+        print(f"LightBenders Actually Moved:   {num_moved}")
+        print(f"Travel Distance - Avg:         {avg_dist:.4f}")
+        print(f"Travel Distance - Min:         {min_dist:.4f}")
+        print(f"Travel Distance - Max:         {max_dist:.4f}")
+        print("=" * 40)
 
     # 7. Save Results
     save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
@@ -997,6 +1044,8 @@ if __name__ == "__main__":
     if not args.no_viz:
         # Interference Graph Visualization
         visualize_interference_graph(graph, moved, positions)
+        # Conflict Bar Chart
+        visualize_conflict_bar_chart(graph)
         # 2D Before/After
         visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
         # 3D Structure Visualization
