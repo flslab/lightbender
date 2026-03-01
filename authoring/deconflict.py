@@ -14,6 +14,13 @@ from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
 
+try:
+    import networkx as nx
+
+    HAS_NX = True
+except ImportError:
+    HAS_NX = False
+
 # from logger.logger import setup_logging
 
 matplotlib.use('macosx')
@@ -589,15 +596,21 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
 
 def visualize_interference_graph(graph: InterferenceGraph,
                                  moved_indices: List[int],
-                                 final_positions: Dict[int, np.ndarray]):
+                                 final_positions: Dict[int, np.ndarray],
+                                 abstract_layout: bool = False):
     """
-    Visualizes the initial interference graph in 3D.
+    Visualizes the initial interference graph.
+    If abstract_layout is True, uses a 2D spring/force-directed layout.
+    Otherwise, uses the actual 3D physical coordinates.
     Shows different edge colors for downwash vs. collision conflicts.
     Marks nodes based on selection and movement status.
     """
     try:
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        if abstract_layout:
+            fig, ax = plt.subplots(figsize=(10, 8))
+        else:
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
         return
@@ -614,47 +627,102 @@ def visualize_interference_graph(graph: InterferenceGraph,
         else:
             selected_not_moved.add(pid)
 
-    # Draw nodes
-    for pid in graph.nodes:
-        pos = graph.initial_positions[pid]
-        if pid in actual_moved:
-            ax.scatter(pos[0], pos[1], pos[2], c='green', marker='^', s=100, label='Selected & Moved')
-        elif pid in selected_not_moved:
-            ax.scatter(pos[0], pos[1], pos[2], c='red', marker='X', s=100, label='Selected & NOT Moved')
+    if abstract_layout:
+        # Generate abstract 2D layout
+        edges_list = []
+        for u in graph.nodes:
+            for v in graph.get_neighbors(u):
+                if u < v:
+                    edges_list.append((u, v))
+
+        if HAS_NX:
+            G = nx.Graph()
+            G.add_nodes_from(graph.nodes)
+            G.add_edges_from(edges_list)
+            pos = nx.shell_layout(G)
+            # pos = nx.spring_layout(G)
+            # pos = nx.kamada_kawai_layout(G)
         else:
-            ax.scatter(pos[0], pos[1], pos[2], c='blue', marker='o', s=50, label='Fixed (Not Selected)')
-        ax.text(pos[0], pos[1], pos[2] + 0.01, f" {pid}", fontsize=9)
+            # Fallback to circle layout if networkx is missing
+            pos = {}
+            n = len(graph.nodes)
+            for i, pid in enumerate(sorted(graph.nodes)):
+                angle = 2 * math.pi * i / max(1, n)
+                pos[pid] = np.array([math.cos(angle), math.sin(angle)])
 
-    # Draw edges
-    drawn_edges = set()
-    for u in graph.nodes:
-        for v in graph.get_neighbors(u):
+        # Draw nodes in 2D
+        for pid in graph.nodes:
+            p = pos[pid]
+            if pid in actual_moved:
+                ax.scatter(p[0], p[1], c='green', marker='^', s=100, label='Selected & Moved', zorder=5)
+            elif pid in selected_not_moved:
+                ax.scatter(p[0], p[1], c='red', marker='X', s=100, label='Selected & NOT Moved', zorder=5)
+            else:
+                ax.scatter(p[0], p[1], c='blue', marker='o', s=50, label='Fixed (Not Selected)', zorder=5)
+            ax.text(p[0], p[1] + 0.05, f" {pid}", fontsize=9, zorder=10)
+
+        # Draw edges in 2D
+        for u, v in edges_list:
             edge = tuple(sorted((u, v)))
-            if edge not in drawn_edges:
-                drawn_edges.add(edge)
-                pos_u = graph.initial_positions[u]
-                pos_v = graph.initial_positions[v]
-                etype = graph.edge_types.get(edge, 'downwash')
+            pos_u = pos[u]
+            pos_v = pos[v]
+            etype = graph.edge_types.get(edge, 'downwash')
 
-                if etype == 'collision':
-                    ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
-                            c='red', linewidth=2, label='Collision Edge')
-                else:
-                    ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
-                            c='orange', linewidth=2, linestyle='--', label='Downwash Edge')
+            if etype == 'collision':
+                ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]],
+                        c='red', linewidth=2, label='Collision Edge', zorder=1)
+            else:
+                ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]],
+                        c='orange', linewidth=2, linestyle='--', label='Downwash Edge', zorder=1)
 
-    ax.set_title(
-        f"Initial Conflict Graph\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
+        ax.set_title(
+            f"Abstract Conflict Graph (2D Layout)\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect('equal')
 
-    # Deduplicate legend items since we draw lines inside a loop
+    else:
+        # --- Original 3D drawing logic ---
+        # Draw nodes
+        for pid in graph.nodes:
+            pos = graph.initial_positions[pid]
+            if pid in actual_moved:
+                ax.scatter(pos[0], pos[1], pos[2], c='green', marker='^', s=100, label='Selected & Moved')
+            elif pid in selected_not_moved:
+                ax.scatter(pos[0], pos[1], pos[2], c='red', marker='X', s=100, label='Selected & NOT Moved')
+            else:
+                ax.scatter(pos[0], pos[1], pos[2], c='blue', marker='o', s=50, label='Fixed (Not Selected)')
+            ax.text(pos[0], pos[1], pos[2] + 0.01, f" {pid}", fontsize=9)
+
+        # Draw edges
+        drawn_edges = set()
+        for u in graph.nodes:
+            for v in graph.get_neighbors(u):
+                edge = tuple(sorted((u, v)))
+                if edge not in drawn_edges:
+                    drawn_edges.add(edge)
+                    pos_u = graph.initial_positions[u]
+                    pos_v = graph.initial_positions[v]
+                    etype = graph.edge_types.get(edge, 'downwash')
+
+                    if etype == 'collision':
+                        ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
+                                c='red', linewidth=2, label='Collision Edge')
+                    else:
+                        ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
+                                c='orange', linewidth=2, linestyle='--', label='Downwash Edge')
+
+        ax.set_title(
+            f"Initial Conflict Graph (3D Actual)\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_aspect('equal')
+        ax.view_init(elev=0, azim=0)
+
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(by_label.values(), by_label.keys())
-    ax.set_aspect('equal')
-    ax.view_init(elev=0, azim=0)
 
     if args.save_viz:
         plt.savefig(args.viz_graph_output_file, dpi=300)
@@ -920,6 +988,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--no_viz", action='store_true', help="Disable visualization")
     parser.add_argument("--save_viz", action='store_true', help="Save visualization as files")
+    parser.add_argument("--abstract_graph", action='store_true', help="Use abstract 2D layout for graph visualization")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()
@@ -986,7 +1055,7 @@ if __name__ == "__main__":
 
     moved_distances = []
 
-    # Retrieve computed optical axis from solver for consistent reporting
+    # Retrieve computed optical axis
     OPTICAL_AXIS = solver.optical_axis
 
     for pid in moved:
@@ -1009,7 +1078,7 @@ if __name__ == "__main__":
     # Metrics Calculation
     num_selected = len(moved)
     num_moved = len(moved_distances)
-    num_conflicts = graph.total_downwash
+    num_downwashes = graph.total_downwash
     num_collisions = graph.total_collision
 
     if num_moved > 0:
@@ -1022,13 +1091,13 @@ if __name__ == "__main__":
         max_dist = 0.0
 
     if args.csv:
-        # CSV format: TotalConflicts,Collisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
+        # CSV format: Downwashes,Collisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
         print(
-            f"{num_conflicts},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+            f"{num_downwashes},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
     else:
         print("=" * 40)
         print("METRICS SUMMARY")
-        print(f"Downwash conflicts:            {num_conflicts}")
+        print(f"Downwash conflicts:            {num_downwashes}")
         print(f"Collision Conflicts:           {num_collisions}")
         print(f"LightBenders Selected to Move: {num_selected}")
         print(f"LightBenders Actually Moved:   {num_moved}")
@@ -1043,7 +1112,7 @@ if __name__ == "__main__":
     # 8. Visualize Results (Optional)
     if not args.no_viz:
         # Interference Graph Visualization
-        visualize_interference_graph(graph, moved, positions)
+        visualize_interference_graph(graph, moved, positions, abstract_layout=args.abstract_graph)
         # Conflict Bar Chart
         visualize_conflict_bar_chart(graph)
         # 2D Before/After
