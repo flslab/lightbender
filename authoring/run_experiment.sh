@@ -13,15 +13,20 @@ BASE_RESULTS_DIR="results_structured"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Configuration Arrays ---
-SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
-RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
-TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
-MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
-PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
+SELECTION_METHODS=("GREEDY_MAX_DEGREE")
+#SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
+RESOLUTION_ORDERS=("MAX_DEGREE")
+#RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
+TRAJECTORY_TYPES=("POINT_SPECIFIC")
+#TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
+MOVE_DIRECTIONS=("HYBRID")
+#MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
+PLACEMENT_TYPES=("MIN_DISTANCE")
+#PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
 
 # Shared Camera Position (must match defaults in python scripts or be passed explicitly)
 CAM_X=2.3
-CAM_Y=0.0
+CAM_Y=1.5
 CAM_Z=0.8
 
 # --- Execution ---
@@ -49,7 +54,7 @@ for input_file in "${INPUT_FILES[@]}"; do
     # 2. Initialize CSV for this file
     CSV_FILE="$FILE_DIR/${FILE_BASENAME}.csv"
     # Write Header
-    echo "InputFile,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,PlacementType,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore" > "$CSV_FILE"
+    echo "InputFile,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,PlacementType,DownwahConflicts,Collisions,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore" > "$CSV_FILE"
 
     # 3. Generate Reference SVG
     REF_SVG_PATH="$FILE_DIR/svg/ref_${FILE_BASENAME}.svg"
