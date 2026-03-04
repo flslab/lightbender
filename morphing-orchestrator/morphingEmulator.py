@@ -39,6 +39,10 @@ class Drone:
 class Scene:
     drones: Dict[str, Drone] = field(default_factory=dict)
 
+# 1. Define this custom dumper at the top of your file to prevent `&id001` alias tags
+class NoAliasDumper(yaml.SafeDumper):
+    def ignore_aliases(self, data):
+        return True
 
 # -----------------------------
 # Replacement Logic
@@ -50,7 +54,7 @@ class Replacement:
 
     def __init__(self, args):
         self.args = args
-        self.mission_file = "coordinateMission.yaml"
+        self.mission_file = "debug.yaml"
         self.mission = self.read_in_mission_file(self.mission_file)
         self.input_scene = self.parse_in_mission_file()
 
@@ -95,12 +99,12 @@ class Replacement:
         coordinate_F = full_fls.target
 
         # Compute x coordinate
-        adjacent = coordinate_E[0] + 235
-        alpha = math.atan(156/adjacent)
+        adjacent = coordinate_E[0] + 2.35
+        alpha = math.atan(1.56/adjacent)
         beta = 0.25
         epsilon = math.tan(math.pi/2 - alpha)*beta
 
-        replacement_x = coordinate_E[0] - 156 + epsilon
+        replacement_x = coordinate_E[0] - 1.56 + epsilon
         replacement_y = coordinate_E[1] - beta
         replacement_z = coordinate_E[2]
 
@@ -118,7 +122,8 @@ class Replacement:
         replacement_drone_enter_scene = self.generate_replacement_pose(empty_fls, full_fls)
         
         replacement_drone_first_waypoint = replacement_drone_origin_waypoint
-        replacement_drone_first_waypoint[1] = replacement_drone_enter_scene[1]
+        replacement_drone_first_waypoint[1] = replacement_drone_enter_scene[1] 
+        replacement_drone_first_waypoint[0] = replacement_drone_enter_scene[0] - 0.25
 
         replacement_drone_waypoints.append(replacement_drone_origin_waypoint)
         replacement_drone_waypoints.append(replacement_drone_first_waypoint)
@@ -131,8 +136,6 @@ class Replacement:
         replacement_waypoints = self.replace_pose_data()
         self.input_scene.drones["lb3"].waypoints = replacement_waypoints + self.input_scene.drones["lb2"].waypoints
         self.input_scene.drones["lb2"].waypoints += replacement_waypoints
-
-        print(self.input_scene.drones)
 
         output_yaml = {
             "name": "Scene",
@@ -158,8 +161,10 @@ class Replacement:
                 }
             }
 
+        print(output_yaml)
+
         with open("mission.yaml", "w") as f:
-            yaml.dump(output_yaml, f, sort_keys=False, default_flow_style=None)
+            yaml.dump(output_yaml, f, sort_keys=False, Dumper=NoAliasDumper, default_flow_style=None)
 
         print("Swap mission generated (matching mission.YAML structure).")
 
