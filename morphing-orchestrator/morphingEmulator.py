@@ -44,10 +44,6 @@ class NoAliasDumper(yaml.SafeDumper):
     def ignore_aliases(self, data):
         return True
 
-# -----------------------------
-# Replacement Logic
-# -----------------------------
-
 class Replacement:
     SAFE_SPEED = 300.0  # mm/sec (tune for your drones)
     SAFETY_DELAY = 1.0  # seconds buffer to prevent overlap
@@ -95,47 +91,80 @@ class Replacement:
         return Scene(drones=drones)
 
     def generate_replacement_pose(self, empty_fls, full_fls):
-        coordinate_E = empty_fls.target
-        coordinate_F = full_fls.target
+        coordinate_E = empty_fls.waypoints[0]
+        coordinate_F = full_fls.waypoints[0]
 
-        # Compute x coordinate
-        adjacent = coordinate_E[0] + 2.35
+        # Compute y coordinate
+        adjacent = math.fabs(coordinate_E[0] - 2.35)
         alpha = math.atan(1.56/adjacent)
         beta = 0.25
-        epsilon = math.tan(math.pi/2 - alpha)*beta
+        epsilon = math.atan(alpha)*beta
 
-        replacement_x = coordinate_E[0] - 1.56 + epsilon
-        replacement_y = coordinate_E[1] - beta
+        replacement_x = coordinate_E[0] - beta
+        replacement_y = coordinate_E[1] + epsilon
         replacement_z = coordinate_E[2]
 
         return [replacement_x, replacement_y, replacement_z, coordinate_E[3], 3]
 
 
-    def replace_pose_data(self):
+    def replace_pose_data_full_fls(self):
         replacement_drone_waypoints = []
 
-        empty_fls = self.input_scene.drones["lb2"]
-        full_fls = self.input_scene.drones["lb3"]
+        empty_fls = self.input_scene.drones["lb3"]
+        full_fls = self.input_scene.drones["lb2"]
 
         replacement_drone_origin_waypoint = full_fls.target
 
         replacement_drone_enter_scene = self.generate_replacement_pose(empty_fls, full_fls)
         
         replacement_drone_first_waypoint = replacement_drone_origin_waypoint
-        replacement_drone_first_waypoint[1] = replacement_drone_enter_scene[1] 
-        replacement_drone_first_waypoint[0] = replacement_drone_enter_scene[0] - 0.25
+        replacement_drone_first_waypoint[0] = replacement_drone_enter_scene[0]
 
-        replacement_drone_waypoints.append(replacement_drone_origin_waypoint)
+        for i in full_fls.waypoints:
+            replacement_drone_waypoints.append(i)
+
         replacement_drone_waypoints.append(replacement_drone_first_waypoint)
         replacement_drone_waypoints.append(replacement_drone_enter_scene)
-        replacement_drone_waypoints.append(full_fls.target)
+        replacement_drone_waypoints.append(empty_fls.target)
+
+        return replacement_drone_waypoints
+    
+    def replace_pose_data_empty_fls(self):
+        # Fail on waypoint 2
+        waypoint_failure = 2
+
+        replacement_drone_waypoints = copy.deepcopy(self.input_scene.drones["lb3"].waypoints[:waypoint_failure])
+
+        empty_fls = self.input_scene.drones["lb3"]
+        full_fls = self.input_scene.drones["lb2"]
+
+        #Stay at current waypoint until replacement fls is in position, append twice since this is what is needed for full fls to be in position
+        replacement_drone_waypoints.append(replacement_drone_waypoints[waypoint_failure-1])
+        replacement_drone_waypoints.append(replacement_drone_waypoints[waypoint_failure-1])
+
+
+        #Send empty drone away
+        fly_out_waypoint = empty_fls.waypoints[0]
+        fly_out_waypoint[1] = full_fls.waypoints[0][1]
+
+        replacement_drone_waypoints.append(fly_out_waypoint)
 
         return replacement_drone_waypoints
 
+
+
     def generate_output_scene(self):
-        replacement_waypoints = self.replace_pose_data()
-        self.input_scene.drones["lb3"].waypoints = replacement_waypoints + self.input_scene.drones["lb2"].waypoints
-        self.input_scene.drones["lb2"].waypoints += replacement_waypoints
+        #work with deep copies
+        self.input_scene.drones["lb2"].waypoints = self.replace_pose_data_full_fls()
+        self.input_scene.drones["lb3"].waypoints = self.replace_pose_data_empty_fls()
+
+        original_lb2_waypoints = copy.deepcopy(self.input_scene.drones["lb2"].waypoints)
+        original_lb3_waypoints = copy.deepcopy(self.input_scene.drones["lb3"].waypoints)
+
+        self.input_scene.drones["lb2"].waypoints += original_lb3_waypoints
+        self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
+
+#
 
         output_yaml = {
             "name": "Scene",
@@ -160,8 +189,6 @@ class Replacement:
                     "formula": drone.led.formula
                 }
             }
-
-        print(output_yaml)
 
         with open("mission.yaml", "w") as f:
             yaml.dump(output_yaml, f, sort_keys=False, Dumper=NoAliasDumper, default_flow_style=None)
