@@ -126,6 +126,7 @@ class Replacement:
         replacement_drone_waypoints.append(replacement_drone_first_waypoint)
         replacement_drone_waypoints.append(replacement_drone_enter_scene)
         replacement_drone_waypoints.append(empty_fls.target)
+        replacement_drone_waypoints.append(empty_fls.target)
 
         return replacement_drone_waypoints
     
@@ -148,6 +149,7 @@ class Replacement:
         fly_out_waypoint[1] = full_fls.waypoints[0][1]
 
         replacement_drone_waypoints.append(fly_out_waypoint)
+        replacement_drone_waypoints.append(full_fls.waypoints[0])
 
         return replacement_drone_waypoints
 
@@ -163,6 +165,9 @@ class Replacement:
 
         self.input_scene.drones["lb2"].waypoints += original_lb3_waypoints
         self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
+
+        # go to original spot
+        
 
 #
 
