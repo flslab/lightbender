@@ -166,11 +166,6 @@ class Replacement:
         self.input_scene.drones["lb2"].waypoints += original_lb3_waypoints
         self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
 
-        # go to original spot
-        
-
-#
-
         output_yaml = {
             "name": "Scene",
             "drones": {}
