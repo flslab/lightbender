@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 import copy
+import argparse
 
 
 # -----------------------------
@@ -37,8 +38,8 @@ class Drone:
 
 @dataclass
 class Scene:
-    drones: Dict[str, Drone] = field(default_factory=dict)
     cameraLocation: List[int]
+    drones: Dict[str, Drone] = field(default_factory=dict)
 
 # 1. Define this custom dumper at the top of your file to prevent `&id001` alias tags
 class NoAliasDumper(yaml.SafeDumper):
@@ -51,8 +52,9 @@ class Replacement:
 
     def __init__(self, args):
         self.args = args
-        self.mission_file = "debug.yaml"
-        self.mission = self.read_in_mission_file(self.mission_file)
+        self.mission_file = args.mission
+        self.morphing_technique = args.morphing
+        self.mission = self.read_in_mission_file()
         self.input_scene = self.parse_in_mission_file()
 
     def __enter__(self):
@@ -65,8 +67,9 @@ class Replacement:
     # File Handling
     # -----------------------------
 
-    def read_in_mission_file(self, mission_file):
-        with open(mission_file, 'r') as f:
+    def read_in_mission_file(self):
+        print(self.mission_file)
+        with open(self.mission_file, 'r') as f:
             return yaml.safe_load(f)
 
     def parse_in_mission_file(self) -> Scene:
@@ -88,10 +91,19 @@ class Replacement:
                 led=LEDConfig(**drone_data["led"]),
             )
             drones[name] = drone
-        
+
         return Scene(drones=drones, cameraLocation=[2.35, 0.0, 0.88])
 
-    def generate_replacement_pose(self, empty_fls):
+    def morphing_technique_1_replacement_pose(self, empty_fls):
+        coordinate_E = empty_fls.waypoints[0]
+
+        replacement_x = coordinate_E[0] - 0.25
+        replacement_y = coordinate_E[1]
+        replacement_z = coordinate_E[2]
+
+        return [replacement_x, replacement_y, replacement_z, 0.0, 0.0]
+    
+    def morphing_technique_2_replacement_pose(self, empty_fls):
         coordinate_E = empty_fls.waypoints[0]
 
         # Compute y coordinate
@@ -115,7 +127,11 @@ class Replacement:
 
         replacement_drone_origin_waypoint = full_fls.target
 
-        replacement_drone_enter_scene = self.generate_replacement_pose(empty_fls)
+        if(self.morphing_technique == "1"):
+            replacement_drone_enter_scene = self.morphing_technique_1_replacement_pose(empty_fls)
+
+        elif(self.morphing_technique == "2"):
+            replacement_drone_enter_scene = self.morphing_technique_2_replacement_pose(empty_fls)
         
         replacement_drone_first_waypoint = replacement_drone_origin_waypoint
         replacement_drone_first_waypoint[0] = replacement_drone_enter_scene[0]
@@ -153,8 +169,7 @@ class Replacement:
 
         return replacement_drone_waypoints
 
-
-    def replaceWaypoints(self):
+    def replace_waypoints(self):
         #work with deep copies
         self.input_scene.drones["lb2"].waypoints = self.replace_pose_data_full_fls()
         self.input_scene.drones["lb3"].waypoints = self.replace_pose_data_empty_fls()
@@ -166,7 +181,7 @@ class Replacement:
         self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
 
     def generate_output_scene(self):
-        self.replaceWaypoints()
+        self.replace_waypoints()
 
         output_yaml = {
             "name": "Scene",
@@ -197,12 +212,13 @@ class Replacement:
 
         print("Swap mission generated (matching mission.YAML structure).")
 
-
-# -----------------------------
-# Run
-# -----------------------------
-
 if __name__ == '__main__':
-    args = None
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--mission", type=str)
+    parser.add_argument("--morphing", type=str)
+
+    args = parser.parse_args()
+
     with Replacement(args) as r:
         r.generate_output_scene()
