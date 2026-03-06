@@ -91,9 +91,8 @@ class Replacement:
         
         return Scene(drones=drones, cameraLocation=[2.35, 0.0, 0.88])
 
-    def generate_replacement_pose(self, empty_fls, full_fls):
+    def generate_replacement_pose(self, empty_fls):
         coordinate_E = empty_fls.waypoints[0]
-        coordinate_F = full_fls.waypoints[0]
 
         # Compute y coordinate
         adjacent = math.fabs(coordinate_E[0] - self.input_scene.cameraLocation[0])
@@ -116,7 +115,7 @@ class Replacement:
 
         replacement_drone_origin_waypoint = full_fls.target
 
-        replacement_drone_enter_scene = self.generate_replacement_pose(empty_fls, full_fls)
+        replacement_drone_enter_scene = self.generate_replacement_pose(empty_fls)
         
         replacement_drone_first_waypoint = replacement_drone_origin_waypoint
         replacement_drone_first_waypoint[0] = replacement_drone_enter_scene[0]
