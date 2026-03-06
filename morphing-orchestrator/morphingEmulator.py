@@ -38,6 +38,7 @@ class Drone:
 @dataclass
 class Scene:
     drones: Dict[str, Drone] = field(default_factory=dict)
+    cameraLocation: List[int]
 
 # 1. Define this custom dumper at the top of your file to prevent `&id001` alias tags
 class NoAliasDumper(yaml.SafeDumper):
@@ -87,15 +88,15 @@ class Replacement:
                 led=LEDConfig(**drone_data["led"]),
             )
             drones[name] = drone
-
-        return Scene(drones=drones)
+        
+        return Scene(drones=drones, cameraLocation=[2.35, 0.0, 0.88])
 
     def generate_replacement_pose(self, empty_fls, full_fls):
         coordinate_E = empty_fls.waypoints[0]
         coordinate_F = full_fls.waypoints[0]
 
         # Compute y coordinate
-        adjacent = math.fabs(coordinate_E[0] - 2.35)
+        adjacent = math.fabs(coordinate_E[0] - self.input_scene.cameraLocation[0])
         alpha = math.atan(1.56/adjacent)
         beta = 0.25
         epsilon = math.atan(alpha)*beta
@@ -154,8 +155,7 @@ class Replacement:
         return replacement_drone_waypoints
 
 
-
-    def generate_output_scene(self):
+    def replaceWaypoints(self):
         #work with deep copies
         self.input_scene.drones["lb2"].waypoints = self.replace_pose_data_full_fls()
         self.input_scene.drones["lb3"].waypoints = self.replace_pose_data_empty_fls()
@@ -165,6 +165,9 @@ class Replacement:
 
         self.input_scene.drones["lb2"].waypoints += original_lb3_waypoints
         self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
+
+    def generate_output_scene(self):
+        self.replaceWaypoints()
 
         output_yaml = {
             "name": "Scene",
