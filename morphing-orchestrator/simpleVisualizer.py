@@ -139,8 +139,7 @@ def main(mission_file, use_3d=False):
     lb3_waypoints = mission["drones"]["lb3"]["waypoints"]
     lb2_waypoints = mission["drones"]["lb2"]["waypoints"]
 
-    number_of_images = max(len(lb3_waypoints), len(lb2_waypoints))-1
-    print(number_of_images)
+    number_of_images = max(len(lb3_waypoints), len(lb2_waypoints))
 
     points_for_scaling = []
 
