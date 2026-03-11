@@ -16,7 +16,7 @@ from matplotlib.patches import FancyArrowPatch
 OUTPUT_DIR = "./mission_visualizations"
 LINE_LENGTH_CM = 31.2  # 312 mm = 31.2 cm
 
-DEFAULT_CAMERA_POS = (235.0, 0.0, 88.0)  # Sensible default in cm-space
+DEFAULT_CAMERA_POS = (235.0, 0.0, 1.0)  # Sensible default in cm-space
 
 
 # -----------------------------

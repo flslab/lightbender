@@ -47,8 +47,8 @@ class NoAliasDumper(yaml.SafeDumper):
         return True
 
 class Replacement:
-    SAFE_SPEED = 300.0  # mm/sec (tune for your drones)
-    SAFETY_DELAY = 1.0  # seconds buffer to prevent overlap
+    SAFE_SPEED = 300.0
+    SAFETY_DELAY = 1.0
 
     def __init__(self, args):
         self.args = args
@@ -101,7 +101,7 @@ class Replacement:
         replacement_y = coordinate_E[1]
         replacement_z = coordinate_E[2]
 
-        return [replacement_x, replacement_y, replacement_z, 0.0, 0.0]
+        return [replacement_x, replacement_y, replacement_z, 0.0, 3.0]
     
     def morphing_technique_2_replacement_pose(self, empty_fls):
         coordinate_E = empty_fls.waypoints[0]
@@ -116,7 +116,7 @@ class Replacement:
         replacement_y = coordinate_E[1] + epsilon
         replacement_z = coordinate_E[2]
 
-        return [replacement_x, replacement_y, replacement_z, coordinate_E[3], 3]
+        return [replacement_x, replacement_y, replacement_z, coordinate_E[3], 3.0]
 
 
     def replace_pose_data_full_fls(self):
