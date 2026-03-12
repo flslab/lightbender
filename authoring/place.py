@@ -688,8 +688,8 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
-    parser.add_argument("--output", type=str, default="allocated_points.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="SET_COVER",
+    parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
                         help="Placement policy")
     parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
