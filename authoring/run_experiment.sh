@@ -26,8 +26,8 @@ PLACEMENT_TYPES=("MIN_DISTANCE")
 
 # Shared Camera Position (must match defaults in python scripts or be passed explicitly)
 CAM_X=2.3
-CAM_Y=1.5
-CAM_Z=0.8
+CAM_Y=0.0
+CAM_Z=0.0
 
 # --- Execution ---
 
@@ -48,6 +48,8 @@ for input_file in "${INPUT_FILES[@]}"; do
     FILE_DIR="$BASE_RESULTS_DIR/$FILE_BASENAME"
     mkdir -p "$FILE_DIR/2d"
     mkdir -p "$FILE_DIR/3d"
+    mkdir -p "$FILE_DIR/graph_viz"
+    mkdir -p "$FILE_DIR/bar_viz"
     mkdir -p "$FILE_DIR/svg"
     mkdir -p "$FILE_DIR/yaml"
 
@@ -80,6 +82,8 @@ for input_file in "${INPUT_FILES[@]}"; do
                         out_svg="$FILE_DIR/svg/${config_id}.svg"
                         out_2d="$FILE_DIR/2d/${config_id}.png"
                         out_3d="$FILE_DIR/3d/${config_id}.png"
+                        out_graph_viz="$FILE_DIR/graph_viz/${config_id}.png"
+                        out_bar_viz="$FILE_DIR/bar_viz/${config_id}.png"
 
                         echo "  [Running] $config_id"
 
@@ -96,6 +100,8 @@ for input_file in "${INPUT_FILES[@]}"; do
                             --camera_pos $CAM_X $CAM_Y $CAM_Z \
                             --viz_2d_output_file "$out_2d" \
                             --viz_3d_output_file "$out_3d" \
+                            --viz_graph_output_file "$out_graph_viz" \
+                            --viz_bar_output_file "$out_bar_viz" \
                             --save_viz \
                             --csv | tail -n 1)
 
