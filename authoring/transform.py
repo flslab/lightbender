@@ -110,6 +110,44 @@ def normalize_and_scale_graph(raw_nodes, max_width, max_length, center_y, center
     return final_nodes
 
 
+def visualize_graph(nodes, edges):
+    """Plots the graph nodes and edges using matplotlib."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\nError: 'matplotlib' is required for visualization.")
+        print("Please install it by running: pip install matplotlib")
+        return
+
+    print("Opening 2D visualizer...")
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Create a dictionary for O(1) node coordinate lookups
+    node_dict = {n['id']: n for n in nodes}
+
+    # Plot edges
+    for edge in edges:
+        src = node_dict.get(edge['source'])
+        tgt = node_dict.get(edge['target'])
+        if src and tgt:
+            ax.plot([src['y'], tgt['y']], [src['z'], tgt['z']], color='gray', linewidth=1, zorder=1)
+
+    # Plot nodes
+    y_coords = [n['y'] for n in nodes]
+    z_coords = [n['z'] for n in nodes]
+    ax.scatter(y_coords, z_coords, c='blue', s=15, zorder=2)
+
+    # Formatting
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('Y (Width)')
+    ax.set_ylabel('Z (Length)')
+    ax.set_title(f"Graph Visualization: {len(nodes)} nodes, {len(edges)} edges")
+    ax.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert an SVG file into a scaled 3D graph (YAML).")
     parser.add_argument("-i", "--input", required=True, help="Path to the input SVG file.")
@@ -122,6 +160,8 @@ def main():
                         help="Target Y coordinate for the center of the graph (default: 0.0).")
     parser.add_argument("-cz", "--center-z", type=float, default=0.0,
                         help="Target Z coordinate for the center of the graph (default: 0.0).")
+    parser.add_argument("--visualize", action="store_true",
+                        help="Open a 2D plot of the generated graph nodes and edges.")
 
     args = parser.parse_args()
 
@@ -156,6 +196,9 @@ def main():
         yaml.dump(graph_data, file, default_flow_style=False, sort_keys=False)
 
     print("Done!")
+
+    if args.visualize:
+        visualize_graph(final_nodes, edges)
 
 
 if __name__ == "__main__":
