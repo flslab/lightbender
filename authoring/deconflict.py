@@ -959,8 +959,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Modular Interference Solver")
 
     # Files
-    parser.add_argument("--input_file", type=str, default="points_input.yaml", help="Path to input YAML file")
-    parser.add_argument("--output_file", type=str, default="points_output.yaml", help="Path to output YAML file")
+    parser.add_argument("--input_file", type=str, default="initial_layout.yaml", help="Path to input YAML file")
+    parser.add_argument("--output_file", type=str, default="feasible_layout.yaml", help="Path to output YAML file")
     parser.add_argument("--viz_2d_output_file", type=str, default="2d_viz.png",
                         help="Path to output 2d visualization file")
     parser.add_argument("--viz_3d_output_file", type=str, default="3d_viz.png",
