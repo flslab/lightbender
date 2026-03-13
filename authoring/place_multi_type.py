@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import yaml
 import os
@@ -630,6 +632,10 @@ class SetCoverStrategy(AllocationStrategy):
 
         backtrack(0, 0, [], 0, 0)
 
+        print(f"Total Candidates:   {len(cand_order)}")
+        print(f"Total Chunks:       {num_chunks}")
+        print(f"Total Iterations:   {iters}")
+        print(f"Greedy Solution:    {best_size}")
         return [valid_indices[i] for i in best_solution]
 
 
@@ -700,6 +706,7 @@ def visualize_allocation(graph: TargetGraph, lightbenders: List[Point3D]):
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title(f"Policy: {args.policy}")
+    ax.view_init(elev=0, azim=0)
 
     extents = np.array([getattr(ax, f'get_{dim}lim')() for dim in 'xyz'])
     sz = extents[:, 1] - extents[:, 0]
@@ -738,10 +745,10 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
-    parser.add_argument("--output", type=str, default="allocated_points.yaml", help="Output YAML state file")
+    parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
     parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
                         help="Placement policy")
-    parser.add_argument("--max_lens", type=float, nargs='+', default=[0.08, 0.16, 0.32],
+    parser.add_argument("--max_lens", type=float, nargs='+', default=[0.13, 0.16, 0.24],
                         help="List of allowed maximum lengths for rods")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
@@ -751,7 +758,9 @@ if __name__ == "__main__":
     graph = TargetGraph(args.input)
 
     allocator = Allocator(max_lengths=args.max_lens)
+    start_time = time.time()
     lightbenders = allocator.run(graph, args.policy)
+    end_time = time.time()
 
     # Metrics
     total_lbs = len(lightbenders)
@@ -765,6 +774,7 @@ if __name__ == "__main__":
 
     print("\n--- Allocation Metrics ---")
     print(f"Policy:                 {args.policy}")
+    print(f"Execution Time:         {end_time - start_time}")
     print(f"Available Max Lengths:  {args.max_lens}")
     print(f"Total LightBenders:     {total_lbs}")
     print(f"Total Rods Activated:   {total_rods}")
