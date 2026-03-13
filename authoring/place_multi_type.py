@@ -133,16 +133,16 @@ def get_best_max_length(l1: float, l2: float, allowed_lengths: List[float]) -> f
     return max(allowed_lengths)
 
 
-# --- Allocation Strategies ---
+# --- Placement Strategies ---
 
-class AllocationStrategy(ABC):
+class PlacementStrategy(ABC):
     @abstractmethod
-    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
+    def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         pass
 
 
-class MidpointStrategy(AllocationStrategy):
-    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
+class MidpointStrategy(PlacementStrategy):
+    def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
         max_limit = max(max_lengths)
@@ -170,8 +170,8 @@ class MidpointStrategy(AllocationStrategy):
         return lightbenders
 
 
-class VertexStrategy(AllocationStrategy):
-    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
+class VertexStrategy(PlacementStrategy):
+    def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
         max_limit = max(max_lengths)
@@ -278,13 +278,13 @@ class VertexStrategy(AllocationStrategy):
         return lightbenders
 
 
-class SetCoverStrategy(AllocationStrategy):
+class SetCoverStrategy(PlacementStrategy):
     """
     Uses Exact Set Cover with a Secondary Objective to minimize Overlap,
     and Tertiary Objective to minimize sum of utilized max_lengths.
     """
 
-    def allocate(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
+    def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         MIN_CHUNK_LEN = 1e-2
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
@@ -639,7 +639,7 @@ class SetCoverStrategy(AllocationStrategy):
         return [valid_indices[i] for i in best_solution]
 
 
-# --- Allocation Processor ---
+# --- Placement Processor ---
 
 class Allocator:
     def __init__(self, max_lengths: List[float]):
@@ -653,15 +653,15 @@ class Allocator:
         elif policy.upper() == "SET_COVER":
             strategy = SetCoverStrategy()
         else:
-            raise ValueError(f"Unknown allocation policy: {policy}")
+            raise ValueError(f"Unknown Placement policy: {policy}")
 
-        print(f"Running Allocation with {policy} policy...")
-        return strategy.allocate(graph, self.max_lengths)
+        print(f"Running Placement with {policy} policy...")
+        return strategy.place(graph, self.max_lengths)
 
 
 # --- Visualization ---
 
-def visualize_allocation(graph: TargetGraph, lightbenders: List[Point3D]):
+def visualize_placement(graph: TargetGraph, lightbenders: List[Point3D]):
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 
@@ -737,13 +737,13 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         })
     with open(filepath, 'w') as f:
         yaml.dump({'points': data}, f, sort_keys=False)
-    print(f"Allocated states saved to {filepath}")
+    print(f"Placed states saved to {filepath}")
 
 
 # --- Execution ---
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Allocate LightBenders to Target Topology")
+    parser = argparse.ArgumentParser(description="Place LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
     parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
@@ -772,11 +772,19 @@ if __name__ == "__main__":
     utilization = (total_length / max_capacity * 100) if max_capacity > 0 else 0
     avg_rod_len = (total_length / total_rods) if total_rods > 0 else 0
 
-    print("\n--- Allocation Metrics ---")
+    # Count LightBenders by max length limit
+    length_counts = {}
+    for lb in lightbenders:
+        ml = lb.max_length_limit
+        length_counts[ml] = length_counts.get(ml, 0) + 1
+
+    print("\n--- Placement Metrics ---")
     print(f"Policy:                 {args.policy}")
     print(f"Execution Time:         {end_time - start_time}")
     print(f"Available Max Lengths:  {args.max_lens}")
     print(f"Total LightBenders:     {total_lbs}")
+    for ml in sorted(length_counts.keys()):
+        print(f"  - Type L={ml:<5}:       {length_counts[ml]} used")
     print(f"Total Rods Activated:   {total_rods}")
     print(f"Average Rod Length:     {avg_rod_len:.2f}")
     print(f"Rod Length Utilization: {utilization:.1f}%")
@@ -785,4 +793,4 @@ if __name__ == "__main__":
     save_to_solver_format(lightbenders, args.output)
 
     if not args.no_viz:
-        visualize_allocation(graph, lightbenders)
+        visualize_placement(graph, lightbenders)
