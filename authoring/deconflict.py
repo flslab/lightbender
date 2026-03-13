@@ -55,8 +55,8 @@ def check_downwash(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
     return np.linalg.norm(p1[:2] - p2[:2]) < threshold
 
 
-def check_collision(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
-    """Checks if two points violate the 3D distance (collision) threshold."""
+def check_overlap(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
+    """Checks if two points violate the 3D distance (overlap) threshold."""
     return np.linalg.norm(p1 - p2) < threshold
 
 
@@ -70,10 +70,10 @@ class InterferenceGraph:
         self.points = {p.id: p for p in points}
         self.threshold = threshold
         self.initial_positions = {p.id: p.position for p in points}
-        self.total_collision = 0
+        self.total_overlap = 0
         self.total_downwash = 0
-        self.edge_types = {}  # Store edge conflict type: 'collision' or 'downwash'
-        self.node_collisions = {pid: 0 for pid in self.points}
+        self.edge_types = {}  # Store edge conflict type: 'overlap' or 'downwash'
+        self.node_overlaps = {pid: 0 for pid in self.points}
         self.node_downwashes = {pid: 0 for pid in self.points}
         self.adjacency = self._compute_adjacency()
 
@@ -83,7 +83,7 @@ class InterferenceGraph:
         ids = list(self.points.keys())
         n = len(ids)
 
-        total_collision = 0
+        total_overlap = 0
         total_downwash = 0
         for i in range(n):
             for j in range(i + 1, n):
@@ -92,17 +92,17 @@ class InterferenceGraph:
                 p1_3d = self.points[id_i].position
                 p2_3d = self.points[id_j].position
 
-                is_col = check_collision(p1_3d, p2_3d, self.threshold)
+                is_col = check_overlap(p1_3d, p2_3d, self.threshold)
                 is_dw = check_downwash(p1_3d, p2_3d, self.threshold)
 
                 if is_col:
                     adj[id_i].add(id_j)
                     adj[id_j].add(id_i)
-                    total_collision += 1
-                    self.edge_types[(id_i, id_j)] = 'collision'
-                    self.edge_types[(id_j, id_i)] = 'collision'
-                    self.node_collisions[id_i] += 1
-                    self.node_collisions[id_j] += 1
+                    total_overlap += 1
+                    self.edge_types[(id_i, id_j)] = 'overlap'
+                    self.edge_types[(id_j, id_i)] = 'overlap'
+                    self.node_overlaps[id_i] += 1
+                    self.node_overlaps[id_j] += 1
                 elif is_dw:
                     adj[id_i].add(id_j)
                     adj[id_j].add(id_i)
@@ -112,7 +112,7 @@ class InterferenceGraph:
                     self.node_downwashes[id_i] += 1
                     self.node_downwashes[id_j] += 1
 
-        self.total_collision = total_collision
+        self.total_overlap = total_overlap
         self.total_downwash = total_downwash
         return adj
 
@@ -461,7 +461,7 @@ class ResolutionStrategy:
     def _is_valid(self, candidate_pos, placed_positions, graph, current_id=None):
         """Checks if candidate_pos interferes with any placed points in XY plane."""
         for neighbor_id, neighbor_pos in placed_positions.items():
-            if check_collision(candidate_pos, neighbor_pos, self.threshold) or \
+            if check_overlap(candidate_pos, neighbor_pos, self.threshold) or \
                     check_downwash(candidate_pos, neighbor_pos, self.threshold):
                 return False
         return True
@@ -602,7 +602,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
     Visualizes the initial interference graph.
     If abstract_layout is True, uses a 2D spring/force-directed layout.
     Otherwise, uses the actual 3D physical coordinates.
-    Shows different edge colors for downwash vs. collision conflicts.
+    Shows different edge colors for downwash vs. overlap conflicts.
     Marks nodes based on selection and movement status.
     """
     try:
@@ -668,15 +668,15 @@ def visualize_interference_graph(graph: InterferenceGraph,
             pos_v = pos[v]
             etype = graph.edge_types.get(edge, 'downwash')
 
-            if etype == 'collision':
+            if etype == 'overlap':
                 ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]],
-                        c='red', linewidth=2, label='Collision Edge', zorder=1)
+                        c='red', linewidth=2, label='Overlap Edge', zorder=1)
             else:
                 ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]],
                         c='orange', linewidth=2, linestyle='--', label='Downwash Edge', zorder=1)
 
         ax.set_title(
-            f"Abstract Conflict Graph (2D Layout)\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+            f"Abstract Conflict Graph (2D Layout)\nConflicts: {graph.total_downwash} Downwash, {graph.total_overlap} Overlaps")
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_aspect('equal')
@@ -705,15 +705,15 @@ def visualize_interference_graph(graph: InterferenceGraph,
                     pos_v = graph.initial_positions[v]
                     etype = graph.edge_types.get(edge, 'downwash')
 
-                    if etype == 'collision':
+                    if etype == 'overlap':
                         ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
-                                c='red', linewidth=2, label='Collision Edge')
+                                c='red', linewidth=2, label='Overlap Edge')
                     else:
                         ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], [pos_u[2], pos_v[2]],
                                 c='orange', linewidth=2, linestyle='--', label='Downwash Edge')
 
         ax.set_title(
-            f"Initial Conflict Graph (3D Actual)\nConflicts: {graph.total_downwash} Downwash, {graph.total_collision} Collisions")
+            f"Initial Conflict Graph (3D Actual)\nConflicts: {graph.total_downwash} Downwash, {graph.total_overlap} Overlaps")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
@@ -733,7 +733,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
 
 def visualize_conflict_bar_chart(graph: InterferenceGraph):
     """
-    Visualizes the number of downwash and collision conflicts per point using a grouped bar chart.
+    Visualizes the number of downwash and overlap conflicts per point using a grouped bar chart.
     """
     try:
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -742,18 +742,18 @@ def visualize_conflict_bar_chart(graph: InterferenceGraph):
         return
 
     nodes = sorted(graph.nodes)
-    collisions = [graph.node_collisions[pid] for pid in nodes]
+    overlaps = [graph.node_overlaps[pid] for pid in nodes]
     downwashes = [graph.node_downwashes[pid] for pid in nodes]
 
     x = np.arange(len(nodes))
     width = 0.35
 
     ax.bar(x - width / 2, downwashes, width, label='Downwash', color='orange')
-    ax.bar(x + width / 2, collisions, width, label='Collision', color='red')
+    ax.bar(x + width / 2, overlaps, width, label='Overlap', color='red')
 
     ax.set_ylabel('Number of Conflicts')
     ax.set_xlabel('LightBender ID')
-    ax.set_title('Conflicts per LightBender (Collision vs Downwash)')
+    ax.set_title('Conflicts per LightBender (Overlap vs Downwash)')
     ax.set_xticks(x)
     ax.set_xticklabels(nodes)
     ax.legend()
@@ -1079,7 +1079,7 @@ if __name__ == "__main__":
     num_selected = len(moved)
     num_moved = len(moved_distances)
     num_downwashes = graph.total_downwash
-    num_collisions = graph.total_collision
+    num_overlaps = graph.total_overlap
 
     if num_moved > 0:
         avg_dist = float(np.mean(moved_distances))
@@ -1091,14 +1091,14 @@ if __name__ == "__main__":
         max_dist = 0.0
 
     if args.csv:
-        # CSV format: Downwashes,Collisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
+        # CSV format: Downwashes,Overlaps,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
         print(
-            f"{num_downwashes},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+            f"{num_downwashes},{num_overlaps},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
     else:
         print("=" * 40)
         print("METRICS SUMMARY")
         print(f"Downwash conflicts:            {num_downwashes}")
-        print(f"Collision Conflicts:           {num_collisions}")
+        print(f"Overlap Conflicts:           {num_overlaps}")
         print(f"LightBenders Selected to Move: {num_selected}")
         print(f"LightBenders Actually Moved:   {num_moved}")
         print(f"Travel Distance - Avg:         {avg_dist:.4f}")
