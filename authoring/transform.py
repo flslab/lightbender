@@ -162,6 +162,7 @@ def main():
                         help="Target Z coordinate for the center of the graph (default: 0.0).")
     parser.add_argument("--visualize", action="store_true",
                         help="Open a 2D plot of the generated graph nodes and edges.")
+    parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()
 
@@ -191,11 +192,12 @@ def main():
         'edges': edges
     }
 
-    print(f"Writing {len(final_nodes)} nodes and {len(edges)} edges to {args.output}...")
+    if args.csv:
+        print(f"{len(final_nodes)},{len(edges)}")
+    else:
+        print(f"Writing {len(final_nodes)} nodes and {len(edges)} edges to {args.output}...")
     with open(args.output, "w") as file:
         yaml.dump(graph_data, file, default_flow_style=False, sort_keys=False)
-
-    print("Done!")
 
     if args.visualize:
         visualize_graph(final_nodes, edges)
