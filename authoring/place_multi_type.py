@@ -562,7 +562,7 @@ class SetCoverStrategy(PlacementStrategy):
             rem_masks[i] = accum
 
         iters = 0
-        MAX_ITERS = 100000
+        MAX_ITERS = 1000000
 
         def backtrack(cand_idx, current_mask, current_solution, current_overlap, current_len_sum):
             nonlocal best_solution, best_size, best_overlap, best_len_sum, iters
@@ -632,10 +632,13 @@ class SetCoverStrategy(PlacementStrategy):
 
         backtrack(0, 0, [], 0, 0)
 
-        print(f"Total Candidates:   {len(cand_order)}")
-        print(f"Total Chunks:       {num_chunks}")
-        print(f"Total Iterations:   {iters}")
-        print(f"Greedy Solution:    {best_size}")
+        if args.csv:
+            print(f"{len(cand_order)},{num_chunks},{iters},{best_size}")
+        else:
+            print(f"Total Candidates:   {len(cand_order)}")
+            print(f"Total Chunks:       {num_chunks}")
+            print(f"Total Iterations:   {iters}")
+            print(f"Greedy Solution:    {best_size}")
         return [valid_indices[i] for i in best_solution]
 
 
@@ -737,7 +740,9 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         })
     with open(filepath, 'w') as f:
         yaml.dump({'points': data}, f, sort_keys=False)
-    print(f"Placed states saved to {filepath}")
+
+    if not args.csv:
+        print(f"Placed states saved to {filepath}")
 
 
 # --- Execution ---
@@ -752,6 +757,7 @@ if __name__ == "__main__":
                         help="List of allowed maximum lengths for rods")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
+    parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()
 
@@ -778,19 +784,23 @@ if __name__ == "__main__":
         ml = lb.max_length_limit
         length_counts[ml] = length_counts.get(ml, 0) + 1
 
-    print("\n--- Placement Metrics ---")
-    print(f"Policy:                 {args.policy}")
-    print(f"Execution Time:         {end_time - start_time}")
-    print(f"Available Max Lengths:  {args.max_lens}")
-    print(f"Total LightBenders:     {total_lbs}")
-    for ml in sorted(length_counts.keys()):
-        print(f"  - Type L={ml:<5}:       {length_counts[ml]} used")
-    print(f"Total Rods Activated:   {total_rods}")
-    print(f"Average Rod Length:     {avg_rod_len:.2f}")
-    print(f"Rod Length Utilization: {utilization:.1f}%")
-    print("--------------------------\n")
-
     save_to_solver_format(lightbenders, args.output)
+
+    if args.csv:
+        lb_types_count = " ".join([f"{ml}:{length_counts[ml]}" for ml in sorted(length_counts.keys())])
+        print(f"{(end_time - start_time)*1000:.3f},{total_lbs} ({lb_types_count}),{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
+    else:
+        print("\n--- Placement Metrics ---")
+        print(f"Policy:                 {args.policy}")
+        print(f"Execution Time:         {(end_time - start_time)*1000:.3f}")
+        print(f"Available Max Lengths:  {args.max_lens}")
+        print(f"Total LightBenders:     {total_lbs}")
+        for ml in sorted(length_counts.keys()):
+            print(f"  - Type L={ml:<5}:       {length_counts[ml]} used")
+        print(f"Total Rods Activated:   {total_rods}")
+        print(f"Average Rod Length:     {avg_rod_len:.2f}")
+        print(f"Rod Length Utilization: {utilization:.1f}%")
+        print("--------------------------\n")
 
     if not args.no_viz:
         visualize_placement(graph, lightbenders)
