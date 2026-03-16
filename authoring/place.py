@@ -263,6 +263,51 @@ class SetCoverStrategy(PlacementStrategy):
     Uses Exact Set Cover with a Secondary Objective to minimize Overlap.
     """
 
+    def _generate_sliding_edge_candidates(self, L: float, max_length: float, duplicate_thresh: float) -> List[float]:
+        """Original implementation: Slides candidates from both endpoints inward."""
+        edge_d_candidates = []
+        if L <= 2 * max_length:
+            edge_d_candidates.append(L / 2.0)
+        else:
+            # Spanning from Endpoint A
+            d = max_length
+            while d < L:
+                edge_d_candidates.append(d)
+                d += 1 * max_length
+
+            # Spanning from Endpoint B
+            d_b = max_length
+            while d_b < L:
+                d_from_a = L - d_b
+                is_duplicate = any(
+                    abs(existing_d - d_from_a) < duplicate_thresh for existing_d in edge_d_candidates)
+                if not is_duplicate:
+                    edge_d_candidates.append(d_from_a)
+                d_b += 1 * max_length
+        return edge_d_candidates
+
+    def _generate_efficient_edge_candidates(self, L: float, max_length: float) -> List[float]:
+        """New implementation: Spaces N and N-1 LightBenders evenly across the line."""
+        edge_d_candidates = []
+        if L <= 2 * max_length:
+            # One candidate perfectly covers the whole edge
+            edge_d_candidates.append(L / 2.0)
+        else:
+            # 1. N LightBenders (Fully covers the line seamlessly)
+            N = math.ceil(L / (2 * max_length))
+            for i in range(N):
+                d = (i + 0.5) * (L / N)
+                edge_d_candidates.append(d)
+
+            # 2. N - 1 LightBenders (Leaves a gap at the endpoints for Vertex LBs to cover)
+            M = N - 1
+            if M > 0:
+                for i in range(M):
+                    d = (i + 0.5) * (L / M)
+                    edge_d_candidates.append(d)
+
+        return edge_d_candidates
+
     def place(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
         MIN_CHUNK_LEN = 1e-2
         DUPLICATE_THRESH = 1e-2
@@ -280,35 +325,15 @@ class SetCoverStrategy(PlacementStrategy):
 
         candidates = []
 
-        # A. Edge Sliding Candidates (Endpoint-Anchored)
+        # A. Edge Candidates
         for e_idx, ed in enumerate(edge_data):
             L = ed['L']
-            edge_d_candidates = []
 
-            if L <= 2 * max_length:
-                # One candidate perfectly covers the whole edge
-                edge_d_candidates.append(L / 2.0)
-                # edge_d_candidates.append(0)
-                # edge_d_candidates.append(max_length)
-                # edge_d_candidates.append(L - max_length)
-                # edge_d_candidates.append(L)
-            else:
-                # Spanning from Endpoint A
-                d = max_length
-                while d < L:
-                    edge_d_candidates.append(d)
-                    d += 1 * max_length
+            # Use the new, more efficient candidate generation method
+            edge_d_candidates = self._generate_efficient_edge_candidates(L, max_length)
 
-                # Spanning from Endpoint B
-                d_b = max_length
-                while d_b < L:
-                    d_from_a = L - d_b
-                    # Do not create duplicate candidates if they land too close to an existing one
-                    is_duplicate = any(
-                        abs(existing_d - d_from_a) < DUPLICATE_THRESH for existing_d in edge_d_candidates)
-                    if not is_duplicate:
-                        edge_d_candidates.append(d_from_a)
-                    d_b += 1 * max_length
+            # To revert to the old method, uncomment the line below:
+            # edge_d_candidates = self._generate_sliding_edge_candidates(L, max_length, DUPLICATE_THRESH)
 
             for d in edge_d_candidates:
                 body = ed['A'] + d * ed['dir']
@@ -722,11 +747,11 @@ if __name__ == "__main__":
     save_to_solver_format(lightbenders, args.output)
 
     if args.csv:
-        print(f"{(end_time - start_time)*1000:.3f},{total_lbs},{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
+        print(f"{(end_time - start_time) * 1000:.3f},{total_lbs},{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
     else:
         print("\n--- Placement Metrics ---")
         print(f"Policy:                 {args.policy}")
-        print(f"Execution Time:         {(end_time - start_time)*1000:.3f}")
+        print(f"Execution Time:         {(end_time - start_time) * 1000:.3f}")
         print(f"Total LightBenders:     {total_lbs}")
         print(f"Total Rods Activated:   {total_rods}")
         print(f"Average Rod Length:     {avg_rod_len:.2f}")
