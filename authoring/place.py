@@ -154,7 +154,7 @@ class MidpointStrategy(PlacementStrategy):
         return lightbenders
 
 
-class VertexStrategy(PlacementStrategy):
+class VFGStrategy(PlacementStrategy):
     def place(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
@@ -246,11 +246,23 @@ class VertexStrategy(PlacementStrategy):
                         covered_edges.add(e2_idx)
 
         # 4. Pass B: Cover remaining single edges
+        single_edge_mode = 1
         for e_idx, (u, v) in enumerate(new_edges):
             if e_idx not in covered_edges:
-                V_pos = new_nodes[u]
-                tip1 = new_nodes[v]
-                yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, None)
+                if single_edge_mode == 1:
+                    V_pos = new_nodes[u]
+                    tip1 = new_nodes[v]
+                    tip2 = None
+                elif single_edge_mode == 2:
+                    V_pos = new_nodes[v]
+                    tip1 = new_nodes[u]
+                    tip2 = None
+                elif single_edge_mode == 3:
+                    V_pos = (new_nodes[u] + new_nodes[v]) / 2
+                    tip1 = new_nodes[u]
+                    tip2 = new_nodes[v]
+
+                yaw, l1, l2, a1, a2 = compute_lightbender_params(V_pos, tip1, tip2)
                 lightbenders.append(Point3D(lb_id, V_pos[0], V_pos[1], V_pos[2], l1, l2, a1, a2, yaw, max_length))
                 lb_id += 1
                 covered_edges.add(e_idx)
@@ -296,13 +308,19 @@ class SetCoverStrategy(PlacementStrategy):
             # 1. N LightBenders (Fully covers the line seamlessly)
             N = math.ceil(L / (2 * max_length))
             for i in range(N):
-                d = (i + 0.5) * (L / N)
+                if i == 0 and N > 1:
+                    d = max_length
+                elif i == N - 1 and N > 1:
+                    d = L - max_length
+                else:
+                    d = (i + 0.5) * (L / N)
                 edge_d_candidates.append(d)
 
             # 2. N - 1 LightBenders (Leaves a gap at the endpoints for Vertex LBs to cover)
             M = N - 1
             if M > 0:
                 for i in range(M):
+                    # d = (i + 1) * (L / N)
                     d = (i + 0.5) * (L / M)
                     edge_d_candidates.append(d)
 
@@ -440,6 +458,10 @@ class SetCoverStrategy(PlacementStrategy):
                     if c_start <= b_start + TOLERANCE and c_end >= b_end - TOLERANCE:
                         covered_chunk_ids.add(ch_id)
             cand['covered'] = covered_chunk_ids
+
+        # Optional: Visualize Candidates before exact solving
+        if getattr(args, 'viz_candidates', False):
+            visualize_candidates(graph, candidates, max_length)
 
         # E. Solve Exact Set Cover with Overlap Penalty
         chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
@@ -600,7 +622,7 @@ class SetCoverStrategy(PlacementStrategy):
 
         backtrack(0, 0, [], 0)
 
-        if args.csv:
+        if getattr(args, 'csv', False):
             print(f"{len(cand_order)},{num_chunks},{iters},{best_size}")
         else:
             print(f"Total Candidates:   {len(cand_order)}")
@@ -619,9 +641,9 @@ class Allocator:
     def run(self, graph: TargetGraph, policy: str) -> List[Point3D]:
         if policy.upper() == "MIDPOINT":
             strategy = MidpointStrategy()
-        elif policy.upper() == "VERTEX":
-            strategy = VertexStrategy()
-        elif policy.upper() == "SET_COVER":
+        elif policy.upper() == "VFG":
+            strategy = VFGStrategy()
+        elif policy.upper() == "SC":
             strategy = SetCoverStrategy()
         else:
             raise ValueError(f"Unknown placement policy: {policy}")
@@ -631,6 +653,60 @@ class Allocator:
 
 
 # --- Visualization ---
+
+def visualize_candidates(graph: TargetGraph, candidates: List[Dict], max_length: float):
+    """Visualizes all generated candidates with depth offsets to show overlaps."""
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Draw target graph edges
+    for u, v in graph.edges:
+        A = graph.nodes[u]
+        B = graph.nodes[v]
+        ax.plot([A[0], B[0]], [A[1], B[1]], [A[2], B[2]], color='black', alpha=0.5, linewidth=4)
+
+    num_cands = len(candidates)
+    cmap = plt.get_cmap('hsv')
+
+    for i, cand in enumerate(candidates):
+        body = cand['body']
+        tip1 = cand['tip1']
+        tip2 = cand['tip2']
+
+        # Apply a small Z offset to avoid z-fighting and separate overlapping candidates
+        x_off = ((i % 20) - 10) * 0.005
+
+        # Color based on index
+        color = cmap(i / max(1, num_cands))
+
+        b_pos = body + np.array([x_off, 0, 0])
+        ax.scatter(*b_pos, color=color, s=40, alpha=0.9, edgecolor='white')
+
+        if tip1 is not None:
+            t1_pos = tip1 + np.array([x_off, 0, 0])
+            ax.plot([b_pos[0], t1_pos[0]], [b_pos[1], t1_pos[1]], [b_pos[2], t1_pos[2]], color=color, linewidth=2.5,
+                    alpha=0.8)
+        if tip2 is not None:
+            t2_pos = tip2 + np.array([x_off, 0, 0])
+            ax.plot([b_pos[0], t2_pos[0]], [b_pos[1], t2_pos[1]], [b_pos[2], t2_pos[2]], color=color, linewidth=2.5,
+                    alpha=0.8)
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title(f"Generated Candidates (Total: {num_cands})\nDepth offset added for visibility")
+    ax.view_init(elev=20, azim=45)
+
+    extents = np.array([getattr(ax, f'get_{dim}lim')() for dim in 'xyz'])
+    sz = extents[:, 1] - extents[:, 0]
+    centers = np.mean(extents, axis=1)
+    maxsize = max(abs(sz))
+    r = maxsize / 2
+    for ctr, dim in zip(centers, 'xyz'):
+        getattr(ax, f'set_{dim}lim')(ctr - r, ctr + r)
+
+    plt.show()
+
 
 def visualize_placement(graph: TargetGraph, lightbenders: List[Point3D]):
     fig = plt.figure(figsize=(10, 8))
@@ -708,7 +784,7 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         })
     with open(filepath, 'w') as f:
         yaml.dump({'points': data}, f, sort_keys=False)
-    if not args.csv:
+    if not getattr(args, 'csv', False):
         print(f"Placed states saved to {filepath}")
 
 
@@ -718,11 +794,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Place LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VFG', 'SC'], default="VFG",
                         help="Placement policy")
     parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
-    parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
+    parser.add_argument("--no_viz", action="store_true", help="Disable placement visualization")
+    parser.add_argument("--viz_candidates", action="store_true",
+                        help="Enable 3D visualization of all generated Set Cover candidates")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()

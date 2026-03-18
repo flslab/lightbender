@@ -9,12 +9,12 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results_structured"
+BASE_RESULTS_DIR="results_a_z_set_cover_test"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Configuration Arrays ---
-PLACEMENT_POLICIES=("SET_COVER")
-#PLACEMENT_POLICIES=("VERTEX" "SET_COVER")
+PLACEMENT_POLICIES=("SC")
+#PLACEMENT_POLICIES=("VFG" "SC")
 SELECTION_METHODS=("GREEDY_MAX_DEGREE")
 #SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
 RESOLUTION_ORDERS=("MAX_DEGREE")
@@ -114,7 +114,7 @@ for input_file in "${INPUT_FILES[@]}"; do
         fi
 
         # Use whole lines from place.py depending on the policy
-        if [ "$policy" == "SET_COVER" ]; then
+        if [ "$policy" == "SC" ]; then
             PLACE_SC_METRICS=$(echo "$PLACE_OUT" | tail -n 2 | head -n 1)
             PLACE_STD_METRICS=$(echo "$PLACE_OUT" | tail -n 1)
             PLACE_STATS="${PLACE_STD_METRICS},${PLACE_SC_METRICS}"

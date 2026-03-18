@@ -170,7 +170,7 @@ class MidpointStrategy(PlacementStrategy):
         return lightbenders
 
 
-class VertexStrategy(PlacementStrategy):
+class VFGStrategy(PlacementStrategy):
     def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
         lightbenders = []
         lb_id = 0
@@ -284,8 +284,53 @@ class SetCoverStrategy(PlacementStrategy):
     and Tertiary Objective to minimize sum of utilized max_lengths.
     """
 
+    def _generate_sliding_edge_candidates(self, L: float, max_length: float, duplicate_thresh: float) -> List[float]:
+        """Original implementation: Slides candidates from both endpoints inward."""
+        edge_d_candidates = []
+        if L <= 2 * max_length:
+            edge_d_candidates.append(L / 2.0)
+        else:
+            d = max_length
+            while d < L:
+                edge_d_candidates.append(d)
+                d += 1 * max_length
+
+            d_b = max_length
+            while d_b < L:
+                d_from_a = L - d_b
+                is_duplicate = any(abs(existing_d - d_from_a) < duplicate_thresh for existing_d in edge_d_candidates)
+                if not is_duplicate:
+                    edge_d_candidates.append(d_from_a)
+                d_b += 1 * max_length
+        return edge_d_candidates
+
+    def _generate_efficient_edge_candidates(self, L: float, max_length: float) -> List[float]:
+        """New implementation: Spaces N and N-1 LightBenders evenly across the line."""
+        edge_d_candidates = []
+        if L <= 2 * max_length:
+            edge_d_candidates.append(L / 2.0)
+        else:
+            # 1. N LightBenders (Fully covers the line)
+            N = math.ceil(L / (2 * max_length))
+            for i in range(N):
+                if i == 0 and N > 1:
+                    d = max_length
+                elif i == N - 1 and N > 1:
+                    d = L - max_length
+                else:
+                    d = (i + 0.5) * (L / N)
+                edge_d_candidates.append(d)
+
+            # 2. N - 1 LightBenders (Leaves gaps at endpoints for Vertex LBs)
+            M = N - 1
+            if M > 0:
+                for i in range(M):
+                    d = (i + 0.5) * (L / M)
+                    edge_d_candidates.append(d)
+        return edge_d_candidates
+
     def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
-        MIN_CHUNK_LEN = 1e-2
+        MIN_CHUNK_LEN = 1e-3
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
 
@@ -301,34 +346,17 @@ class SetCoverStrategy(PlacementStrategy):
 
         candidates = []
 
-        # A. Edge Sliding Candidates (Endpoint-Anchored)
+        # A. Edge Candidates
         for e_idx, ed in enumerate(edge_data):
             L = ed['L']
 
             # Generate overlapping options for EVERY allowed size
             for ml in sorted(max_lengths):
-                edge_d_candidates = []
+                # Use the new efficient candidate generation
+                edge_d_candidates = self._generate_efficient_edge_candidates(L, ml)
 
-                if L <= 2 * ml:
-                    # One candidate perfectly covers the whole edge
-                    edge_d_candidates.append(L / 2.0)
-                else:
-                    # Spanning from Endpoint A
-                    d = ml
-                    while d < L:
-                        edge_d_candidates.append(d)
-                        d += 1 * ml
-
-                    # Spanning from Endpoint B
-                    d_b = ml
-                    while d_b < L:
-                        d_from_a = L - d_b
-                        # Do not create duplicate candidates if they land too close to an existing one
-                        is_duplicate = any(
-                            abs(existing_d - d_from_a) < DUPLICATE_THRESH for existing_d in edge_d_candidates)
-                        if not is_duplicate:
-                            edge_d_candidates.append(d_from_a)
-                        d_b += 1 * ml
+                # To revert to the old method, uncomment the line below:
+                # edge_d_candidates = self._generate_sliding_edge_candidates(L, ml, DUPLICATE_THRESH)
 
                 for d in edge_d_candidates:
                     body = ed['A'] + d * ed['dir']
@@ -651,9 +679,9 @@ class Allocator:
     def run(self, graph: TargetGraph, policy: str) -> List[Point3D]:
         if policy.upper() == "MIDPOINT":
             strategy = MidpointStrategy()
-        elif policy.upper() == "VERTEX":
-            strategy = VertexStrategy()
-        elif policy.upper() == "SET_COVER":
+        elif policy.upper() == "VFG":
+            strategy = VFGStrategy()
+        elif policy.upper() == "SC":
             strategy = SetCoverStrategy()
         else:
             raise ValueError(f"Unknown Placement policy: {policy}")
@@ -751,7 +779,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Place LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VERTEX', 'SET_COVER'], default="VERTEX",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VFG', 'SC'], default="VFG",
                         help="Placement policy")
     parser.add_argument("--max_lens", type=float, nargs='+', default=[0.13, 0.16, 0.24],
                         help="List of allowed maximum lengths for rods")
@@ -788,11 +816,11 @@ if __name__ == "__main__":
 
     if args.csv:
         lb_types_count = " ".join([f"{ml}:{length_counts[ml]}" for ml in sorted(length_counts.keys())])
-        print(f"{(end_time - start_time)*1000:.3f},{total_lbs} ({lb_types_count}),{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
+        print(f"{(end_time - start_time) * 1000:.3f},{total_lbs} ({lb_types_count}),{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
     else:
         print("\n--- Placement Metrics ---")
         print(f"Policy:                 {args.policy}")
-        print(f"Execution Time:         {(end_time - start_time)*1000:.3f}")
+        print(f"Execution Time:         {(end_time - start_time) * 1000:.3f}")
         print(f"Available Max Lengths:  {args.max_lens}")
         print(f"Total LightBenders:     {total_lbs}")
         for ml in sorted(length_counts.keys()):
