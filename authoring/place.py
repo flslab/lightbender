@@ -559,6 +559,7 @@ class SetCoverStrategy(PlacementStrategy):
         best_size = len(greedy_sol)
         best_overlap = greedy_overlap
         best_solution = greedy_sol
+        better_than_greedy = 'No'
 
         # Sort for B&B
         cand_order = list(range(len(valid_indices)))
@@ -574,7 +575,7 @@ class SetCoverStrategy(PlacementStrategy):
         MAX_ITERS = 1000000
 
         def backtrack(cand_idx, current_mask, current_solution, current_overlap):
-            nonlocal best_solution, best_size, best_overlap, iters
+            nonlocal best_solution, best_size, best_overlap, iters, better_than_greedy
 
             if iters >= MAX_ITERS:
                 return
@@ -589,6 +590,7 @@ class SetCoverStrategy(PlacementStrategy):
                     best_overlap = current_overlap
                     best_solution = list(current_solution)
                     print("A better solution than greedy is found.")
+                    better_than_greedy = "Yes"
                 return
 
             # Prune if adding one more candidate will exceed the best known size
@@ -627,12 +629,13 @@ class SetCoverStrategy(PlacementStrategy):
         backtrack(0, 0, [], 0)
 
         if getattr(args, 'csv', False):
-            print(f"{len(cand_order)},{num_chunks},{iters},{best_size}")
+            print(f"{len(cand_order)},{num_chunks},{iters},{len(greedy_sol)},{greedy_overlap},{best_overlap},{better_than_greedy}")
         else:
             print(f"Total Candidates:   {len(cand_order)}")
             print(f"Total Chunks:       {num_chunks}")
             print(f"Total Iterations:   {iters}")
-            print(f"Greedy Solution:    {best_size}")
+            print(f"Greedy Solution:    {len(greedy_sol)}")
+            print(f"Greedy Overlap:     {greedy_overlap}")
         return [valid_indices[i] for i in best_solution]
 
 
