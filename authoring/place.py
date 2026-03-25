@@ -352,10 +352,10 @@ class SetCoverStrategy(PlacementStrategy):
             L = ed['L']
 
             # Use the new, more efficient candidate generation method
-            edge_d_candidates = self._generate_efficient_edge_candidates(L, max_length)
+            # edge_d_candidates = self._generate_efficient_edge_candidates(L, max_length)
 
             # To revert to the old method, uncomment the line below:
-            # edge_d_candidates = self._generate_sliding_edge_candidates(L, max_length, DUPLICATE_THRESH)
+            edge_d_candidates = self._generate_sliding_edge_candidates(L, max_length, DUPLICATE_THRESH)
 
             for d in edge_d_candidates:
                 body = ed['A'] + d * ed['dir']
@@ -576,9 +576,9 @@ class SetCoverStrategy(PlacementStrategy):
         def backtrack(cand_idx, current_mask, current_solution, current_overlap):
             nonlocal best_solution, best_size, best_overlap, iters
 
-            iters += 1
-            if iters > MAX_ITERS:
+            if iters >= MAX_ITERS:
                 return
+            iters += 1
 
             # If all chunks covered, check if it's the best so far
             if current_mask == target_mask:
