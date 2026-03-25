@@ -1,16 +1,18 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "HA",
-    "version": (1, 12),
+    "version": (1, 14),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
-    "description": "Create light-element drones, animate LEDs with pointers, and export YAML",
+    "description": "Create light-element drones, animate LEDs with pointers, add position errors, and export YAML",
     "category": "Animation",
 }
 
 import bpy
 import math
 import bmesh
+import random
+import re
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
     CollectionProperty
 from bpy.app.handlers import persistent
@@ -87,6 +89,39 @@ class DroneProperties(bpy.types.PropertyGroup):
 
     led_pointers: CollectionProperty(type=LEDPointer)
     active_pointer_index: IntProperty(name="Active Pointer", default=0)
+
+    # Position Error Settings
+    error_distance: FloatProperty(
+        name="Error Distance",
+        description="Distance to randomly offset the lb drones in the YZ plane",
+        default=0.05,
+        min=0.0,
+        unit='LENGTH'
+    )
+
+    # Dynamic Drift Settings
+    drift_xy: FloatProperty(
+        name="Max Drift XY",
+        description="Maximum distance to drift in the X and Y axes",
+        default=0.05,
+        min=0.0,
+        unit='LENGTH'
+    )
+
+    drift_z: FloatProperty(
+        name="Max Drift Z",
+        description="Maximum distance to drift in the Z axis (usually lower than XY)",
+        default=0.01,
+        min=0.0,
+        unit='LENGTH'
+    )
+
+    drift_speed: FloatProperty(
+        name="Drift Wave Scale",
+        description="Scale of the noise wave. Higher values mean slower, wider drift",
+        default=50.0,
+        min=1.0
+    )
 
     # Export Settings (Scene Level)
     export_rate: FloatProperty(
@@ -507,6 +542,188 @@ class UL_DronePointerList(bpy.types.UIList):
 
 
 # ------------------------------------------------------------------------
+#    Position Error Feature
+# ------------------------------------------------------------------------
+
+def revert_drone_error(obj):
+    """Reverts applied positional error from object location and fcurves"""
+    if "applied_error_y" in obj and "applied_error_z" in obj:
+        dy = obj["applied_error_y"]
+        dz = obj["applied_error_z"]
+
+        obj.location.y -= dy
+        obj.location.z -= dz
+
+        if obj.animation_data and obj.animation_data.action:
+            for fc in obj.animation_data.action.fcurves:
+                if fc.data_path == "location":
+                    if fc.array_index == 1:  # Y axis
+                        for kp in fc.keyframe_points:
+                            kp.co.y -= dy
+                            kp.handle_left.y -= dy
+                            kp.handle_right.y -= dy
+                        fc.update()
+                    elif fc.array_index == 2:  # Z axis
+                        for kp in fc.keyframe_points:
+                            kp.co.y -= dz
+                            kp.handle_left.y -= dz
+                            kp.handle_right.y -= dz
+                        fc.update()
+
+        del obj["applied_error_y"]
+        del obj["applied_error_z"]
+        return True
+    return False
+
+
+class DRONE_OT_apply_error(bpy.types.Operator):
+    """Apply a random YZ offset to lb[id] drones based on input distance"""
+    bl_idname = "drone.apply_error"
+    bl_label = "Apply Positional Error"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        dist = context.scene.drone_props.error_distance
+        applied_count = 0
+
+        for obj in context.scene.objects:
+            # Match names like lb1, lb2, lb007, etc.
+            if re.match(r"^lb\d+", obj.name):
+                # Ensure we reset any previous error before applying a new one
+                # so the distance remains exactly as requested from original path
+                revert_drone_error(obj)
+
+                theta = random.uniform(0, 2 * math.pi)
+                dy = dist * math.cos(theta)
+                dz = dist * math.sin(theta)
+
+                # Offset Base Location
+                obj.location.y += dy
+                obj.location.z += dz
+
+                # Offset Animation F-Curves if they exist
+                if obj.animation_data and obj.animation_data.action:
+                    for fc in obj.animation_data.action.fcurves:
+                        if fc.data_path == "location":
+                            if fc.array_index == 1:  # Y
+                                for kp in fc.keyframe_points:
+                                    kp.co.y += dy
+                                    kp.handle_left.y += dy
+                                    kp.handle_right.y += dy
+                                fc.update()
+                            elif fc.array_index == 2:  # Z
+                                for kp in fc.keyframe_points:
+                                    kp.co.y += dz
+                                    kp.handle_left.y += dz
+                                    kp.handle_right.y += dz
+                                fc.update()
+
+                # Save the offsets applied so they can be reverted
+                obj["applied_error_y"] = dy
+                obj["applied_error_z"] = dz
+                applied_count += 1
+
+        # Force a viewport update
+        context.view_layer.update()
+        self.report({'INFO'}, f"Applied positional error to {applied_count} lb drones.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_reset_error(bpy.types.Operator):
+    """Reset lb[id] drones to their pre-error coordinates"""
+    bl_idname = "drone.reset_error"
+    bl_label = "Reset Positional Error"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        reset_count = 0
+        for obj in context.scene.objects:
+            if re.match(r"^lb\d+", obj.name):
+                if revert_drone_error(obj):
+                    reset_count += 1
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Reset positional error for {reset_count} lb drones.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_apply_drift(bpy.types.Operator):
+    """Apply continuous noise-based drift to lb[id] drones"""
+    bl_idname = "drone.apply_drift"
+    bl_label = "Apply Dynamic Drift"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        applied_count = 0
+
+        for obj in context.scene.objects:
+            if re.match(r"^lb\d+", obj.name):
+                # Ensure animation data exists
+                if not obj.animation_data:
+                    obj.animation_data_create()
+                if not obj.animation_data.action:
+                    obj.animation_data.action = bpy.data.actions.new(name=f"{obj.name}_Action")
+
+                # Apply noise to X, Y, Z location channels
+                for i in range(3):
+                    fc = obj.animation_data.action.fcurves.find('location', index=i)
+
+                    # We need a keyframe for the fcurve to exist
+                    if not fc:
+                        obj.keyframe_insert(data_path="location", index=i, frame=context.scene.frame_current)
+                        fc = obj.animation_data.action.fcurves.find('location', index=i)
+
+                    # Remove any existing noise modifiers so we don't stack them
+                    for mod in list(fc.modifiers):
+                        if mod.type == 'NOISE':
+                            fc.modifiers.remove(mod)
+
+                    # Add new noise modifier
+                    noise = fc.modifiers.new('NOISE')
+                    noise.scale = props.drift_speed
+                    noise.phase = random.uniform(0, 1000)  # Randomize phase so they drift independently
+
+                    if i == 2:  # Z axis
+                        noise.strength = props.drift_z
+                    else:  # X and Y axes
+                        noise.strength = props.drift_xy
+
+                applied_count += 1
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Applied dynamic drift to {applied_count} lb drones.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_reset_drift(bpy.types.Operator):
+    """Remove drift noise modifiers from lb[id] drones"""
+    bl_idname = "drone.reset_drift"
+    bl_label = "Reset Dynamic Drift"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        reset_count = 0
+        for obj in context.scene.objects:
+            if re.match(r"^lb\d+", obj.name):
+                if obj.animation_data and obj.animation_data.action:
+                    cleared = False
+                    for i in range(3):
+                        fc = obj.animation_data.action.fcurves.find('location', index=i)
+                        if fc:
+                            for mod in list(fc.modifiers):
+                                if mod.type == 'NOISE':
+                                    fc.modifiers.remove(mod)
+                                    cleared = True
+                    if cleared:
+                        reset_count += 1
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Removed drift from {reset_count} lb drones.")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
 #    Animation Handler (Live Updates)
 # ------------------------------------------------------------------------
 
@@ -780,6 +997,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         scene = context.scene
         obj = context.active_object
 
+        # --- Drone Creation ---
         layout.label(text="Add Drone:")
         row = layout.row()
         row.prop(scene.drone_props, "drone_type", text="")
@@ -792,6 +1010,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+        # --- Selected Drone Controls ---
         if obj and "servo_1" in obj:
             props = obj.drone_props
             is_semi = 'SEMI' in props.drone_type
@@ -843,6 +1062,29 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+        # --- Error & Drift Simulator ---
+        layout.label(text="Error & Drift Simulators:", icon='MOD_NOISE')
+        box = layout.box()
+
+        box.label(text="Static Error (YZ Plane):")
+        box.prop(scene.drone_props, "error_distance")
+        row = box.row(align=True)
+        row.operator("drone.apply_error", text="Apply Static Error")
+        row.operator("drone.reset_error", text="Reset Static")
+
+        box.separator()
+
+        box.label(text="Dynamic Drift (XYZ):")
+        box.prop(scene.drone_props, "drift_xy", text="Max Drift XY")
+        box.prop(scene.drone_props, "drift_z", text="Max Drift Z")
+        box.prop(scene.drone_props, "drift_speed", text="Wave Scale (Slower=Higher)")
+        row = box.row(align=True)
+        row.operator("drone.apply_drift", text="Apply Drift")
+        row.operator("drone.reset_drift", text="Reset Drift")
+
+        layout.separator()
+
+        # --- Export Config ---
         layout.label(text="Export Config:")
         layout.prop(scene.drone_props, "export_at_keyframes")
 
@@ -863,7 +1105,10 @@ classes = (
     DRONE_OT_add_pointer,
     DRONE_OT_remove_pointer,
     UL_DronePointerList,
-    DRONE_OT_force_update,
+    DRONE_OT_apply_error,
+    DRONE_OT_reset_error,
+    DRONE_OT_apply_drift,
+    DRONE_OT_reset_drift,
     EXPORT_OT_drone_yaml,
     VIEW3D_PT_drone_swarm,
 )
