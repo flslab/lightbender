@@ -195,18 +195,22 @@ class VFGStrategy(PlacementStrategy):
         # Traverse the graph via BFS to get vertices in order of incidence
         visited_nodes = set()
         ordered_vertices = []
-        for u, v in new_edges:
-            for start_node in (u, v):
-                if start_node not in visited_nodes:
-                    queue = [start_node]
-                    visited_nodes.add(start_node)
-                    while queue:
-                        curr = queue.pop(0)
-                        ordered_vertices.append(curr)
-                        for _, neighbor in adj[curr]:
-                            if neighbor not in visited_nodes:
-                                visited_nodes.add(neighbor)
-                                queue.append(neighbor)
+        
+        # Prioritize vertices with degree 1 as starting nodes for any new traversal
+        degree_1_nodes = [node for node, neighbors in adj.items() if len(neighbors) == 1]
+        all_nodes = [node for u, v in new_edges for node in (u, v)]
+        
+        for start_node in degree_1_nodes + all_nodes:
+            if start_node not in visited_nodes:
+                queue = [start_node]
+                visited_nodes.add(start_node)
+                while queue:
+                    curr = queue.pop(0)
+                    ordered_vertices.append(curr)
+                    for _, neighbor in adj[curr]:
+                        if neighbor not in visited_nodes:
+                            visited_nodes.add(neighbor)
+                            queue.append(neighbor)
 
         # 3. Pass A: Prioritize 2-edge coverage at vertices using incidence order
         for V_id in ordered_vertices:
