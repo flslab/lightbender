@@ -13,8 +13,12 @@ BASE_RESULTS_DIR="results_a_z_set_cover_test"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Configuration Arrays ---
-PLACEMENT_POLICIES=("SC")
-#PLACEMENT_POLICIES=("VFG" "SC")
+# Transform Bounding Box Size
+TRANSFORM_MAX_WIDTH=0.5
+TRANSFORM_MAX_HEIGHT=0.25
+
+# PLACEMENT_POLICIES=("SC")
+PLACEMENT_POLICIES=("VFG" "SC")
 SELECTION_METHODS=("GREEDY_MAX_DEGREE")
 #SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
 RESOLUTION_ORDERS=("MAX_DEGREE")
@@ -32,7 +36,39 @@ CAM_Y=0.0
 CAM_Z=0.0
 
 # Define the comprehensive CSV header
-CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalRods,PlaceAvgRodLen,PlaceRodLenUtil,PlaceTotalCand,PlaceTotalChunks,PlaceTotalIter,PlaceGreedySol,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+
+# --- Generate Configuration Report ---
+REPORT_FILE="$BASE_RESULTS_DIR/experiment_config.txt"
+cat <<EOF > "$REPORT_FILE"
+========================================
+        EXPERIMENT CONFIG
+========================================
+Date/Time : $(date)
+Git Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'N/A')
+Git Hash  : $(git rev-parse HEAD 2>/dev/null || echo 'N/A')
+----------------------------------------
+Inputs    : ${INPUT_FILES[*]}
+----------------------------------------
+Transform:
+  Max Width: $TRANSFORM_MAX_WIDTH
+  Max Height: $TRANSFORM_MAX_HEIGHT
+----------------------------------------
+Placement Policies       : ${PLACEMENT_POLICIES[*]}
+----------------------------------------
+Selection Methods        : ${SELECTION_METHODS[*]}
+Resolution Orders        : ${RESOLUTION_ORDERS[*]}
+Trajectory Types         : ${TRAJECTORY_TYPES[*]}
+Move Directions          : ${MOVE_DIRECTIONS[*]}
+Deconflict Placement Type: ${DECONFLICT_PLACEMENT_TYPES[*]}
+----------------------------------------
+Camera Position:
+  X: $CAM_X
+  Y: $CAM_Y
+  Z: $CAM_Z
+========================================
+EOF
+echo "Generated configuration report: $REPORT_FILE"
 
 # --- Execution ---
 
@@ -67,6 +103,8 @@ for input_file in "${INPUT_FILES[@]}"; do
     TRANSFORM_OUT=$(python transform.py \
         --input "$input_file" \
         --output "$GRAPH_YAML" \
+        -mw "$TRANSFORM_MAX_WIDTH" \
+        -ml "$TRANSFORM_MAX_HEIGHT" \
         --csv)
 
     if [ ! -f "$GRAPH_YAML" ]; then
@@ -120,7 +158,7 @@ for input_file in "${INPUT_FILES[@]}"; do
             PLACE_STATS="${PLACE_STD_METRICS},${PLACE_SC_METRICS}"
         else
             PLACE_STD_METRICS=$(echo "$PLACE_OUT" | tail -n 1)
-            PLACE_STATS="${PLACE_STD_METRICS},NA,NA,NA,NA"
+            PLACE_STATS="${PLACE_STD_METRICS},NA,NA,NA,NA,NA,NA,NA"
         fi
 
         # ---------------------------------------------------------
