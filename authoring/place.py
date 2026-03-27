@@ -129,6 +129,46 @@ class PlacementStrategy(ABC):
         pass
 
 
+def merge_collinear_edges(graph: TargetGraph):
+    nodes = {k: v.copy() for k, v in graph.nodes.items()}
+    adj = {k: set() for k in nodes}
+    for u, v in graph.edges:
+        adj[u].add(v)
+        adj[v].add(u)
+
+    while True:
+        merged = False
+        for n, neighbors in list(adj.items()):
+            if len(neighbors) == 2:
+                u, v = list(neighbors)
+                vec1 = nodes[n] - nodes[u]
+                vec2 = nodes[v] - nodes[n]
+                n1 = np.linalg.norm(vec1)
+                n2 = np.linalg.norm(vec2)
+
+                if n1 > 1e-6 and n2 > 1e-6:
+                    if abs(np.dot(vec1 / n1, vec2 / n2) - 1.0) < 1e-4:
+                        adj[u].remove(n)
+                        adj[v].remove(n)
+                        adj[u].add(v)
+                        adj[v].add(u)
+                        del adj[n]
+                        del nodes[n]
+                        merged = True
+                        break
+        if not merged:
+            break
+
+    edges = []
+    seen = set()
+    for u, neighbors in adj.items():
+        for v in neighbors:
+            if frozenset([u, v]) not in seen:
+                edges.append((u, v))
+                seen.add(frozenset([u, v]))
+    return nodes, edges
+
+
 class MidpointStrategy(PlacementStrategy):
     def place(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
         lightbenders = []
@@ -159,12 +199,14 @@ class VFGStrategy(PlacementStrategy):
         lightbenders = []
         lb_id = 0
 
+        merged_nodes, merged_edges = merge_collinear_edges(graph)
+
         # 1. Subdivide edges to ensure all are <= max_length
-        new_nodes = {k: v.copy() for k, v in graph.nodes.items()}
+        new_nodes = {k: v.copy() for k, v in merged_nodes.items()}
         new_edges = []
         next_node_id = max(new_nodes.keys()) + 1 if new_nodes else 0
 
-        for u, v in graph.edges:
+        for u, v in merged_edges:
             A, B = new_nodes[u], new_nodes[v]
             vec = B - A
             L = np.linalg.norm(vec)
@@ -172,12 +214,13 @@ class VFGStrategy(PlacementStrategy):
 
             if L > max_length + 1e-6:
                 num_segments = math.ceil(L / max_length)
-                seg_vec = vec / num_segments
+                dir_vec = vec / L
                 prev_node = u
                 for i in range(1, num_segments):
                     mid_node_id = next_node_id
                     next_node_id += 1
-                    new_nodes[mid_node_id] = A + i * seg_vec
+                    new_nodes[mid_node_id] = A + i * max_length * dir_vec
+
                     new_edges.append((prev_node, mid_node_id))
                     prev_node = mid_node_id
                 new_edges.append((prev_node, v))
@@ -335,7 +378,7 @@ class SetCoverStrategy(PlacementStrategy):
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
 
-        merged_nodes, merged_edges = self._merge_collinear_edges(graph)
+        merged_nodes, merged_edges = merge_collinear_edges(graph)
 
         edge_data = []
         for e_idx, (u, v) in enumerate(merged_edges):
@@ -470,58 +513,65 @@ class SetCoverStrategy(PlacementStrategy):
         # E. Solve Exact Set Cover with Overlap Penalty
         chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
 
+        # 4.5 Resolve physical overlaps among chosen candidates
+        edge_intervals = {e_idx: [] for e_idx in range(len(edge_data))}
+        for idx in chosen_indices:
+            cand = candidates[idx]
+            for e_idx, (c_start, c_end) in cand['edge_coverages'].items():
+                edge_intervals[e_idx].append({
+                    'cand_idx': idx,
+                    'start': c_start,
+                    'end': c_end
+                })
+
+        for e_idx, intervals in edge_intervals.items():
+            intervals.sort(key=lambda x: x['start'])
+            for i in range(len(intervals) - 1):
+                curr = intervals[i]
+                nxt = intervals[i + 1]
+                if curr['end'] > nxt['start'] + 1e-5:
+                    nxt['start'] = curr['end']
+                    if nxt['start'] > nxt['end']:
+                        nxt['start'] = nxt['end']
+
+        for e_idx, intervals in edge_intervals.items():
+            for interval in intervals:
+                c_idx = interval['cand_idx']
+                candidates[c_idx]['edge_coverages'][e_idx] = (interval['start'], interval['end'])
+
         # 5. Extract Final LightBenders
         lightbenders = []
         for lb_id, idx in enumerate(chosen_indices):
             cand = candidates[idx]
-            yaw, l1, l2, a1, a2 = compute_lightbender_params(cand['body'], cand['tip1'], cand['tip2'])
+            body = cand['body']
+            
+            tips = []
+            for e_idx, (c_start, c_end) in cand['edge_coverages'].items():
+                ed = edge_data[e_idx]
+                P_start = ed['A'] + c_start * ed['dir']
+                P_end = ed['A'] + c_end * ed['dir']
+                
+                if np.linalg.norm(P_start - body) > 1e-4:
+                    tips.append(P_start)
+                if np.linalg.norm(P_end - body) > 1e-4:
+                    tips.append(P_end)
+                    
+            if len(tips) == 0:
+                tip1, tip2 = body, None
+            else:
+                tip1 = tips[0]
+                tip2 = tips[1] if len(tips) > 1 else None
+                
+            yaw, l1, l2, a1, a2 = compute_lightbender_params(body, tip1, tip2)
+            
             lb = Point3D(
-                id=lb_id, x=cand['body'][0], y=cand['body'][1], z=cand['body'][2],
+                id=lb_id, x=body[0], y=body[1], z=body[2],
                 length_1=l1, length_2=l2, angle_1=a1, angle_2=a2,
                 yaw=yaw, max_length_limit=max_length
             )
             lightbenders.append(lb)
 
         return lightbenders
-
-    def _merge_collinear_edges(self, graph: TargetGraph):
-        nodes = {k: v.copy() for k, v in graph.nodes.items()}
-        adj = {k: set() for k in nodes}
-        for u, v in graph.edges:
-            adj[u].add(v)
-            adj[v].add(u)
-
-        while True:
-            merged = False
-            for n, neighbors in list(adj.items()):
-                if len(neighbors) == 2:
-                    u, v = list(neighbors)
-                    vec1 = nodes[n] - nodes[u]
-                    vec2 = nodes[v] - nodes[n]
-                    n1 = np.linalg.norm(vec1)
-                    n2 = np.linalg.norm(vec2)
-
-                    if n1 > 1e-6 and n2 > 1e-6:
-                        if abs(np.dot(vec1 / n1, vec2 / n2) - 1.0) < 1e-4:
-                            adj[u].remove(n)
-                            adj[v].remove(n)
-                            adj[u].add(v)
-                            adj[v].add(u)
-                            del adj[n]
-                            del nodes[n]
-                            merged = True
-                            break
-            if not merged:
-                break
-
-        edges = []
-        seen = set()
-        for u, neighbors in adj.items():
-            for v in neighbors:
-                if frozenset([u, v]) not in seen:
-                    edges.append((u, v))
-                    seen.add(frozenset([u, v]))
-        return nodes, edges
 
     def _solve_set_cover(self, candidates, num_chunks):
         target_mask = (1 << num_chunks) - 1
