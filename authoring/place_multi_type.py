@@ -646,7 +646,7 @@ class SetCoverStrategy(PlacementStrategy):
         def backtrack(cand_idx, current_mask, current_solution, current_overlap, current_len_sum):
             nonlocal best_solution, best_size, best_overlap, best_len_sum, iters, better_than_greedy
 
-            if iters > MAX_ITERS:
+            if iters >= MAX_ITERS:
                 return
             iters += 1
 
