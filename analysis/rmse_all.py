@@ -111,10 +111,15 @@ def set_axes_equal(ax, points):
 # ==========================================
 
 class DroneProcessor:
-    def __init__(self, drone_id, yaml_config, json_path):
+    def __init__(self, drone_id, yaml_config, json_path, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0):
         self.drone_id = drone_id
         self.yaml_config = yaml_config
         self.json_path = json_path
+        self.use_kinematics = use_kinematics
+        self.max_v = max_v
+        self.max_a = max_a
+        self.max_j = max_j
+        self.max_s = max_s
 
         # Load Interpolators
         self._load_gt()
@@ -125,7 +130,10 @@ class DroneProcessor:
         if not len(waypoints):
             waypoints.append(self.yaml_config['target'])
             waypoints.append(self.yaml_config['target'])
-        waypoints = np.array(waypoints)  # [x, y, z, yaw, dt]
+        waypoints = np.array(waypoints, dtype=float)  # [x, y, z, yaw, dt]
+        if 'position_offset' in self.yaml_config:
+            offset = np.array(self.yaml_config['position_offset'])
+            waypoints[:, 0:3] += offset
         servos = np.array(self.yaml_config['servos'])  # [rod1, rod2]
 
         times = [0.0]
@@ -137,11 +145,96 @@ class DroneProcessor:
         self.gt_duration = times[-1]
 
         self.gt_pos_fn = interp1d(self.gt_times, waypoints[:, 0:3], axis=0, kind='linear', fill_value="extrapolate")
+        
+        if self.use_kinematics:
+            self.gt_pos_fn = self._apply_kinematics_filter(self.gt_times, self.gt_pos_fn, self.max_v, self.max_a, self.max_j, self.max_s)
+
         unwrapped_yaw = np.unwrap(np.radians(waypoints[:, 3]))
         self.gt_yaw_fn = interp1d(self.gt_times, unwrapped_yaw, kind='linear', fill_value="extrapolate")
 
         # Use raw servo values in degrees
         self.gt_servo_fn = interp1d(self.gt_times, servos, axis=0, kind='linear', fill_value="extrapolate")
+
+    def _apply_kinematics_filter(self, time_vals, pos_func, max_v, max_a, max_j, max_s, dt_sim=0.01):
+        sim_times = np.arange(time_vals[0], time_vals[-1] + dt_sim, dt_sim)
+        if len(sim_times) == 0:
+            return pos_func
+        
+        pos = np.zeros((len(sim_times), 3))
+        vel = np.zeros((len(sim_times), 3))
+        acc = np.zeros((len(sim_times), 3))
+        jerk = np.zeros((len(sim_times), 3))
+        
+        pos[0] = pos_func(sim_times[0])
+        
+        for i in range(1, len(sim_times)):
+            target_pos = pos_func(sim_times[i])
+            
+            # Position error
+            error = target_pos - pos[i-1]
+            dist = np.linalg.norm(error)
+            
+            # Safe velocity (considering max_a)
+            safe_v = min(max_v, np.sqrt(2 * max_a * max(0, dist)))
+            if dist > 1e-6:
+                v_des = (error / dist) * min(dist / dt_sim, safe_v)
+            else:
+                v_des = np.zeros(3)
+                
+            # Velocity error
+            v_err = v_des - vel[i-1]
+            dv_norm = np.linalg.norm(v_err)
+            
+            # Safe acceleration (considering max_j)
+            safe_a = min(max_a, np.sqrt(2 * max_j * max(0, dv_norm)))
+            if dv_norm > 1e-6:
+                a_des = (v_err / dv_norm) * min(dv_norm / dt_sim, safe_a)
+            else:
+                a_des = np.zeros(3)
+                
+            # Acceleration error
+            a_err = a_des - acc[i-1]
+            da_norm = np.linalg.norm(a_err)
+            
+            # Safe jerk (considering max_s)
+            safe_j = min(max_j, np.sqrt(2 * max_s * max(0, da_norm)))
+            if da_norm > 1e-6:
+                j_des = (a_err / da_norm) * min(da_norm / dt_sim, safe_j)
+            else:
+                j_des = np.zeros(3)
+                
+            # Jerk error
+            j_err = j_des - jerk[i-1]
+            dj_norm = np.linalg.norm(j_err)
+            
+            # Snap (control input)
+            if dj_norm > 1e-6:
+                snap = (j_err / dj_norm) * min(dj_norm / dt_sim, max_s)
+            else:
+                snap = np.zeros(3)
+                
+            # Step physics
+            jerk[i] = jerk[i-1] + snap * dt_sim
+            
+            j_mag = np.linalg.norm(jerk[i])
+            if j_mag > max_j and j_mag > 0:
+                jerk[i] = (jerk[i] / j_mag) * max_j
+                
+            acc[i] = acc[i-1] + jerk[i] * dt_sim
+            
+            a_mag = np.linalg.norm(acc[i])
+            if a_mag > max_a and a_mag > 0:
+                acc[i] = (acc[i] / a_mag) * max_a
+                
+            vel[i] = vel[i-1] + acc[i] * dt_sim
+            
+            v_mag = np.linalg.norm(vel[i])
+            if v_mag > max_v and v_mag > 0:
+                vel[i] = (vel[i] / v_mag) * max_v
+                
+            pos[i] = pos[i-1] + vel[i] * dt_sim
+            
+        return interp1d(sim_times, pos, axis=0, kind='linear', fill_value='extrapolate')
 
     def _load_act(self):
         with open(self.json_path, 'r') as f:
@@ -217,7 +310,7 @@ class DroneProcessor:
 # 3. MAIN ANALYSIS LOGIC
 # ==========================================
 
-def calculate_rmse(yaml_file, tag):
+def calculate_rmse(yaml_file, tag, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0):
     print(f"Loading Configuration from {yaml_file}...")
     with open(yaml_file, 'r') as f:
         yaml_data = yaml.safe_load(f)
@@ -228,7 +321,7 @@ def calculate_rmse(yaml_file, tag):
     # 1. Initialize Processors (Find logs and parse)
     for drone_id, config in drones_config.items():
         # Search for log file starting with drone_id
-        search_pattern = f"logs/{drone_id}_{tag}*.json"
+        search_pattern = f"/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/logs/{drone_id}_{tag}*.json"
         files = glob.glob(search_pattern)
 
         if not files:
@@ -245,7 +338,7 @@ def calculate_rmse(yaml_file, tag):
         print(f"Found log for {drone_id}: {json_file}")
 
         try:
-            p = DroneProcessor(drone_id, config, json_file)
+            p = DroneProcessor(drone_id, config, json_file, use_kinematics, max_v, max_a, max_j, max_s)
             processors.append(p)
         except Exception as e:
             print(f"Error loading data for {drone_id}: {e}")
@@ -498,8 +591,16 @@ def calculate_rmse(yaml_file, tag):
 
 
 if __name__ == "__main__":
-    # Adjust default file if needed
-    yaml_path = 'mission/arrow.yaml'
-    # Use glob to find the json file if the hardcoded one doesn't exist to prevent immediate crashes for user
-    calculate_rmse(yaml_path, 'arrow_leader_follower_2026-01-16_18-41-27')
+    import argparse
+    parser = argparse.ArgumentParser(description="RMSE Analysis Toolkit")
+    parser.add_argument('--yaml', type=str, default='/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/reversing_arrow_blender.yaml', help='Path to mission yaml')
+    parser.add_argument('--tag', type=str, default='reversing_arrow_std_2026-03-19_11-18-28', help='Log file tag')
+    parser.add_argument('--kinematics', action='store_true', help='Enable kinematic modeling of ground truth')
+    parser.add_argument('--max_v', type=float, default=1.0, help='Maximum velocity (m/s)')
+    parser.add_argument('--max_a', type=float, default=0.25, help='Maximum acceleration (m/s^2)')
+    parser.add_argument('--max_j', type=float, default=17.0, help='Maximum jerk (m/s^3)')
+    parser.add_argument('--max_s', type=float, default=550.0, help='Maximum snap (m/s^4)')
 
+    args = parser.parse_args()
+    
+    calculate_rmse(args.yaml, args.tag, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s)
