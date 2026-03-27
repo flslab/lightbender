@@ -1,5 +1,14 @@
 #!/bin/bash
 
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <place_script.py> [input_file.svg ...]"
+    echo "Example: $0 place.py svg/c.svg"
+    exit 1
+fi
+
+PLACE_SCRIPT=$1
+shift
+
 # Default Input files
 INPUT_FILES=("drawing.svg")
 
@@ -9,16 +18,20 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results_a_z_set_cover_test"
+BASE_RESULTS_DIR="results/test"
 mkdir -p "$BASE_RESULTS_DIR"
 
-# --- Configuration Arrays ---
-# Transform Bounding Box Size
-TRANSFORM_MAX_WIDTH=0.5
-TRANSFORM_MAX_HEIGHT=0.25
+# --- Transform Parameters ---
+TRANSFORM_MAX_WIDTH=2.0
+TRANSFORM_MAX_HEIGHT=1.0
 
+# --- Placement Parameters ---
+MAX_LENGTH=0.16
+MAX_LENGTHS="0.13 0.16 0.24"
 # PLACEMENT_POLICIES=("SC")
 PLACEMENT_POLICIES=("VFG" "SC")
+
+# --- Stagger Parameters ---
 SELECTION_METHODS=("GREEDY_MAX_DEGREE")
 #SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
 RESOLUTION_ORDERS=("MAX_DEGREE")
@@ -30,13 +43,19 @@ MOVE_DIRECTIONS=("HYBRID")
 DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE")
 #DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
 
-# Shared Camera Position (must match defaults in python scripts or be passed explicitly)
+# Shared Camera Position
 CAM_X=2.3
 CAM_Y=0.0
 CAM_Z=0.0
 
 # Define the comprehensive CSV header
 CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+
+if [ "$PLACE_SCRIPT" == "place.py" ]; then
+    MAX_LENGTH_REPORT="LB Length                : $MAX_LENGTH"
+else
+    MAX_LENGTH_REPORT="LB Lengths               : $MAX_LENGTHS"
+fi
 
 # --- Generate Configuration Report ---
 REPORT_FILE="$BASE_RESULTS_DIR/experiment_config.txt"
@@ -48,24 +67,27 @@ Date/Time : $(date)
 Git Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'N/A')
 Git Hash  : $(git rev-parse HEAD 2>/dev/null || echo 'N/A')
 ----------------------------------------
-Inputs    : ${INPUT_FILES[*]}
+Inputs: ${INPUT_FILES[*]}
 ----------------------------------------
-Transform:
-  Max Width: $TRANSFORM_MAX_WIDTH
-  Max Height: $TRANSFORM_MAX_HEIGHT
+Transform
+Max Width                : $TRANSFORM_MAX_WIDTH
+Max Height               : $TRANSFORM_MAX_HEIGHT
 ----------------------------------------
+Placement ($PLACE_SCRIPT)
+$MAX_LENGTH_REPORT
 Placement Policies       : ${PLACEMENT_POLICIES[*]}
 ----------------------------------------
+Stagger
 Selection Methods        : ${SELECTION_METHODS[*]}
 Resolution Orders        : ${RESOLUTION_ORDERS[*]}
 Trajectory Types         : ${TRAJECTORY_TYPES[*]}
 Move Directions          : ${MOVE_DIRECTIONS[*]}
-Deconflict Placement Type: ${DECONFLICT_PLACEMENT_TYPES[*]}
+Placement Type           : ${DECONFLICT_PLACEMENT_TYPES[*]}
 ----------------------------------------
-Camera Position:
-  X: $CAM_X
-  Y: $CAM_Y
-  Z: $CAM_Z
+Perspective Camera
+Camera Position X        : $CAM_X
+Camera Position Y        : $CAM_Y
+Camera Position Z        : $CAM_Z
 ========================================
 EOF
 echo "Generated configuration report: $REPORT_FILE"
@@ -135,16 +157,24 @@ for input_file in "${INPUT_FILES[@]}"; do
         # STEP 2: PLACE (Graph YAML -> Initial Layout YAML)
         # ---------------------------------------------------------
         INITIAL_LAYOUT="$POLICY_DIR/yaml/initial_layout.yaml"
-        echo "  [Step 2] Running Placement ($policy)..."
+        echo "  [Step 2] Running Placement ($policy) via $PLACE_SCRIPT..."
+
+        if [ "$PLACE_SCRIPT" == "place.py" ]; then
+            PLACE_LENGTH_ARGS="--max_len $MAX_LENGTH"
+        else
+            PLACE_LENGTH_ARGS="--max_lens $MAX_LENGTHS"
+        fi
 
         # Capture output
-        PLACE_OUT=$(python place.py \
+        PLACE_OUT=$(python $PLACE_SCRIPT \
             --input "$GRAPH_YAML" \
             --output "$INITIAL_LAYOUT" \
             --policy "$policy" \
+            $PLACE_LENGTH_ARGS \
             --no_viz \
             --csv)
 
+        # echo "$PLACE_OUT"
         if [ ! -f "$INITIAL_LAYOUT" ]; then
             echo "$PLACE_OUT"
             echo "    Error: place.py failed to produce $INITIAL_LAYOUT. Skipping policy $policy."
@@ -255,7 +285,11 @@ done
 # ---------------------------------------------------------
 # STEP 5: COMBINE INTO MASTER CSV
 # ---------------------------------------------------------
-MASTER_CSV="$BASE_RESULTS_DIR/master_results.csv"
+if [ "$PLACE_SCRIPT" == "place.py" ]; then
+    MASTER_CSV="$BASE_RESULTS_DIR/master_results_${TRANSFORM_MAX_HEIGHT}.csv"
+else
+    MASTER_CSV="$BASE_RESULTS_DIR/master_results_multi_type_${TRANSFORM_MAX_HEIGHT}.csv"
+fi
 echo "========================================"
 echo "Compiling Master CSV..."
 
