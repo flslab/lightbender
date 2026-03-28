@@ -374,7 +374,7 @@ class SetCoverStrategy(PlacementStrategy):
         return edge_d_candidates
 
     def place(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
-        MIN_CHUNK_LEN = 1e-2
+        MIN_CHUNK_LEN = 1e-6
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
 
