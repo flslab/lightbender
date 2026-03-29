@@ -18,7 +18,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/skyline"
+BASE_RESULTS_DIR="results/dtla_ss"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
@@ -50,7 +50,7 @@ CAM_Y=0.0
 CAM_Z=0.0
 
 # Define the comprehensive CSV header
-CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
 
 if [ "$PLACE_SCRIPT" == "place.py" ]; then
     MAX_LENGTH_REPORT="LB Length                : $MAX_LENGTH"
@@ -246,7 +246,7 @@ for input_file in "${INPUT_FILES[@]}"; do
                             # Validate Solver Output (Requires 7 comma-separated numbers)
                             if [[ "$SOLVER_STATS" != *","* ]]; then
                                 echo "      Error: Solver failed or returned invalid CSV."
-                                SOLVER_STATS="0,0,0,0,0.0,0.0,0.0" # Dummy data
+                                SOLVER_STATS="0,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0" # Dummy data
                             fi
 
                             # ---------------------------------------------------------

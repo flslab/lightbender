@@ -1091,6 +1091,37 @@ if __name__ == "__main__":
     num_downwashes = graph.total_downwash
     num_collisions = graph.total_collision
 
+    # Per-node conflict stats (initial)
+    init_node_total = {pid: graph.node_collisions[pid] + graph.node_downwashes[pid] for pid in graph.points}
+    init_min_total = min(init_node_total.values()) if init_node_total else 0
+    init_max_total = max(init_node_total.values()) if init_node_total else 0
+    init_min_dw = min(graph.node_downwashes.values()) if graph.node_downwashes else 0
+    init_max_dw = max(graph.node_downwashes.values()) if graph.node_downwashes else 0
+    init_min_col = min(graph.node_collisions.values()) if graph.node_collisions else 0
+    init_max_col = max(graph.node_collisions.values()) if graph.node_collisions else 0
+
+    import copy
+    final_points_data = copy.deepcopy(points_data)
+    for p_dict in final_points_data:
+        pid = p_dict.id
+        if pid in positions:
+            p_dict.x = float(positions[pid][0])
+            p_dict.y = float(positions[pid][1])
+            p_dict.z = float(positions[pid][2])
+
+    final_graph = InterferenceGraph(final_points_data, args.threshold)
+    unresolved_downwashes = final_graph.total_downwash
+    unresolved_collisions = final_graph.total_collision
+
+    # Per-node conflict stats (final)
+    final_node_total = {pid: final_graph.node_collisions[pid] + final_graph.node_downwashes[pid] for pid in final_graph.points}
+    final_min_total = min(final_node_total.values()) if final_node_total else 0
+    final_max_total = max(final_node_total.values()) if final_node_total else 0
+    final_min_dw = min(final_graph.node_downwashes.values()) if final_graph.node_downwashes else 0
+    final_max_dw = max(final_graph.node_downwashes.values()) if final_graph.node_downwashes else 0
+    final_min_col = min(final_graph.node_collisions.values()) if final_graph.node_collisions else 0
+    final_max_col = max(final_graph.node_collisions.values()) if final_graph.node_collisions else 0
+
     if num_moved > 0:
         avg_dist = float(np.mean(moved_distances))
         min_dist = float(np.min(moved_distances))
@@ -1101,14 +1132,18 @@ if __name__ == "__main__":
         max_dist = 0.0
 
     if args.csv:
-        # CSV format: Downwashes,Collisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
+        # CSV format: Downwashes,Collisions,UnresolvedDownwashes,UnresolvedCollisions,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
         print(
-            f"{num_downwashes},{num_collisions},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+            f"{num_downwashes},{num_collisions},{unresolved_downwashes},{unresolved_collisions},{init_min_dw},{init_max_dw},{init_min_col},{init_max_col},{init_min_total},{init_max_total},{final_min_dw},{final_max_dw},{final_min_col},{final_max_col},{final_min_total},{final_max_total},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
     else:
         print("=" * 40)
         print("METRICS SUMMARY")
-        print(f"Downwash conflicts:            {num_downwashes}")
-        print(f"Collision Conflicts:           {num_collisions}")
+        print(f"Initial Downwash conflicts:    {num_downwashes}  (per-node min/max: {init_min_dw}/{init_max_dw})")
+        print(f"Initial Collision Conflicts:   {num_collisions}  (per-node min/max: {init_min_col}/{init_max_col})")
+        print(f"Initial Total:                 (per-node min/max: {init_min_total}/{init_max_total})")
+        print(f"Unresolved Downwashes:         {unresolved_downwashes}  (per-node min/max: {final_min_dw}/{final_max_dw})")
+        print(f"Unresolved Collisions:         {unresolved_collisions}  (per-node min/max: {final_min_col}/{final_max_col})")
+        print(f"Unresolved Total:              (per-node min/max: {final_min_total}/{final_max_total})")
         print(f"LightBenders Selected to Move: {num_selected}")
         print(f"LightBenders Actually Moved:   {num_moved}")
         print(f"Travel Distance - Avg:         {avg_dist:.4f}")
