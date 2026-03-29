@@ -281,7 +281,7 @@ class DroneProcessor:
         """
         # Validity check: Must be within GT definition and have actual data
         if t_rel < 0 or t_rel > self.gt_duration or t_rel > self.act_max_rel_time:
-            return None, None, False
+            return None, None, None, None, False
 
         # --- Ground Truth State ---
         g_pos = self.gt_pos_fn(t_rel)
@@ -307,7 +307,7 @@ class DroneProcessor:
         leds_gt_world = transform_points(leds_local, g_pos, g_rpy)
         leds_act_world = transform_points(leds_local, a_pos, a_rpy)
 
-        return leds_gt_world, leds_act_world, True
+        return leds_gt_world, leds_act_world, g_pos, a_pos, True
 
 
 # ==========================================
@@ -372,37 +372,62 @@ def calculate_rmse(yaml_file, tag, use_kinematics=False, max_v=2.0, max_a=1.0, m
         frame_total_sse = 0
         frame_total_count = 0
 
-        # Iterate over all drones for this specific time step
+        # First pass: collect valid data and compute centroids
+        valid_processors = []
+        gt_leds_list = []
+        act_leds_list = []
+        gt_pos_list = []
+        act_pos_list = []
+
         for p in processors:
-            gt_leds, act_leds, valid = p.get_state_at_relative_time(t)
-
+            gt_leds, act_leds, g_pos, a_pos, valid = p.get_state_at_relative_time(t)
             if valid:
-                diff = gt_leds - act_leds
-                sse = np.sum(diff ** 2)
-                count = len(gt_leds)  # 50
-
-                # Per drone metrics
-                rmse_val = np.sqrt(sse / count) * 1000.0  # mm
-
-                results['drones'][p.drone_id]['rmse'].append(rmse_val)
-
-                # Store subsample for vis (every 10th step)
-                if len(results['drones'][p.drone_id]['rmse']) % 10 == 0:
-                    results['drones'][p.drone_id]['leds_gt'].append(gt_leds)
-                    results['drones'][p.drone_id]['leds_act'].append(act_leds)
-
-                # Accumulate for Combined Metric
-                frame_total_sse += sse
-                frame_total_count += count
+                valid_processors.append(p)
+                gt_leds_list.append(gt_leds)
+                act_leds_list.append(act_leds)
+                gt_pos_list.append(g_pos)
+                act_pos_list.append(a_pos)
             else:
-                # Store NaN to keep array length consistent with timestamps
                 results['drones'][p.drone_id]['rmse'].append(np.nan)
-
                 if len(results['drones'][p.drone_id]['rmse']) % 10 == 0:
                     results['drones'][p.drone_id]['leds_gt'].append(None)
                     results['drones'][p.drone_id]['leds_act'].append(None)
 
-        # Compute Combined RMSE for this frame (if any drone was active)
+        if not valid_processors:
+            results['combined_rmse'].append(np.nan)
+            continue
+
+        # Compute swarm centroids for this frame
+        C_gt = np.mean(gt_pos_list, axis=0)
+        C_act = np.mean(act_pos_list, axis=0)
+
+        # Second pass: compute relative aligned errors
+        for i, p in enumerate(valid_processors):
+            gt_leds = gt_leds_list[i]
+            act_leds = act_leds_list[i]
+            
+            # Align LEDs by subtracting the respective swarm centroid
+            gt_leds_aligned = gt_leds - C_gt
+            act_leds_aligned = act_leds - C_act
+
+            diff = gt_leds_aligned - act_leds_aligned
+            sse = np.sum(diff ** 2)
+            count = len(gt_leds)  # 50
+
+            # Per drone metrics
+            rmse_val = np.sqrt(sse / count) * 1000.0  # mm
+            results['drones'][p.drone_id]['rmse'].append(rmse_val)
+
+            # Store aligned subsample for vis (every 10th step)
+            if len(results['drones'][p.drone_id]['rmse']) % 10 == 0:
+                results['drones'][p.drone_id]['leds_gt'].append(gt_leds_aligned)
+                results['drones'][p.drone_id]['leds_act'].append(act_leds_aligned)
+
+            # Accumulate for Combined Metric
+            frame_total_sse += sse
+            frame_total_count += count
+
+        # Compute Combined RMSE for this frame
         if frame_total_count > 0:
             comb_rmse = np.sqrt(frame_total_sse / frame_total_count) * 1000.0  # mm
             results['combined_rmse'].append(comb_rmse)
@@ -437,7 +462,7 @@ def calculate_rmse(yaml_file, tag, use_kinematics=False, max_v=2.0, max_a=1.0, m
         # ==========================================
         # 5. EXPORT DATA TO JSON
         # ==========================================
-        output_filename = f"{tag}_rmse_analysis_output.json"
+        output_filename = f"{tag}_relative_rmse_analysis_output.json"
         print(f"\nExporting raw data to {output_filename}...")
 
         # Structure data for export (handle numpy types)
