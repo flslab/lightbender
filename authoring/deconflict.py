@@ -4,6 +4,8 @@ import math
 import itertools
 import matplotlib.pyplot as plt
 import matplotlib
+import seaborn as sns
+import pandas as pd
 import logging
 import yaml
 import os
@@ -24,6 +26,7 @@ except ImportError:
 # from logger.logger import setup_logging
 
 matplotlib.use('macosx')
+sns.set_theme(style="whitegrid", palette="deep")
 
 # setup_logging()
 
@@ -736,30 +739,25 @@ def visualize_conflict_bar_chart(graph: InterferenceGraph):
     Visualizes the number of downwash and collision conflicts per point using a grouped bar chart.
     """
     try:
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(8, 4))
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
         return
 
     nodes = sorted(graph.nodes)
-    collisions = [graph.node_collisions[pid] for pid in nodes]
-    downwashes = [graph.node_downwashes[pid] for pid in nodes]
+    df_data = []
+    for pid in nodes:
+        df_data.append({'LightBender ID': str(pid), 'Conflicts': graph.node_downwashes[pid], 'Type': 'Downwash'})
+        df_data.append({'LightBender ID': str(pid), 'Conflicts': graph.node_collisions[pid], 'Type': 'Collision'})
+    
+    df = pd.DataFrame(df_data)
 
-    x = np.arange(len(nodes))
-    width = 0.35
-
-    ax.bar(x - width / 2, downwashes, width, label='Downwash', color='orange')
-    ax.bar(x + width / 2, collisions, width, label='Collision', color='red')
-
-    ax.set_ylabel('Number of Conflicts')
-    ax.set_xlabel('LightBender ID')
-    ax.set_title('Conflicts per LightBender (Collision vs Downwash)')
-    ax.set_xticks(x)
-    ax.set_xticklabels(nodes)
-    ax.legend()
-
-    # Add grid for easier visual reading
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    sns.barplot(data=df, x='LightBender ID', y='Conflicts', hue='Type', ax=ax, palette=['#ffb347', '#ff6961'])
+    sns.despine(left=True, bottom=True)
+    ax.tick_params(axis='x', labelsize=6)
+    
+    ax.set_ylabel('Number of Conflicts', rotation=0, ha='left', labelpad=15)
+    ax.yaxis.set_label_coords(-0.03, 1.02)
 
     plt.tight_layout()
 
@@ -778,7 +776,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     Visualizes the before and after states of the points in the XY plane.
     """
     try:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={'width_ratios': [1, 3]})
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
         return
@@ -791,26 +789,31 @@ def visualize_solution_2d(graph: InterferenceGraph,
 
     # --- Plot 1: Before ---
     ax1.set_title(f"Before Resolution ({len(moved_indices)} selected)")
-    ax1.plot(camera_pos[0], camera_pos[1], 'k*', markersize=15, label='Camera')
 
     for i, pid in enumerate(all_ids):
         color = 'red' if pid in moved_set else 'blue'
-        ax1.scatter(orig_coords[i, 0], orig_coords[i, 1], c=color, s=50, zorder=3)
+        ax1.scatter(orig_coords[i, 0], orig_coords[i, 1], c=color, s=40, zorder=3)
         circle = plt.Circle(orig_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
         ax1.add_patch(circle)
-        ax1.text(orig_coords[i, 0] + 0.1, orig_coords[i, 1] + 0.1, str(pid), fontsize=8)
+        # ax1.text(orig_coords[i, 0] + 0.1, orig_coords[i, 1] + 0.1, str(pid), fontsize=8)
+
+    # ax1.scatter([], [], c='blue', s=50, label='Fixed')
 
     ax1.axis('equal')
     ax1.grid(True, alpha=0.3)
-    ax1.legend()
+    ax1.set_xlabel('X (m)')
+    ax1.set_ylabel('Y (m)')
+    # ax1.legend()
+    sns.despine(ax=ax1)
 
     # --- Plot 2: After ---
     ax2.set_title("After Resolution")
-    ax2.plot(camera_pos[0], camera_pos[1], 'k*', markersize=15, label='Camera')
+    ax2.plot(camera_pos[0], camera_pos[1], 'k*', markersize=15)
+    ax2.text(camera_pos[0], camera_pos[1] - 0.15, 'Viewpoint', ha='center', va='top')
 
     for i, pid in enumerate(all_ids):
         color = 'orange' if pid in moved_set else 'blue'
-        ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, s=50, zorder=3)
+        ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, s=40, zorder=3)
         circle = plt.Circle(final_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
         ax2.add_patch(circle)
         if pid in moved_set:
@@ -818,10 +821,17 @@ def visualize_solution_2d(graph: InterferenceGraph,
             end = final_positions[pid][:2]
             ax2.arrow(start[0], start[1], end[0] - start[0], end[1] - start[1],
                       head_width=0.02, color='black', alpha=0.5, length_includes_head=True, zorder=200)
+    
+    ax2.scatter([], [], c='red', s=50, label='Selected')
+    ax2.scatter([], [], c='orange', s=50, label='Moved')
+    ax2.scatter([], [], c='blue', s=50, label='Fixed')
 
     ax2.axis('equal')
     ax2.grid(True, alpha=0.3)
+    ax2.set_xlabel('X (m)')
+    ax2.set_ylabel('Y (m)')
     ax2.legend()
+    sns.despine(ax=ax2)
 
     plt.tight_layout()
 

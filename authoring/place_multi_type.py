@@ -372,7 +372,7 @@ class SetCoverStrategy(PlacementStrategy):
         return edge_d_candidates
 
     def place(self, graph: TargetGraph, max_lengths: List[float]) -> List[Point3D]:
-        MIN_CHUNK_LEN = 1e-6
+        MIN_CHUNK_LEN = args.min_chunck_len
         DUPLICATE_THRESH = 1e-2
         TOLERANCE = MIN_CHUNK_LEN * 1.5
 
@@ -836,6 +836,7 @@ if __name__ == "__main__":
                         help="Placement policy")
     parser.add_argument("--max_lens", type=float, nargs='+', default=[0.13, 0.16, 0.24],
                         help="List of allowed maximum lengths for rods")
+    parser.add_argument("--min_chunck_len", type=float, default=0.001, help="Minimum length limit for a rod")
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")

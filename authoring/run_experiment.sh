@@ -10,7 +10,7 @@ PLACE_SCRIPT=$1
 shift
 
 # Default Input files
-INPUT_FILES=("drawing.svg")
+INPUT_FILES=("dtla.svg")
 
 # If arguments provided, use them as input files
 if [ "$#" -gt 0 ]; then
@@ -18,7 +18,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/test"
+BASE_RESULTS_DIR="results/skyline"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
@@ -28,8 +28,9 @@ TRANSFORM_MAX_HEIGHT=1.0
 # --- Placement Parameters ---
 MAX_LENGTH=0.16
 MAX_LENGTHS="0.13 0.16 0.24"
-# PLACEMENT_POLICIES=("SC")
-PLACEMENT_POLICIES=("VFG" "SC")
+MIN_CHUNK_LEN=0.001
+PLACEMENT_POLICIES=("VFG")
+# PLACEMENT_POLICIES=("VFG" "SC")
 
 # --- Stagger Parameters ---
 SELECTION_METHODS=("GREEDY_MAX_DEGREE")
@@ -76,6 +77,7 @@ Max Height               : $TRANSFORM_MAX_HEIGHT
 Placement ($PLACE_SCRIPT)
 $MAX_LENGTH_REPORT
 Placement Policies       : ${PLACEMENT_POLICIES[*]}
+SC Min Chunk Length      : $MIN_CHUNK_LEN
 ----------------------------------------
 Stagger
 Selection Methods        : ${SELECTION_METHODS[*]}
@@ -171,6 +173,7 @@ for input_file in "${INPUT_FILES[@]}"; do
             --output "$INITIAL_LAYOUT" \
             --policy "$policy" \
             $PLACE_LENGTH_ARGS \
+            --min_chunck_len $MIN_CHUNK_LEN \
             --no_viz \
             --csv)
 
