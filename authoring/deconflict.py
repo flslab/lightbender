@@ -787,6 +787,17 @@ def visualize_solution_2d(graph: InterferenceGraph,
     final_coords = np.array([final_positions[pid][:2] for pid in all_ids])
     moved_set = set(moved_indices)
 
+    # Distinguish actually-moved from selected-but-not-moved (same logic as graph visualizer)
+    actual_moved = set()
+    selected_not_moved = set()
+    for pid in moved_set:
+        orig = graph.initial_positions[pid]
+        new = final_positions.get(pid, orig)
+        if np.linalg.norm(new - orig) > 1e-6:
+            actual_moved.add(pid)
+        else:
+            selected_not_moved.add(pid)
+
     # --- Plot 1: Before ---
     ax1.set_title(f"Before Resolution ({len(moved_indices)} selected)")
 
@@ -797,13 +808,10 @@ def visualize_solution_2d(graph: InterferenceGraph,
         ax1.add_patch(circle)
         # ax1.text(orig_coords[i, 0] + 0.1, orig_coords[i, 1] + 0.1, str(pid), fontsize=8)
 
-    # ax1.scatter([], [], c='blue', s=50, label='Fixed')
-
     ax1.axis('equal')
     ax1.grid(True, alpha=0.3)
     ax1.set_xlabel('X (m)')
     ax1.set_ylabel('Y (m)')
-    # ax1.legend()
     sns.despine(ax=ax1)
 
     # --- Plot 2: After ---
@@ -812,19 +820,24 @@ def visualize_solution_2d(graph: InterferenceGraph,
     ax2.text(camera_pos[0], camera_pos[1] - 0.15, 'Viewpoint', ha='center', va='top')
 
     for i, pid in enumerate(all_ids):
-        color = 'orange' if pid in moved_set else 'blue'
-        ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, s=40, zorder=3)
+        if pid in actual_moved:
+            color, marker = 'orange', '^'
+        elif pid in selected_not_moved:
+            color, marker = 'red', 'X'
+        else:
+            color, marker = 'blue', 'o'
+        ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, marker=marker, s=60, zorder=3)
         circle = plt.Circle(final_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
         ax2.add_patch(circle)
-        if pid in moved_set:
+        if pid in actual_moved:
             start = graph.initial_positions[pid][:2]
             end = final_positions[pid][:2]
             ax2.arrow(start[0], start[1], end[0] - start[0], end[1] - start[1],
                       head_width=0.02, color='black', alpha=0.5, length_includes_head=True, zorder=200)
-    
-    ax2.scatter([], [], c='red', s=50, label='Selected')
-    ax2.scatter([], [], c='orange', s=50, label='Moved')
-    ax2.scatter([], [], c='blue', s=50, label='Fixed')
+
+    ax2.scatter([], [], c='orange', marker='^', s=60, label='Selected & Moved')
+    ax2.scatter([], [], c='red', marker='X', s=60, label='Selected & NOT Moved')
+    ax2.scatter([], [], c='blue', marker='o', s=60, label='Fixed (Not Selected)')
 
     ax2.axis('equal')
     ax2.grid(True, alpha=0.3)
