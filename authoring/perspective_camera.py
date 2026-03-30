@@ -272,6 +272,21 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     # Use the diagonal from the first file (assuming identical resolution)
     img_diagonal = diag1 if diag1 > 0 else 1.0
 
+    # Compute centroids over all endpoints of common lines and subtract before measuring error
+    cx1 = cy1 = cx2 = cy2 = 0.0
+    n_pts = len(common_ids) * 2  # 2 endpoints per line
+    for lid in common_ids:
+        c1 = set1[lid]['coords']  # x1,y1,x2,y2
+        c2 = set2[lid]['coords']
+        cx1 += c1[0] + c1[2]
+        cy1 += c1[1] + c1[3]
+        cx2 += c2[0] + c2[2]
+        cy2 += c2[1] + c2[3]
+    cx1 /= n_pts
+    cy1 /= n_pts
+    cx2 /= n_pts
+    cy2 /= n_pts
+
     total_pos_diff = 0.0
     total_width_diff = 0.0
     num_lines = 0
@@ -286,9 +301,9 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         c2 = l2_data['coords']
         w2 = l2_data['width']
 
-        # Euclidean distance for endpoints
-        d_start = math.sqrt((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2)
-        d_end = math.sqrt((c1[2] - c2[2]) ** 2 + (c1[3] - c2[3]) ** 2)
+        # Centroid-aligned endpoint distances
+        d_start = math.sqrt((c1[0] - cx1 - (c2[0] - cx2)) ** 2 + (c1[1] - cy1 - (c2[1] - cy2)) ** 2)
+        d_end   = math.sqrt((c1[2] - cx1 - (c2[2] - cx2)) ** 2 + (c1[3] - cy1 - (c2[3] - cy2)) ** 2)
 
         # Absolute difference for width
         d_width = abs(w1 - w2)
