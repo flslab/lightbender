@@ -18,7 +18,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/dtla_ss"
+BASE_RESULTS_DIR="results/skyline_split"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
@@ -37,12 +37,13 @@ SELECTION_METHODS=("GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM"
 #SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
 RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
 #RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
+# TRAJECTORY_TYPES=("POINT_SPECIFIC")
 TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
-#TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
+# MOVE_DIRECTIONS=("HYBRID")
 MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
-#MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
+# DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE")
 DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
-#DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
+ALLOW_SPLIT=true
 
 # Shared Camera Position
 CAM_X=2.3
@@ -50,7 +51,7 @@ CAM_Y=0.0
 CAM_Z=0.0
 
 # Define the comprehensive CSV header
-CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,AddedLbs,NewUtilization,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
 
 if [ "$PLACE_SCRIPT" == "place.py" ]; then
     MAX_LENGTH_REPORT="LB Length                : $MAX_LENGTH"
@@ -85,6 +86,7 @@ Resolution Orders        : ${RESOLUTION_ORDERS[*]}
 Trajectory Types         : ${TRAJECTORY_TYPES[*]}
 Move Directions          : ${MOVE_DIRECTIONS[*]}
 Placement Type           : ${DECONFLICT_PLACEMENT_TYPES[*]}
+Allow Split              : $ALLOW_SPLIT
 ----------------------------------------
 Perspective Camera
 Camera Position X        : $CAM_X
@@ -205,6 +207,12 @@ for input_file in "${INPUT_FILES[@]}"; do
             --output "$REF_SVG" \
             --camera_pos $CAM_X $CAM_Y $CAM_Z
 
+        if [ "$ALLOW_SPLIT" == "true" ]; then
+            SPLIT_ARG="--allow-split"
+        else
+            SPLIT_ARG=""
+        fi
+
         # Iterate Combinations for Deconflict
         for sel in "${SELECTION_METHODS[@]}"; do
             for res in "${RESOLUTION_ORDERS[@]}"; do
@@ -241,12 +249,13 @@ for input_file in "${INPUT_FILES[@]}"; do
                                 --viz_graph_output_file "$out_graph_viz" \
                                 --viz_bar_output_file "$out_bar_viz" \
                                 --save_viz \
+                                $SPLIT_ARG \
                                 --csv | tail -n 1)
 
                             # Validate Solver Output (Requires 7 comma-separated numbers)
                             if [[ "$SOLVER_STATS" != *","* ]]; then
                                 echo "      Error: Solver failed or returned invalid CSV."
-                                SOLVER_STATS="0,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0" # Dummy data
+                                SOLVER_STATS="0,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0" # Dummy data
                             fi
 
                             # ---------------------------------------------------------

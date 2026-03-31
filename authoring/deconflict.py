@@ -50,6 +50,7 @@ class Point3D:
     angle_2: float  # Angle in degrees
     yaw: float  # Yaw in degrees (Rotation about +Z)
     max_length_limit: float
+    split_info: Optional[Dict[str, int]] = None
 
     @property
     def position(self) -> np.ndarray:
@@ -59,6 +60,29 @@ class Point3D:
 def check_downwash(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
     """Checks if two points violate the XY projection (downwash) threshold."""
     return np.linalg.norm(p1[:2] - p2[:2]) < threshold
+
+
+def line_direction_vector(angle_deg: float, yaw_deg: float) -> np.ndarray:
+    """
+    Computes a 3D unit direction vector given a local line angle and a body yaw.
+    Uses the same body-frame convention as `get_line_tip` in visualization.
+    """
+    rad_ang = np.radians(angle_deg)
+    # the local direction
+    dy_local = np.cos(rad_ang)
+    dz_local = -np.sin(rad_ang)
+    
+    rad_yaw = np.radians(yaw_deg)
+    cos_y = np.cos(rad_yaw)
+    sin_y = np.sin(rad_yaw)
+    
+    # rotated into global space
+    dx_rot = -dy_local * sin_y
+    dy_rot = dy_local * cos_y
+    
+    vec = np.array([dx_rot, dy_rot, dz_local])
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm > 0 else np.array([0.0, 1.0, 0.0])
 
 
 def check_overlap(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
@@ -314,7 +338,8 @@ class ResolutionStrategy:
                  camera_pos: np.ndarray,
                  optical_axis: np.ndarray,
                  threshold: float,
-                 layer_config: dict = None):
+                 layer_config: dict = None,
+                 allow_split: bool = False):
         self.order = order
         self.trajectory = trajectory
         self.direction = direction
@@ -323,11 +348,15 @@ class ResolutionStrategy:
         self.optical_axis = optical_axis
         self.threshold = threshold
         self.layer_config = layer_config or {'count': 5, 'spacing': 0.2}
+        self.allow_split = allow_split
 
-    def resolve(self, graph: InterferenceGraph, points_to_move: List[int]) -> Dict[int, np.ndarray]:
+    def resolve(self, graph: InterferenceGraph, points_to_move: List[int]) -> Tuple[Dict[int, np.ndarray], List[Tuple[Point3D, np.ndarray]]]:
         # 1. Determine Processing Order
         ordered_points = self._sort_points(graph, points_to_move)
         logger.info(f"  Resolution Order: {ordered_points}")
+
+        complementary_points: List[Tuple[Point3D, np.ndarray]] = []
+        next_id = max((p for p in graph.points.keys()), default=0) + 1
 
         # 2. Initialize finalized positions with fixed points
         final_positions = {pid: graph.initial_positions[pid]
@@ -369,9 +398,77 @@ class ResolutionStrategy:
 
             # Find Position
             new_pos = self._find_position(pid, point_data, traj_vec, search_directions, final_positions, graph)
+
+            if self.allow_split and np.array_equal(new_pos, original_pos):
+                logger.info(f"    Point {pid} failed to move. Splitting into children.")
+                
+                a = original_pos
+                D1 = line_direction_vector(point_data.angle_1, point_data.yaw)
+                D2 = line_direction_vector(point_data.angle_2, point_data.yaw)
+                L1 = point_data.length_1
+                L2 = point_data.length_2
+                orig_angle_2 = point_data.angle_2
+                orig_yaw = point_data.yaw
+                
+                b = a + D1 * L1
+                c = a + D2 * L2
+                
+                # Child 1 (reuses the parent ID, covers length_1 segment)
+                mid1 = (a + b) / 2.0
+                point_data.length_1 = L1 / 2.0
+                point_data.length_2 = L1 / 2.0
+                point_data.angle_2 = (point_data.angle_1 + 180.0) % 360.0
+                point_data.split_info = {'parent_id': pid, 'segment': 1}
+                
+                graph.initial_positions[pid] = mid1
+                
+                if self.trajectory == TrajectoryType.POINT_SPECIFIC:
+                    vec1 = mid1 - self.camera_pos
+                    norm1 = np.linalg.norm(vec1)
+                    traj_vec_1 = vec1 / norm1 if norm1 > 0 else np.array([0, 0, 1])
+                else:
+                    traj_vec_1 = global_vec
+                    
+                new_pos_1 = self._find_position(pid, point_data, traj_vec_1, search_directions, final_positions, graph)
+                final_positions[pid] = new_pos_1
+                
+                # Child 2 (newly added LB, covers length_2 segment, only if L2 > 0)
+                if L2 > 0:
+                    mid2 = (a + c) / 2.0
+                    child2_id = next_id
+                    next_id += 1
+                    
+                    child2 = Point3D(
+                        id=child2_id,
+                        x=float(mid2[0]), y=float(mid2[1]), z=float(mid2[2]),
+                        length_1=L2 / 2.0, length_2=L2 / 2.0,
+                        angle_1=orig_angle_2,
+                        angle_2=(orig_angle_2 + 180.0) % 360.0,
+                        yaw=orig_yaw,
+                        max_length_limit=point_data.max_length_limit,
+                        split_info={'parent_id': pid, 'segment': 2}
+                    )
+                    graph.points[child2_id] = child2
+                    graph.initial_positions[child2_id] = mid2
+                    graph.node_overlaps[child2_id] = 0
+                    graph.node_downwashes[child2_id] = 0
+                    
+                    if self.trajectory == TrajectoryType.POINT_SPECIFIC:
+                        vec2 = mid2 - self.camera_pos
+                        norm2 = np.linalg.norm(vec2)
+                        traj_vec_2 = vec2 / norm2 if norm2 > 0 else np.array([0, 0, 1])
+                    else:
+                        traj_vec_2 = global_vec
+                        
+                    new_pos_2 = self._find_position(child2_id, child2, traj_vec_2, search_directions, final_positions, graph)
+                    complementary_points.append((child2, new_pos_2))
+                    final_positions[child2_id] = new_pos_2
+                
+                continue
+
             final_positions[pid] = new_pos
 
-        return final_positions
+        return final_positions, complementary_points
 
     def _sort_points(self, graph, points):
         if self.order == ResolutionOrder.SAME_AS_PHASE_2:
@@ -491,7 +588,8 @@ class ModularInterferenceSolver:
               trajectory_type: TrajectoryType,
               move_direction: MoveDirection,
               placement_type: PlacementType,
-              layer_config: dict = None) -> Tuple[List[int], Dict[int, np.ndarray]]:
+              layer_config: dict = None,
+              allow_split: bool = False) -> Tuple[List[int], Dict[int, np.ndarray], List[Tuple[Point3D, np.ndarray]]]:
 
         # Phase 2: Selection
         logger.info(f"\n--- Phase 2: Selection ({selection_method.name}) ---")
@@ -509,12 +607,13 @@ class ModularInterferenceSolver:
             camera_pos=self.camera_pos,
             optical_axis=self.optical_axis,
             threshold=self.graph.threshold,
-            layer_config=layer_config
+            layer_config=layer_config,
+            allow_split=allow_split
         )
 
-        final_positions = resolver.resolve(self.graph, points_to_move)
+        final_positions, extra_points = resolver.resolve(self.graph, points_to_move)
 
-        return points_to_move, final_positions
+        return points_to_move, final_positions, extra_points
 
     def _get_selector(self, method: SelectionMethod) -> SelectionStrategy:
         if method == SelectionMethod.BRUTE_FORCE:
@@ -555,7 +654,8 @@ def load_points_from_yaml(filepath: str) -> List[Point3D]:
             angle_1=p_data.get('angle_1', 0.0),
             angle_2=p_data.get('angle_2', 0.0),
             yaw=p_data.get('yaw', 0.0),  # Default Yaw is 0.0
-            max_length_limit=p_data.get('max_length_limit', 10.0)
+            max_length_limit=p_data.get('max_length_limit', 10.0),
+            split_info=p_data.get('split_info', None)
         ))
     logger.info(f"Loaded {len(points)} points from {filepath}")
     return points
@@ -590,6 +690,8 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
             'max_length_limit': p.max_length_limit,
             'scale_factor': float(scale_factor)
         }
+        if p.split_info is not None:
+            p_dict['split_info'] = p.split_info
         output_data.append(p_dict)
 
     try:
@@ -1030,6 +1132,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_viz", action='store_true', help="Disable visualization")
     parser.add_argument("--save_viz", action='store_true', help="Save visualization as files")
     parser.add_argument("--abstract_graph", action='store_true', help="Use abstract 2D layout for graph visualization")
+    parser.add_argument("--allow-split", action='store_true', help="Allow splitting a drone into children when perspective is blocked")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
 
     args = parser.parse_args()
@@ -1083,13 +1186,20 @@ if __name__ == "__main__":
 
     # 5. Run with Configuration
     logger.info(f"--- Configuration: {sel_method.name} + {traj_type.name} + {move_dir.name} + {place_type.name} ---")
-    moved, positions = solver.solve(
+    moved, positions, extra_points = solver.solve(
         selection_method=sel_method,
         resolution_order=res_order,
         trajectory_type=traj_type,
         move_direction=move_dir,
-        placement_type=place_type
+        placement_type=place_type,
+        allow_split=args.allow_split
     )
+
+    num_split = len(extra_points)
+    
+    for pt, new_pos in extra_points:
+        points_data.append(pt)
+        positions[pt.id] = new_pos
 
     # 6. Validation Output & Metrics
     logger.info(f"Graph stats: {len(graph.nodes)} nodes, threshold {graph.threshold}")
@@ -1162,10 +1272,16 @@ if __name__ == "__main__":
         min_dist = 0.0
         max_dist = 0.0
 
+
+    total_lbs = len(final_points_data)
+    total_length = sum(p.length_1 + p.length_2 for p in final_points_data)
+    max_capacity = sum(p.max_length_limit * 2 for p in final_points_data)
+    utilization = (total_length / max_capacity * 100) if max_capacity > 0 else 0
+
     if args.csv:
         # CSV format: Downwashes,Overlaps,UnresolvedDownwashes,UnresolvedOverlaps,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
         print(
-            f"{num_downwashes},{num_overlaps},{unresolved_downwashes},{unresolved_overlaps},{init_min_dw},{init_max_dw},{init_min_col},{init_max_col},{init_min_total},{init_max_total},{final_min_dw},{final_max_dw},{final_min_col},{final_max_col},{final_min_total},{final_max_total},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f}")
+            f"{num_downwashes},{num_overlaps},{unresolved_downwashes},{unresolved_overlaps},{init_min_dw},{init_max_dw},{init_min_col},{init_max_col},{init_min_total},{init_max_total},{final_min_dw},{final_max_dw},{final_min_col},{final_max_col},{final_min_total},{final_max_total},{num_selected},{num_moved},{avg_dist:.4f},{min_dist:.4f},{max_dist:.4f},{num_split},{utilization:.1f}%")
     else:
         print("=" * 40)
         print("METRICS SUMMARY")
@@ -1177,9 +1293,12 @@ if __name__ == "__main__":
         print(f"Unresolved Total:              (per-node min/max: {final_min_total}/{final_max_total})")
         print(f"LightBenders Selected to Move: {num_selected}")
         print(f"LightBenders Actually Moved:   {num_moved}")
+        print(f"Complementary Points Added:    {num_split}")
         print(f"Travel Distance - Avg:         {avg_dist:.4f}")
         print(f"Travel Distance - Min:         {min_dist:.4f}")
         print(f"Travel Distance - Max:         {max_dist:.4f}")
+        
+        print(f"Final Utilization:             {utilization:.1f}%")
         print("=" * 40)
 
     # 7. Save Results
