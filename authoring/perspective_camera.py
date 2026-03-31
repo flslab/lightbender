@@ -302,6 +302,7 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     total_pos_diff = 0.0
     total_width_diff = 0.0
     num_lines = 0
+    total_length = 0
 
     for lid in common_ids:
         l1_data = set1[lid]
@@ -312,6 +313,8 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
 
         c2 = l2_data['coords']
         w2 = l2_data['width']
+
+        line_len = math.sqrt((c1[0] - c1[2]) ** 2 + (c1[1] - c1[3]) ** 2)
 
         # Centroid-aligned endpoint distances
         # Option A: align (x1, y1) with (x1, y1)
@@ -327,9 +330,10 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         total_pos_diff += min(dist1, dist2)
 
         # Absolute difference for width
-        d_width = abs(w1 - w2)
+        d_width = abs(w1 - w2) * line_len
         total_width_diff += d_width
         num_lines += 1
+        total_length += line_len
 
     # Metrics
     # Average pixel error per feature
@@ -337,10 +341,11 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     avg_pos_diff = total_pos_diff / (num_lines * 2) if num_lines > 0 else 0.0
 
     # Average width difference per line
-    avg_width_diff = total_width_diff / num_lines if num_lines > 0 else 0.0
+    avg_width_diff = total_width_diff / total_length if total_length > 0 else 0.0
 
     # Combined error (avg per feature: 2 endpoints + 1 width = 3)
-    overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines * 3) if num_lines > 0 else 0.0
+    overall_avg_pixel_error = (total_pos_diff + total_width_diff)
+    # overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines * 3) if num_lines > 0 else 0.0
 
     # Normalize error relative to image diagonal
     normalized_error = overall_avg_pixel_error / img_diagonal
