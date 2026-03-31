@@ -347,7 +347,7 @@ class ResolutionStrategy:
         self.camera_pos = camera_pos
         self.optical_axis = optical_axis
         self.threshold = threshold
-        self.layer_config = layer_config or {'count': 5, 'spacing': 0.2}
+        self.layer_config = layer_config or {'count': 400, 'spacing': 0.2}
         self.allow_split = allow_split
 
     def resolve(self, graph: InterferenceGraph, points_to_move: List[int]) -> Tuple[Dict[int, np.ndarray], List[Tuple[Point3D, np.ndarray]]]:
@@ -399,7 +399,7 @@ class ResolutionStrategy:
             # Find Position
             new_pos = self._find_position(pid, point_data, traj_vec, search_directions, final_positions, graph)
 
-            if self.allow_split and np.array_equal(new_pos, original_pos):
+            if self.allow_split and self.direction == MoveDirection.AWAY_FROM_CAMERA and np.array_equal(new_pos, original_pos):
                 logger.info(f"    Point {pid} failed to move. Splitting into children.")
                 
                 a = original_pos
@@ -521,6 +521,11 @@ class ResolutionStrategy:
                     current_shift = current_dist * sign
                     candidate_pos = original_pos + (traj_vec * current_shift)
 
+                    # Prevent point from moving past the camera
+                    if sign < 0:
+                        if np.dot(candidate_pos - self.camera_pos, self.optical_axis) <= 0.1:
+                            continue
+
                     # 1. Check Perspective Limit
                     if not self._check_perspective_constraint(point_data, original_pos, candidate_pos):
                         # If moving away violates perspective, stop checking this direction entirely
@@ -548,6 +553,11 @@ class ResolutionStrategy:
                 for sign in search_directions:
                     shift = dist_abs * sign
                     candidate_pos = original_pos + (traj_vec * shift)
+
+                    # Prevent point from moving past the camera
+                    if sign < 0:
+                        if np.dot(candidate_pos - self.camera_pos, self.optical_axis) <= 0.1:
+                            continue
 
                     logger.debug(f"      Testing Layer {d} (Shift: {shift:.2f})")
 
