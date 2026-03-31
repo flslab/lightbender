@@ -185,6 +185,10 @@ def render_scene(yaml_input, svg_output, camera_pos):
         if proj_origin is None:
             continue
 
+        split_info = p.get('split_info')
+        l1_id = f"p{pid}_l1" if not split_info else None
+        l2_id = f"p{pid}_l2" if not split_info else None
+
         # Line 1
         tip1_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_1'], p['angle_1'], yaw)
         proj_tip1 = cam.project_point(tip1_3d)
@@ -192,7 +196,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
         if proj_tip1:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip1[0], proj_tip1[1],
                          color="green", stroke_width=current_stroke, opacity=0.8,
-                         element_id=f"p{pid}_l1")
+                         element_id=l1_id)
 
         # Line 2
         tip2_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_2'], p['angle_2'], yaw)
@@ -201,7 +205,15 @@ def render_scene(yaml_input, svg_output, camera_pos):
         if proj_tip2:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip2[0], proj_tip2[1],
                          color="magenta", stroke_width=current_stroke, opacity=0.8,
-                         element_id=f"p{pid}_l2")
+                         element_id=l2_id)
+
+        if split_info and proj_tip1 and proj_tip2:
+            parent_id = split_info.get('parent_id', pid)
+            segment_idx = split_info.get('segment', 1)
+            color = "green" if segment_idx == 1 else "magenta"
+            svg.add_line(proj_tip1[0], proj_tip1[1], proj_tip2[0], proj_tip2[1],
+                         color=color, stroke_width=current_stroke, opacity=0.8,
+                         element_id=f"p{parent_id}_l{segment_idx}")
 
         svg.add_circle(proj_origin[0], proj_origin[1], 5, color="orange")
         svg.add_text(proj_origin[0] + 8, proj_origin[1] + 4, str(pid), color="#555")
@@ -302,13 +314,20 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         w2 = l2_data['width']
 
         # Centroid-aligned endpoint distances
-        d_start = math.sqrt((c1[0] - cx1 - (c2[0] - cx2)) ** 2 + (c1[1] - cy1 - (c2[1] - cy2)) ** 2)
-        d_end   = math.sqrt((c1[2] - cx1 - (c2[2] - cx2)) ** 2 + (c1[3] - cy1 - (c2[3] - cy2)) ** 2)
+        # Option A: align (x1, y1) with (x1, y1)
+        d1_start = math.sqrt((c1[0] - cx1 - (c2[0] - cx2)) ** 2 + (c1[1] - cy1 - (c2[1] - cy2)) ** 2)
+        d1_end   = math.sqrt((c1[2] - cx1 - (c2[2] - cx2)) ** 2 + (c1[3] - cy1 - (c2[3] - cy2)) ** 2)
+        dist1 = d1_start + d1_end
+        
+        # Option B: align (x1, y1) with (x2, y2)
+        d2_start = math.sqrt((c1[0] - cx1 - (c2[2] - cx2)) ** 2 + (c1[1] - cy1 - (c2[3] - cy2)) ** 2)
+        d2_end   = math.sqrt((c1[2] - cx1 - (c2[0] - cx2)) ** 2 + (c1[3] - cy1 - (c2[1] - cy2)) ** 2)
+        dist2 = d2_start + d2_end
+
+        total_pos_diff += min(dist1, dist2)
 
         # Absolute difference for width
         d_width = abs(w1 - w2)
-
-        total_pos_diff += (d_start + d_end)
         total_width_diff += d_width
         num_lines += 1
 
