@@ -111,10 +111,11 @@ def set_axes_equal(ax, points):
 # ==========================================
 
 class DroneProcessor:
-    def __init__(self, drone_id, yaml_config, json_path, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
+    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
         self.drone_id = drone_id
         self.yaml_config = yaml_config
         self.json_path = json_path
+        self.act_yaml_config = act_yaml_config
         self.use_kinematics = use_kinematics
         self.max_v = max_v
         self.max_a = max_a
@@ -124,7 +125,10 @@ class DroneProcessor:
 
         # Load Interpolators
         self._load_gt()
-        self._load_act()
+        if self.act_yaml_config:
+            self._load_act_from_yaml()
+        else:
+            self._load_act()
 
     def _load_gt(self):
         waypoints = self.yaml_config['waypoints']
@@ -237,6 +241,43 @@ class DroneProcessor:
             
         return interp1d(sim_times, pos, axis=0, kind='linear', fill_value='extrapolate')
 
+    def _load_act_from_yaml(self):
+        waypoints = self.act_yaml_config['waypoints']
+        if not len(waypoints):
+            waypoints.append(self.act_yaml_config['target'])
+            waypoints.append(self.act_yaml_config['target'])
+        waypoints = np.array(waypoints, dtype=float)  # [x, y, z, yaw, dt]
+        if 'position_offset' in self.act_yaml_config:
+            offset = np.array(self.act_yaml_config['position_offset'])
+            waypoints[:, 0:3] += offset
+        servos = np.array(self.act_yaml_config['servos'])  # [rod1, rod2]
+
+        times = [0.0]
+        for i in range(1, len(waypoints)):
+            dt = waypoints[i, 4] if len(waypoints[i]) == 5 else self.act_yaml_config['delta_t']
+            times.append(times[-1] + dt)
+
+        self.act_times = np.array(times)
+        
+        self.act_pos_fn = interp1d(self.act_times, waypoints[:, 0:3], axis=0, kind='linear', fill_value="extrapolate")
+        
+        if self.use_kinematics:
+            self.act_pos_fn = self._apply_kinematics_filter(self.act_times, self.act_pos_fn, self.max_v, self.max_a, self.max_j, self.max_s)
+
+        unwrapped_yaw = np.unwrap(np.radians(waypoints[:, 3]))
+        self.act_yaw_fn = interp1d(self.act_times, unwrapped_yaw, kind='linear', fill_value="extrapolate")
+        
+        self.act_r_fn = lambda t: 0.0
+        self.act_p_fn = lambda t: 0.0
+        self.act_y_fn = lambda t: self.act_yaw_fn(t)
+
+        self.act_servo_fn = interp1d(self.act_times, servos, axis=0, kind='linear', fill_value="extrapolate")
+        
+        # We need start_time and stop_time for the loop bounds
+        self.start_time = 0.0
+        self.stop_time = self.act_times[-1]
+        self.act_max_rel_time = self.act_times[-1]
+
     def _load_act(self):
         with open(self.json_path, 'r') as f:
             data = json.load(f)
@@ -292,38 +333,73 @@ class DroneProcessor:
         # print(g_rpy)
 
         # --- Actual State ---
-        a_pos = self.act_pos_fn(t_rel)
-        if np.any(np.isnan(a_pos)): return None, None, False
-
-        if self.ignore_rpy:
-            a_rpy = [0.0, 0.0, 0.0]
+        if self.act_yaml_config:
+            a_pos = self.act_pos_fn(t_rel)
+            if self.ignore_rpy:
+                a_rpy = [0.0, 0.0, 0.0]
+            else:
+                a_rpy = [0.0, 0.0, float(self.act_yaw_fn(t_rel))]
+            a_servos = self.act_servo_fn(t_rel)
+            
+            leds_local_act = get_led_local_positions(a_servos[0], a_servos[1])
+            leds_act_world = transform_points(leds_local_act, a_pos, a_rpy)
+            
+            leds_local_gt = get_led_local_positions(g_servos[0], g_servos[1])
+            leds_gt_world = transform_points(leds_local_gt, g_pos, g_rpy)
+            
+            return leds_gt_world, leds_act_world, g_pos, a_pos, True
         else:
-            a_rpy = [self.act_r_fn(t_rel), self.act_p_fn(t_rel), self.act_y_fn(t_rel)]
+            a_pos = self.act_pos_fn(t_rel)
+            if np.any(np.isnan(a_pos)): return None, None, None, None, False
 
-        # --- LED Computation ---
-        # Note: Actual uses GT servo angles as per prompt requirements
-        leds_local = get_led_local_positions(g_servos[0], g_servos[1])
+            if self.ignore_rpy:
+                a_rpy = [0.0, 0.0, 0.0]
+            else:
+                a_rpy = [self.act_r_fn(t_rel), self.act_p_fn(t_rel), self.act_y_fn(t_rel)]
 
-        leds_gt_world = transform_points(leds_local, g_pos, g_rpy)
-        leds_act_world = transform_points(leds_local, a_pos, a_rpy)
+            # --- LED Computation ---
+            # Note: Actual uses GT servo angles as per prompt requirements
+            leds_local = get_led_local_positions(g_servos[0], g_servos[1])
 
-        return leds_gt_world, leds_act_world, g_pos, a_pos, True
+            leds_gt_world = transform_points(leds_local, g_pos, g_rpy)
+            leds_act_world = transform_points(leds_local, a_pos, a_rpy)
+
+            return leds_gt_world, leds_act_world, g_pos, a_pos, True
 
 
 # ==========================================
 # 3. MAIN ANALYSIS LOGIC
 # ==========================================
 
-def calculate_rmse(yaml_file, tag, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
+def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
     print(f"Loading Configuration from {yaml_file}...")
     with open(yaml_file, 'r') as f:
         yaml_data = yaml.safe_load(f)
 
     drones_config = yaml_data.get('drones', {})
     processors = []
+    
+    if compare_yaml:
+        print(f"Loading Comparison Configuration from {compare_yaml}...")
+        with open(compare_yaml, 'r') as f:
+            compare_yaml_data = yaml.safe_load(f)
+        compare_drones = compare_yaml_data.get('drones', {})
+        tag = compare_yaml.split("/")[-1].split(".")[0] # Override output tag
 
     # 1. Initialize Processors (Find logs and parse)
     for drone_id, config in drones_config.items():
+        if compare_yaml:
+            act_config = compare_drones.get(drone_id)
+            if not act_config:
+                print(f"WARNING: Drone '{drone_id}' not found in {compare_yaml}. Skipping.")
+                continue
+            try:
+                p = DroneProcessor(drone_id, config, json_path=None, act_yaml_config=act_config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy)
+                processors.append(p)
+            except Exception as e:
+                print(f"Error loading data for {drone_id}: {e}")
+            continue
+
         # Search for log file starting with drone_id
         search_pattern = f"/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/logs/{drone_id}_{tag}*.json"
         files = glob.glob(search_pattern)
@@ -624,6 +700,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RMSE Analysis Toolkit")
     parser.add_argument('--yaml', type=str, default='/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/reversing_arrow_blender.yaml', help='Path to mission yaml')
     parser.add_argument('--tag', type=str, default='reversing_arrow_std_2026-03-19_11-18-28', help='Log file tag')
+    parser.add_argument('--compare_yaml', type=str, default=None, help='Compare two yaml files directly without JSON logs')
     parser.add_argument('--kinematics', action='store_true', help='Enable kinematic modeling of ground truth')
     parser.add_argument('--max_v', type=float, default=1.0, help='Maximum velocity (m/s)')
     parser.add_argument('--max_a', type=float, default=0.25, help='Maximum acceleration (m/s^2)')
@@ -633,4 +710,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    calculate_rmse(args.yaml, args.tag, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy)
+    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy)
