@@ -32,6 +32,9 @@ sns.set_theme(style="whitegrid", palette="deep")
 
 logger = logging.getLogger(__name__)
 
+# When True, 3D plots are rendered without axes, labels, pane colors, or grids.
+CLEAN_3D_PLOTS = True
+
 
 # --- Data Structures ---
 
@@ -722,6 +725,13 @@ def visualize_interference_graph(graph: InterferenceGraph,
         ax.set_zlabel("Z")
         ax.set_aspect('equal')
         ax.view_init(elev=0, azim=0)
+        if CLEAN_3D_PLOTS:
+            ax.set_axis_off()
+            ax.set_facecolor('white')
+            for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+                pane.fill = False
+                pane.set_edgecolor('none')
+            ax.grid(False)
 
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
@@ -971,6 +981,13 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     ax.set_title("3D LightBender Structure (Dotted=Max Limit, Solid=Scaled Length)")
     ax.set_aspect('equal')
     # ax.view_init(elev=0, azim=0)
+    if CLEAN_3D_PLOTS:
+        ax.set_axis_off()
+        ax.set_facecolor('white')
+        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+            pane.fill = False
+            pane.set_edgecolor('none')
+        ax.grid(False)
 
     if args.save_viz:
         plt.savefig(args.viz_3d_output_file, dpi=300)
