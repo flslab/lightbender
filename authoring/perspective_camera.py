@@ -330,7 +330,7 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
         total_pos_diff += min(dist1, dist2)
 
         # Absolute difference for width
-        d_width = abs(w1 - w2) * line_len
+        d_width = abs(w1 - w2)
         total_width_diff += d_width
         num_lines += 1
         total_length += line_len
@@ -341,11 +341,11 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     avg_pos_diff = total_pos_diff / (num_lines * 2) if num_lines > 0 else 0.0
 
     # Average width difference per line
-    avg_width_diff = total_width_diff / total_length if total_length > 0 else 0.0
+    avg_width_diff = total_width_diff / num_lines if num_lines > 0 else 0.0
 
     # Combined error (avg per feature: 2 endpoints + 1 width = 3)
-    overall_avg_pixel_error = (avg_pos_diff + avg_width_diff)
-    # overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines * 3) if num_lines > 0 else 0.0
+    # overall_avg_pixel_error = (avg_pos_diff + avg_width_diff)
+    overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines) if num_lines > 0 else 0.0
 
     # Normalize error relative to image diagonal
     normalized_error = overall_avg_pixel_error / img_diagonal
