@@ -33,7 +33,6 @@ class Drone:
     iterations: int
     params: DroneParams
     servos: List[List[float]]
-    pointers: List[List[float]]
     led: LEDConfig
 
 
@@ -88,7 +87,6 @@ class Replacement:
                 iterations=drone_data["iterations"],
                 params=DroneParams(**drone_data["params"]),
                 servos=drone_data["servos"],
-                pointers=drone_data["pointers"],
                 led=LEDConfig(**drone_data["led"]),
             )
             drones[name] = drone
