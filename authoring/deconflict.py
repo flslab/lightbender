@@ -969,7 +969,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     ax2.set_xlabel('X (m)')
     ax2.set_ylabel('Y (m)')
 
-    ax1.set_ylim(-1.25, 1.25)
+    # ax1.set_ylim(-1.25, 1.25)
 
     ax2.legend()
     sns.despine(ax=ax2)
