@@ -344,8 +344,8 @@ def compare_svgs(svg_file_1, svg_file_2, csv_mode=False):
     avg_width_diff = total_width_diff / num_lines if num_lines > 0 else 0.0
 
     # Combined error (avg per feature: 2 endpoints + 1 width = 3)
-    # overall_avg_pixel_error = (avg_pos_diff + avg_width_diff)
-    overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines) if num_lines > 0 else 0.0
+    overall_avg_pixel_error = (total_pos_diff + total_width_diff)
+    # overall_avg_pixel_error = (total_pos_diff + total_width_diff) / (num_lines) if num_lines > 0 else 0.0
 
     # Normalize error relative to image diagonal
     normalized_error = overall_avg_pixel_error / img_diagonal

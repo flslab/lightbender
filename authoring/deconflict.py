@@ -776,7 +776,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
             elif pid in selected_not_moved:
                 ax.scatter(p[0], p[1], c='red', marker='X', s=100, label='Selected & NOT Moved', zorder=5)
             else:
-                ax.scatter(p[0], p[1], c='blue', marker='o', s=50, label='Fixed (Not Selected)', zorder=5)
+                ax.scatter(p[0], p[1], c='blue', marker='o', s=50, label='Not Selected', zorder=5)
             ax.text(p[0], p[1] + 0.05, f" {pid}", fontsize=9, zorder=10)
 
         # Draw edges in 2D
@@ -809,7 +809,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
             elif pid in selected_not_moved:
                 ax.scatter(pos[0], pos[1], pos[2], c='red', marker='X', s=100, label='Selected & NOT Moved')
             else:
-                ax.scatter(pos[0], pos[1], pos[2], c='blue', marker='o', s=50, label='Fixed (Not Selected)')
+                ax.scatter(pos[0], pos[1], pos[2], c='blue', marker='o', s=50, label='Not Selected')
             ax.text(pos[0], pos[1], pos[2] + 0.01, f" {pid}", fontsize=9)
 
         # Draw edges
@@ -899,7 +899,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     Visualizes the before and after states of the points in the XY plane.
     """
     try:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={'width_ratios': [1, 3]})
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4), gridspec_kw={'width_ratios': [1, 7]})
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
         return
@@ -958,14 +958,19 @@ def visualize_solution_2d(graph: InterferenceGraph,
             ax2.arrow(start[0], start[1], end[0] - start[0], end[1] - start[1],
                       head_width=0.02, color='black', alpha=0.5, length_includes_head=True, zorder=200)
 
-    ax2.scatter([], [], c='orange', marker='^', s=60, label='Selected & Moved')
-    ax2.scatter([], [], c='red', marker='X', s=60, label='Selected & NOT Moved')
-    ax2.scatter([], [], c='blue', marker='o', s=60, label='Fixed (Not Selected)')
+    ax2.scatter([], [], c='orange', marker='^', s=60, label='Adjusted Position')
+    if len(selected_not_moved):
+        ax2.scatter([], [], c='red', marker='X', s=60, label='Selected & NOT Moved')
+    ax2.scatter([], [], c='red', marker='o', s=60, label='Selected')
+    ax2.scatter([], [], c='blue', marker='o', s=60, label='Not Selected')
 
     ax2.axis('equal')
     ax2.grid(True, alpha=0.3)
     ax2.set_xlabel('X (m)')
     ax2.set_ylabel('Y (m)')
+
+    ax1.set_ylim(-1.25, 1.25)
+
     ax2.legend()
     sns.despine(ax=ax2)
 
