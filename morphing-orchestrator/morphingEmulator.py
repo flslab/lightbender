@@ -92,24 +92,26 @@ class Replacement:
             )
             drones[name] = drone
 
-        return Scene(drones=drones, cameraLocation=[2.35, 0.0, 0.88])
+        return Scene(drones=drones, cameraLocation=[2.2769, -0.0756, 0.9199])
 
     def morphing_technique_1_replacement_pose(self, empty_fls):
         coordinate_E = empty_fls.waypoints[0]
 
-        replacement_x = coordinate_E[0] - 0.25
+        replacement_x = coordinate_E[0] - 0.3
         replacement_y = coordinate_E[1]
         replacement_z = coordinate_E[2]
 
         return [replacement_x, replacement_y, replacement_z, 0.0, 3.0]
     
     def morphing_technique_2_replacement_pose(self, empty_fls):
+
+        ### Find the replacement waypoint's position (x,y,z)
         coordinate_E = empty_fls.waypoints[0]
 
         # Compute y coordinate
         adjacent = math.fabs(coordinate_E[0] - self.input_scene.cameraLocation[0])
         alpha = math.atan(1.56/adjacent)
-        beta = 0.25
+        beta = 0.5
         epsilon = math.atan(alpha)*beta
 
         replacement_x = coordinate_E[0] - beta
@@ -117,7 +119,6 @@ class Replacement:
         replacement_z = coordinate_E[2]
 
         return [replacement_x, replacement_y, replacement_z, coordinate_E[3], 3.0]
-
 
     def replace_pose_data_full_fls(self):
         replacement_drone_waypoints = []
@@ -180,8 +181,40 @@ class Replacement:
         self.input_scene.drones["lb2"].waypoints += original_lb3_waypoints
         self.input_scene.drones["lb3"].waypoints += original_lb2_waypoints
 
+        self.input_scene.drones["lb2"].target = self.input_scene.drones["lb2"].waypoints[0]
+
+        # put a safe value of 5 seconds for time duration of each waypoint
+        for drone in self.input_scene.drones.values():
+            for waypoint in drone.waypoints:
+                if len(waypoint) > 0:
+                    waypoint[-1] = 2.0
+
+
+    def generate_lighting(self):
+        # Use the empty FLS first waypoint to define the same reference geometry
+        empty_fls = self.input_scene.drones["lb3"]
+        empty_fls_x = empty_fls.waypoints[0][0]
+        empty_fls_y = empty_fls.waypoints[0][1]
+        
+        # Used for formula replacement of the LED lighting
+        right_boundary_slope = (self.input_scene.cameraLocation[1] - (empty_fls_y + 0.156))/(self.input_scene.cameraLocation[0] - empty_fls_x)
+        right_boundary_intercept = self.input_scene.cameraLocation[1] - right_boundary_slope*self.input_scene.cameraLocation[0]
+        left_boundary_slope = (self.input_scene.cameraLocation[1] - (empty_fls_y - 0.156))/(self.input_scene.cameraLocation[0] - empty_fls_x)
+        left_boundary_intercept = self.input_scene.cameraLocation[1] - left_boundary_slope*self.input_scene.cameraLocation[0]
+
+        visible_formula = (
+            f"[255, 0, 0] if ({left_boundary_slope} * (x + 0.0797) + {left_boundary_intercept}) < (y - 0.156 + 0.00624*i) < ({right_boundary_slope} * (x + 0.0797) + {right_boundary_intercept}) else [0, 0, 0]"
+        )
+
+        # Apply the same lighting rule to both drones.
+        for name, drone in self.input_scene.drones.items():
+            drone.led.mode = "expression"
+            drone.led.rate = 50.0
+            drone.led.formula = visible_formula
+
     def generate_output_scene(self):
         self.replace_waypoints()
+        self.generate_lighting()
 
         output_yaml = {
             "name": "Scene",
@@ -199,7 +232,6 @@ class Replacement:
                     "relative": drone.params.relative
                 },
                 "servos": drone.servos,
-                "pointers": drone.pointers,
                 "led": {
                     "mode": drone.led.mode,
                     "rate": drone.led.rate,
