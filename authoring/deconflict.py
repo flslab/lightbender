@@ -91,14 +91,15 @@ def check_overlap(p1: np.ndarray, p2: np.ndarray, threshold: float) -> bool:
 
 
 class InterferenceGraph:
-    def __init__(self, points: List[Point3D], threshold: float):
+    def __init__(self, points: List[Point3D], threshold_downwash: float, threshold_overlap: float):
         """
         Constructs the interference graph based on XY plane distance.
         :param points: List of Point3D objects
         :param threshold: Distance threshold for interference
         """
         self.points = {p.id: p for p in points}
-        self.threshold = threshold
+        self.threshold_downwash = threshold_downwash
+        self.threshold_overlap = threshold_overlap
         self.initial_positions = {p.id: p.position for p in points}
         self.total_overlap = 0
         self.total_downwash = 0
@@ -122,8 +123,8 @@ class InterferenceGraph:
                 p1_3d = self.points[id_i].position
                 p2_3d = self.points[id_j].position
 
-                is_col = check_overlap(p1_3d, p2_3d, self.threshold)
-                is_dw = check_downwash(p1_3d, p2_3d, self.threshold)
+                is_col = check_overlap(p1_3d, p2_3d, self.threshold_overlap)
+                is_dw = check_downwash(p1_3d, p2_3d, self.threshold_downwash)
 
                 if is_col:
                     adj[id_i].add(id_j)
@@ -337,7 +338,8 @@ class ResolutionStrategy:
                  placement: PlacementType,
                  camera_pos: np.ndarray,
                  optical_axis: np.ndarray,
-                 threshold: float,
+                 threshold_overlap: float,
+                 threshold_downwash: float,
                  layer_config: dict = None,
                  allow_split: bool = False):
         self.order = order
@@ -346,7 +348,8 @@ class ResolutionStrategy:
         self.placement = placement
         self.camera_pos = camera_pos
         self.optical_axis = optical_axis
-        self.threshold = threshold
+        self.threshold_overlap = threshold_overlap
+        self.threshold_downwash = threshold_downwash
         self.layer_config = layer_config or {'count': 400, 'spacing': 0.2}
         self.allow_split = allow_split
 
@@ -574,8 +577,8 @@ class ResolutionStrategy:
     def _is_valid(self, candidate_pos, placed_positions, graph, current_id=None):
         """Checks if candidate_pos interferes with any placed points in XY plane."""
         for neighbor_id, neighbor_pos in placed_positions.items():
-            if check_overlap(candidate_pos, neighbor_pos, self.threshold) or \
-                    check_downwash(candidate_pos, neighbor_pos, self.threshold):
+            if check_overlap(candidate_pos, neighbor_pos, self.threshold_overlap) or \
+                    check_downwash(candidate_pos, neighbor_pos, self.threshold_downwash):
                 return False
         return True
 
@@ -616,7 +619,8 @@ class ModularInterferenceSolver:
             placement=placement_type,
             camera_pos=self.camera_pos,
             optical_axis=self.optical_axis,
-            threshold=self.graph.threshold,
+            threshold_overlap=self.graph.threshold_overlap,
+            threshold_downwash=self.graph.threshold_downwash,
             layer_config=layer_config,
             allow_split=allow_split
         )
@@ -927,7 +931,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     for i, pid in enumerate(all_ids):
         color = 'red' if pid in moved_set else 'blue'
         ax1.scatter(orig_coords[i, 0], orig_coords[i, 1], c=color, s=40, zorder=3)
-        circle = plt.Circle(orig_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
+        circle = plt.Circle(orig_coords[i], graph.threshold_overlap / 2, color=color, fill=False, alpha=0.2)
         ax1.add_patch(circle)
         # ax1.text(orig_coords[i, 0] + 0.1, orig_coords[i, 1] + 0.1, str(pid), fontsize=8)
 
@@ -950,7 +954,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
         else:
             color, marker = 'blue', 'o'
         ax2.scatter(final_coords[i, 0], final_coords[i, 1], c=color, marker=marker, s=60, zorder=3)
-        circle = plt.Circle(final_coords[i], graph.threshold / 2, color=color, fill=False, alpha=0.2)
+        circle = plt.Circle(final_coords[i], graph.threshold_overlap / 2, color=color, fill=False, alpha=0.2)
         ax2.add_patch(circle)
         if pid in actual_moved:
             start = graph.initial_positions[pid][:2]
@@ -1129,7 +1133,8 @@ if __name__ == "__main__":
                         help="Path to output conflict bar chart file")
 
     # Parameters
-    parser.add_argument("--threshold", type=float, default=0.16, help="Interference threshold distance")
+    parser.add_argument("--threshold_overlap", type=float, default=0.16, help="Overlap interference diameter")
+    parser.add_argument("--threshold_downwash", type=float, default=0.16, help="Downwash interference diameter")
     parser.add_argument("--camera_pos", type=float, nargs=3, default=[2.3, 0.0, 0.8], help="Camera position (x y z)")
 
     # Algorithm Config Enums
@@ -1194,7 +1199,7 @@ if __name__ == "__main__":
         exit(1)
 
     # 3. Build Graph
-    graph = InterferenceGraph(points_data, args.threshold)
+    graph = InterferenceGraph(points_data, threshold_overlap=args.threshold_overlap, threshold_downwash=args.threshold_downwash)
 
     # 4. Initialize Solver
     solver = ModularInterferenceSolver(graph, CAMERA_POS)
@@ -1217,7 +1222,7 @@ if __name__ == "__main__":
         positions[pt.id] = new_pos
 
     # 6. Validation Output & Metrics
-    logger.info(f"Graph stats: {len(graph.nodes)} nodes, threshold {graph.threshold}")
+    logger.info(f"Graph stats: {len(graph.nodes)} nodes, overlap threshold {graph.threshold_overlap}, downwash threshold {graph.threshold_downwash}")
 
     moved_distances = []
 
@@ -1265,7 +1270,7 @@ if __name__ == "__main__":
             p_dict.y = float(positions[pid][1])
             p_dict.z = float(positions[pid][2])
 
-    final_graph = InterferenceGraph(final_points_data, args.threshold)
+    final_graph = InterferenceGraph(final_points_data, threshold_overlap=args.threshold_overlap, threshold_downwash=args.threshold_downwash)
     unresolved_downwashes = final_graph.total_downwash
     unresolved_overlaps = final_graph.total_overlap
 
