@@ -418,7 +418,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         print(f"Found log for {drone_id}: {json_file}")
 
         try:
-            p = DroneProcessor(drone_id, config, json_file, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy)
+            p = DroneProcessor(drone_id, config, json_file, compare_yaml, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy)
             processors.append(p)
         except Exception as e:
             print(f"Error loading data for {drone_id}: {e}")
