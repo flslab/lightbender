@@ -123,6 +123,56 @@ class DroneProperties(bpy.types.PropertyGroup):
         min=1.0
     )
 
+    # Deconfliction Settings
+    deconflict_overlap: FloatProperty(
+        name="Overlap Threshold",
+        default=0.16,
+        min=0.01
+    )
+    deconflict_downwash: FloatProperty(
+        name="Downwash Threshold",
+        default=0.16,
+        min=0.01
+    )
+    deconflict_selection: EnumProperty(
+        name="Selection Method",
+        items=[
+            ('BRUTE_FORCE', "Brute Force", ""),
+            ('GREEDY_MAX_DEGREE', "Greedy Max Degree", ""),
+            ('GREEDY_TOP_Z', "Greedy Top Z", ""),
+            ('GREEDY_BOTTOM_Z', "Greedy Bottom Z", ""),
+            ('RANDOM', "Random", "")
+        ],
+        default='GREEDY_MAX_DEGREE'
+    )
+    deconflict_resolution: EnumProperty(
+        name="Resolution Order",
+        items=[
+            ('MAX_DEGREE', "Max Degree", ""),
+            ('TOP_Z', "Top Z", ""),
+            ('BOTTOM_Z', "Bottom Z", ""),
+            ('RANDOM', "Random", "")
+        ],
+        default='MAX_DEGREE'
+    )
+    deconflict_trajectory: EnumProperty(
+        name="Trajectory Type",
+        items=[
+            ('POINT_SPECIFIC', "Line of Sight", ""),
+            ('GLOBAL_CENTROID', "Global", "")
+        ],
+        default='POINT_SPECIFIC'
+    )
+    deconflict_direction: EnumProperty(
+        name="Move Direction",
+        items=[
+            ('AWAY_FROM_CAMERA', "Away", ""),
+            ('TOWARDS_CAMERA', "Towards", ""),
+            ('HYBRID', "Hybrid", "")
+        ],
+        default='HYBRID'
+    )
+
     # Export Settings (Scene Level)
     export_rate: FloatProperty(
         name="Export Rate (Hz)",
@@ -724,6 +774,258 @@ class DRONE_OT_reset_drift(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
+#    Deconfliction Feature
+# ------------------------------------------------------------------------
+
+def revert_deconflict_stagger(obj):
+    restored = False
+    if "deconflict_orig_x" in obj and "deconflict_orig_y" in obj and "deconflict_orig_z" in obj:
+        obj.location.x = obj["deconflict_orig_x"]
+        obj.location.y = obj["deconflict_orig_y"]
+        obj.location.z = obj["deconflict_orig_z"]
+        del obj["deconflict_orig_x"]
+        del obj["deconflict_orig_y"]
+        del obj["deconflict_orig_z"]
+        restored = True
+        
+    if "deconflict_scale_factor" in obj:
+        scale_factor = obj["deconflict_scale_factor"]
+        if scale_factor > 0.0 and scale_factor != 1.0:
+            inv_scale = 1.0 / scale_factor
+            for ptr in obj.drone_props.led_pointers:
+                ptr.value = 25.0 + (ptr.value - 25.0) * inv_scale
+                
+            if obj.animation_data and obj.animation_data.action:
+                for fc in obj.animation_data.action.fcurves:
+                    if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
+                        for kp in fc.keyframe_points:
+                            kp.co.y = 25.0 + (kp.co.y - 25.0) * inv_scale
+                            kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * inv_scale
+                            kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * inv_scale
+                        fc.update()
+        del obj["deconflict_scale_factor"]
+        restored = True
+        
+    return restored
+
+class DRONE_OT_deconflict_stagger(bpy.types.Operator):
+    """Call deconflict.py to stagger drones based on camera perspective"""
+    bl_idname = "drone.deconflict_stagger"
+    bl_label = "Stagger"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import os
+        import subprocess
+        import re
+        import math
+        
+        scene = context.scene
+        props = scene.drone_props
+        
+        cam = scene.camera
+        if not cam:
+            self.report({'ERROR'}, "No camera found in scene. Necessary for deconfliction.")
+            return {'CANCELLED'}
+            
+        cam_pos = cam.matrix_world.translation
+        
+        # Gather drones
+        points = []
+        drones = []
+        for obj in scene.objects:
+            m = re.match(r"^lb(\d+)", obj.name)
+            if m:
+                d_id = int(m.group(1))
+                drones.append(obj)
+                
+                # Save original if not already saved
+                if "deconflict_orig_x" not in obj:
+                    obj["deconflict_orig_x"] = obj.location.x
+                    obj["deconflict_orig_y"] = obj.location.y
+                    obj["deconflict_orig_z"] = obj.location.z
+                
+                # Angles
+                a1 = obj.get("servo_1", 0.0)
+                a2 = obj.get("servo_2", 0.0)
+                yaw = math.degrees(obj.matrix_world.to_euler('XYZ').z)
+                
+                points.append({
+                    'id': d_id,
+                    'x': round(obj.location.x, 4),
+                    'y': round(obj.location.y, 4),
+                    'z': round(obj.location.z, 4),
+                    'length_1': 0.08,
+                    'length_2': 0.08,
+                    'angle_1': a1,
+                    'angle_2': a2,
+                    'yaw': yaw,
+                    'max_length_limit': 0.16
+                })
+        
+        if not points:
+            self.report({'WARNING'}, "No lb# drones found.")
+            return {'CANCELLED'}
+            
+        import tempfile
+        try:
+            addon_dir = os.path.dirname(os.path.realpath(__file__))
+        except NameError:
+            addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+
+        input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
+        output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
+        
+        deconflict_script = os.path.join(addon_dir, "deconflict.py")
+        if not os.path.exists(deconflict_script):
+            alt_path = "/Users/hamed/Documents/Holodeck/lightbender/authoring/deconflict.py"
+            if os.path.exists(alt_path):
+                deconflict_script = alt_path
+            else:
+                self.report({'ERROR'}, f"Cannot find deconflict.py at {deconflict_script}")
+                return {'CANCELLED'}
+        
+        # Write input YAML manually
+        try:
+            with open(input_yaml, 'w') as f:
+                f.write("points:\n")
+                for p in points:
+                    f.write(f"- id: {p['id']}\n")
+                    f.write(f"  x: {p['x']}\n")
+                    f.write(f"  y: {p['y']}\n")
+                    f.write(f"  z: {p['z']}\n")
+                    f.write(f"  length_1: {p['length_1']}\n")
+                    f.write(f"  length_2: {p['length_2']}\n")
+                    f.write(f"  angle_1: {p['angle_1']}\n")
+                    f.write(f"  angle_2: {p['angle_2']}\n")
+                    f.write(f"  yaw: {p['yaw']}\n")
+                    f.write(f"  max_length_limit: {p['max_length_limit']}\n")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to write yaml: {e}")
+            return {'CANCELLED'}
+            
+        cmd_str = (
+            f"python3 '{deconflict_script}' "
+            f"--input_file '{input_yaml}' "
+            f"--output_file '{output_yaml}' "
+            f"--threshold_overlap {props.deconflict_overlap} "
+            f"--threshold_downwash {props.deconflict_downwash} "
+            f"--selection_method {props.deconflict_selection} "
+            f"--resolution_order {props.deconflict_resolution} "
+            f"--trajectory_type {props.deconflict_trajectory} "
+            f"--move_direction {props.deconflict_direction} "
+            f"--camera_pos {round(cam_pos.x, 4)} {round(cam_pos.y, 4)} {round(cam_pos.z, 4)} "
+            f"--no_viz"
+        )
+        
+        try:
+            # Use zsh login shell to ensure user's actual Python environment (with pandas, etc.) is loaded
+            res = subprocess.run(["/bin/zsh", "-l", "-c", cmd_str], check=False, capture_output=True, text=True)
+            if res.returncode != 0:
+                short_err = res.stderr.strip().split('\n')[-1] if res.stderr else "Unknown error"
+                self.report({'ERROR'}, f"Deconflict failed: {short_err}")
+                print(f"Deconflict error:\n{res.stderr}")
+                return {'CANCELLED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to run script: {e}")
+            return {'CANCELLED'}
+            
+        if not os.path.exists(output_yaml):
+            self.report({'ERROR'}, "No output yaml generated by deconflict.py")
+            return {'CANCELLED'}
+            
+        # Parse output safely
+        out_points = {}
+        curr_p = {}
+        try:
+            with open(output_yaml, 'r') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith('- id:'):
+                        if curr_p and 'id' in curr_p:
+                            out_points[curr_p['id']] = curr_p
+                        try:
+                            curr_p = {'id': int(stripped.split(':')[1].strip())}
+                        except ValueError:
+                            curr_p = {}
+                    elif stripped.startswith('x:') and curr_p:
+                        curr_p['x'] = float(stripped.split(':')[1].strip())
+                    elif stripped.startswith('y:') and curr_p:
+                        curr_p['y'] = float(stripped.split(':')[1].strip())
+                    elif stripped.startswith('z:') and curr_p:
+                        curr_p['z'] = float(stripped.split(':')[1].strip())
+                    elif stripped.startswith('scale_factor:') and curr_p:
+                        curr_p['scale_factor'] = float(stripped.split(':')[1].strip())
+            if curr_p and 'id' in curr_p:
+                out_points[curr_p['id']] = curr_p
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to parse output: {e}")
+            return {'CANCELLED'}
+            
+        # Apply positions
+        applied = 0
+        for obj in drones:
+            m = re.match(r"^lb(\d+)", obj.name)
+            if m:
+                d_id = int(m.group(1))
+                if d_id in out_points:
+                    p = out_points[d_id]
+                    obj.location.x = p.get('x', obj.location.x)
+                    obj.location.y = p.get('y', obj.location.y)
+                    obj.location.z = p.get('z', obj.location.z)
+                    
+                    scale_factor = p.get('scale_factor', 1.0)
+                    if scale_factor != 1.0:
+                        obj["deconflict_scale_factor"] = scale_factor
+                        # Scale pointers based on central index 25
+                        for ptr in obj.drone_props.led_pointers:
+                            ptr.value = 25.0 + (ptr.value - 25.0) * scale_factor
+                            
+                        # Scale pointer keyframes
+                        if obj.animation_data and obj.animation_data.action:
+                            for fc in obj.animation_data.action.fcurves:
+                                if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
+                                    for kp in fc.keyframe_points:
+                                        kp.co.y = 25.0 + (kp.co.y - 25.0) * scale_factor
+                                        kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * scale_factor
+                                        kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * scale_factor
+                                    fc.update()
+                    
+                    applied += 1
+                    
+        context.view_layer.update()
+        self.report({'INFO'}, f"Staggered {applied} drones.")
+        
+        # Cleanup
+        try:
+            if os.path.exists(input_yaml): os.remove(input_yaml)
+            if os.path.exists(output_yaml): os.remove(output_yaml)
+        except Exception:
+            pass
+            
+        return {'FINISHED'}
+
+
+class DRONE_OT_deconflict_reset(bpy.types.Operator):
+    """Reset drones to pre-stagger positions"""
+    bl_idname = "drone.deconflict_reset"
+    bl_label = "Reset Stagger"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import re
+        reset_count = 0
+        for obj in context.scene.objects:
+            if re.match(r"^lb\d+", obj.name):
+                if revert_deconflict_stagger(obj):
+                    reset_count += 1
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Reset stagger for {reset_count} drones.")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
 #    Animation Handler (Live Updates)
 # ------------------------------------------------------------------------
 
@@ -1084,6 +1386,23 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+        # --- Deconfliction Simulator ---
+        layout.label(text="Stagger:", icon='PARTICLES')
+        box = layout.box()
+        
+        box.prop(scene.drone_props, "deconflict_overlap")
+        box.prop(scene.drone_props, "deconflict_downwash")
+        box.prop(scene.drone_props, "deconflict_selection")
+        box.prop(scene.drone_props, "deconflict_resolution")
+        box.prop(scene.drone_props, "deconflict_trajectory")
+        box.prop(scene.drone_props, "deconflict_direction")
+        
+        row = box.row(align=True)
+        row.operator("drone.deconflict_stagger", text="Stagger")
+        row.operator("drone.deconflict_reset", text="Reset Stagger")
+        
+        layout.separator()
+
         # --- Export Config ---
         layout.label(text="Export Config:")
         layout.prop(scene.drone_props, "export_at_keyframes")
@@ -1109,6 +1428,8 @@ classes = (
     DRONE_OT_reset_error,
     DRONE_OT_apply_drift,
     DRONE_OT_reset_drift,
+    DRONE_OT_deconflict_stagger,
+    DRONE_OT_deconflict_reset,
     EXPORT_OT_drone_yaml,
     VIEW3D_PT_drone_swarm,
 )
