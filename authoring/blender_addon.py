@@ -174,6 +174,18 @@ class DroneProperties(bpy.types.PropertyGroup):
     )
 
     # Export Settings (Scene Level)
+    export_mission_name: StringProperty(
+        name="Mission Name",
+        description="Name of the mission",
+        default="blender_mission"
+    )
+    
+    export_dark_room: BoolProperty(
+        name="Dark Room",
+        description="Run in dark room mode",
+        default=False
+    )
+
     export_rate: FloatProperty(
         name="Export Rate (Hz)",
         description="Frequency of waypoints in the output file (1/delta_t)",
@@ -1173,7 +1185,11 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
         end_frame = scene.frame_end
 
         output_lines = []
-        output_lines.append(f"name: {scene.name.replace(' ', '_')}")
+        mission_name = scene.drone_props.export_mission_name.strip()
+        if not mission_name:
+            mission_name = scene.name.replace(' ', '_')
+            
+        output_lines.append(f"name: {mission_name}")
         output_lines.append("drones:")
 
         for drone in drones_to_export:
@@ -1281,6 +1297,67 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
             self.report({'ERROR'}, f"File Write Error: {str(e)}")
             return {'CANCELLED'}
 
+        return {'FINISHED'}
+
+
+class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
+    """Export Drone Animation to YAML and Run Orchestrator"""
+    bl_idname = "drone.export_and_illuminate"
+    bl_label = "Export and Illuminate"
+
+    def execute(self, context):
+        import os
+        import subprocess
+        import re
+
+        scene = context.scene
+        props = scene.drone_props
+        
+        # Select all lb# drones
+        drones_to_export = []
+        for obj in scene.objects:
+            if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj:
+                drones_to_export.append(obj)
+                
+        if not drones_to_export:
+            self.report({'ERROR'}, "No lb# drones found in scene")
+            return {'CANCELLED'}
+
+        # Select the drones
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in drones_to_export:
+            obj.select_set(True)
+
+        target_yaml = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/blender_mission.yaml"
+        target_script = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/orchestrator.py"
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
+
+        res = bpy.ops.drone.export_yaml('EXEC_DEFAULT', filepath=target_yaml)
+        if 'FINISHED' not in res:
+            self.report({'ERROR'}, "Failed to generate YAML")
+            return {'CANCELLED'}
+
+        cmd_str = f"python3 '{target_script}' --illumination --skip-confirm"
+        if props.export_dark_room:
+            cmd_str += " --dark"
+
+        # Open Mac Terminal to run the orchestrator so the user can monitor progress
+        apple_script = f'''
+        tell application "Terminal"
+            do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
+            activate
+        end tell
+        '''
+            
+        try:
+            subprocess.Popen(["osascript", "-e", apple_script])
+            self.report({'INFO'}, "Exported and started orchestrator")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to run orchestrator: {e}")
+            return {'CANCELLED'}
+        
         return {'FINISHED'}
 
 
@@ -1405,12 +1482,15 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         # --- Export Config ---
         layout.label(text="Export Config:")
+        layout.prop(scene.drone_props, "export_mission_name")
+        layout.prop(scene.drone_props, "export_dark_room")
         layout.prop(scene.drone_props, "export_at_keyframes")
 
         if not scene.drone_props.export_at_keyframes:
             layout.prop(scene.drone_props, "export_rate")
 
         layout.operator("drone.export_yaml", text="Export to YAML", icon='EXPORT')
+        layout.operator("drone.export_and_illuminate", text="Export and Illuminate", icon='PLAY')
 
 
 # ------------------------------------------------------------------------
@@ -1431,6 +1511,7 @@ classes = (
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
     EXPORT_OT_drone_yaml,
+    EXPORT_OT_export_and_illuminate,
     VIEW3D_PT_drone_swarm,
 )
 
