@@ -193,6 +193,61 @@ class DroneProperties(bpy.types.PropertyGroup):
         min=0.1
     )
 
+    # SVG to Layout Settings
+    import_svg_filepath: StringProperty(
+        name="SVG File",
+        description="Path to the SVG file",
+        subtype="FILE_PATH",
+        default=""
+    )
+
+    import_manifest_filepath: StringProperty(
+        name="Swarm Manifest",
+        description="Path to the swarm manifest YAML file",
+        subtype="FILE_PATH",
+        default=""
+    )
+
+    import_max_width: FloatProperty(
+        name="Max Width",
+        description="Maximum width for the scaled layout",
+        default=2.0
+    )
+
+    import_max_length: FloatProperty(
+        name="Max Height",
+        description="Maximum height for the scaled layout",
+        default=1.0
+    )
+
+    import_cx: FloatProperty(
+        name="Center X",
+        description="Target X coordinate for the center",
+        default=0.0
+    )
+
+    import_cy: FloatProperty(
+        name="Center Z",
+        description="Target Z coordinate for the center",
+        default=0.0
+    )
+
+    import_policy: EnumProperty(
+        name="Placement Policy",
+        description="Placement policy",
+        items=[
+            ('VFG', "VFG", ""),
+            ('SC', "Set Cover", "")
+        ],
+        default='VFG'
+    )
+
+    import_color: StringProperty(
+        name="LED Color",
+        description="Python list color (e.g. [255, 0, 0])",
+        default="[255, 255, 255]"
+    )
+
     export_at_keyframes: BoolProperty(
         name="Export Keyframes Only",
         description="Export only at keyframe locations (adds dt to waypoints)",
@@ -236,7 +291,7 @@ def get_led_material():
 class OBJECT_OT_add_drone(bpy.types.Operator):
     """Create a new Drone with Light Elements"""
     bl_idname = "drone.add_drone"
-    bl_label = "Add Drone"
+    bl_label = "Add LightBender"
     bl_options = {'REGISTER', 'UNDO'}
 
     drone_type: EnumProperty(
@@ -438,6 +493,7 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
         drone_base = context.active_object
         drone_base.name = "Drone_Base"
+        drone_base.empty_display_size = 0.1
 
         # 2. Add Properties
         drone_base.drone_props.drone_type = self.drone_type
@@ -1361,6 +1417,228 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DRONE_OT_transform_and_place(bpy.types.Operator):
+    """Convert SVG to LightBender layout and create drones"""
+    bl_idname = "drone.transform_and_place"
+    bl_label = "Transform and Place"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import os
+        import subprocess
+        import tempfile
+        import json
+        
+        scene = context.scene
+        props = scene.drone_props
+        
+        svg_path = bpy.path.abspath(props.import_svg_filepath)
+        if not os.path.isfile(svg_path):
+            self.report({'ERROR'}, f"SVG File not found: {svg_path}")
+            return {'CANCELLED'}
+            
+        # try:
+        #     addon_dir = os.path.dirname(os.path.realpath(__file__))
+        # except NameError:
+        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        transform_script = os.path.join(addon_dir, "transform.py")
+        place_script = os.path.join(addon_dir, "place.py")
+        
+        temp_dir = tempfile.gettempdir()
+        target_graph_yaml = os.path.join(temp_dir, "temp_target_graph.yaml")
+        target_layout_yaml = os.path.join(temp_dir, "temp_target_layout.yaml")
+        
+        # 1. Call transform.py
+        cmd_transform = [
+            "python3", f"'{transform_script}'",
+            "-i", f"'{svg_path}'",
+            "-o", f"'{target_graph_yaml}'",
+            "-mw", str(props.import_max_width),
+            "-ml", str(props.import_max_length),
+            "-cy", str(props.import_cx),
+            "-cz", str(props.import_cy)
+        ]
+        res1 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_transform)], capture_output=True, text=True)
+        if res1.returncode != 0:
+            self.report({'ERROR'}, f"Transform failed: {res1.stderr}")
+            return {'CANCELLED'}
+            
+        # 2. Call place.py
+        cmd_place = [
+            "python3", f"'{place_script}'",
+            "--input", f"'{target_graph_yaml}'",
+            "--output", f"'{target_layout_yaml}'",
+            "--policy", props.import_policy,
+            "--max_len", "0.16",
+            "--no_viz"
+        ]
+        res2 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_place)], capture_output=True, text=True)
+        if res2.returncode != 0:
+            self.report({'ERROR'}, f"Place failed: {res2.stderr}")
+            return {'CANCELLED'}
+            
+        if not os.path.exists(target_layout_yaml):
+            self.report({'ERROR'}, "Placement layout file not generated")
+            return {'CANCELLED'}
+            
+        def load_yaml_safe(filepath):
+            try:
+                # Use external Python to parse YAML and dump as JSON since Blender might lack PyYAML
+                cmd_yaml2json = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{filepath}'"
+                json_str = subprocess.check_output(["/bin/zsh", "-l", "-c", cmd_yaml2json], text=True)
+                return json.loads(json_str)
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to parse YAML file {filepath}: {e}")
+                return {}
+
+        layout_data = load_yaml_safe(target_layout_yaml)
+        points = layout_data.get('points', [])
+        
+        # 3. Process Manifest
+        inventory = {'H': [], 'V': []}
+        manifest_path = bpy.path.abspath(props.import_manifest_filepath)
+        if os.path.isfile(manifest_path):
+            manifest_data = load_yaml_safe(manifest_path)
+            for d in manifest_data.get('drones', []):
+                t = d.get('type')
+                if t in ('H', 'V'):
+                    inventory[t].append(d['id'])
+        
+        # 4. Angle Logic & Assignment
+        def get_type_matches(a1, a2, l1, l2):
+            def fits_H(a, b):
+                am = a % 360
+                bm = b % 360
+                
+                # type H: 0 <= angle_1 <= 180, 180 <= angle_2 <= 360
+                ok_a = (l1 == 0) or (0 <= am <= 180)
+                bs = 360 if bm == 0 else bm
+                ok_b = (l2 == 0) or (180 <= bs <= 360) 
+                
+                if ok_a and ok_b: return (am, bs)
+                return None
+                
+            def fits_V(a, b):
+                am = a % 360
+                bm = b % 360
+                
+                # type V: 90 <= angle_1 <= 270, 270 <= angle_2 <= 450
+                ok_a = (l1 == 0) or (90 <= am <= 270)
+                bs = bm if bm > 270 else bm + 360
+                ok_b = (l2 == 0) or (270 <= bs <= 450)
+                
+                if ok_a and ok_b: return (am, bs)
+                return None
+
+            matches = {}
+            res_h = fits_H(a1, a2)
+            if res_h: matches['H'] = (res_h[0], res_h[1], l1, l2, False)
+            res_v = fits_V(a1, a2)
+            if res_v: matches['V'] = (res_v[0], res_v[1], l1, l2, False)
+            
+            # Allow swapping parameters
+            res_h_s = fits_H(a2, a1)
+            if res_h_s and 'H' not in matches: matches['H'] = (res_h_s[0], res_h_s[1], l2, l1, True)
+            res_v_s = fits_V(a2, a1)
+            if res_v_s and 'V' not in matches: matches['V'] = (res_v_s[0], res_v_s[1], l2, l1, True)
+            
+            return matches
+
+        assignments = [None] * len(points)
+        created_counts = {'H': 0, 'V': 0}
+        
+        ambiguous = []
+        for i, pt in enumerate(points):
+            matches = get_type_matches(pt['angle_1'], pt['angle_2'], pt['length_1'], pt['length_2'])
+            if len(matches) == 1:
+                t = list(matches.keys())[0]
+                assignments[i] = (t, matches[t])
+            elif len(matches) == 0:
+                t = 'H' if len(inventory['H']) >= len(inventory['V']) else 'V'
+                assignments[i] = (t, (pt['angle_1']%360, pt['angle_2']%360, pt['length_1'], pt['length_2'], False))
+            else:
+                ambiguous.append((i, matches))
+                
+        # Handle ambiguous by assigning them to whichever type has most remaining inventory
+        for i, matches in ambiguous:
+            t = 'H' if len(inventory['H']) >= len(inventory['V']) else 'V'
+            assignments[i] = (t, matches[t])
+            if len(inventory[t]) > 0:
+                inventory[t].pop(0) # pop from front
+            else:
+                created_counts[t] += 1
+            
+        # Refill inventory arrays for actual generation since we mutated it
+        inventory = {'H': [], 'V': []}
+        if os.path.isfile(manifest_path):
+            manifest_data = load_yaml_safe(manifest_path)
+            for d in manifest_data.get('drones', []):
+                t = d.get('type')
+                if t in ('H', 'V'):
+                    inventory[t].append(d['id'])
+            
+        # 5. Spawn Drones
+        warnings = []
+        created_counts = {'H': 0, 'V': 0}
+        for i, pt in enumerate(points):
+            t, (a1, a2, l1, l2, swapped) = assignments[i]
+            
+            if len(inventory[t]) > 0:
+                lb_id = inventory[t].pop(0)
+            else:
+                created_counts[t] += 1
+                lb_id = f"lb_extra_{t}_{created_counts[t]}"
+                warnings.append(lb_id)
+                
+            bpy.ops.drone.add_drone(drone_type=f'TYPE_{t}')
+            obj = context.active_object
+            obj.name = lb_id
+            
+            obj.location = (pt['x'], pt['y'], pt['z'])
+            
+            import math
+            obj.rotation_euler.z = math.radians(pt['yaw'])
+            
+            obj["servo_1"] = a1
+            obj["servo_2"] = a2
+            
+            obj.drone_props.led_mode = 'POINTERS'
+            obj.drone_props.led_base_color = "[0, 0, 0]"
+            
+            obj.drone_props.led_pointers.clear()
+            
+            import_color = props.import_color
+            max_len = pt.get('max_length_limit', 0.16)
+            
+            # The length from middle to the tip of rods
+            active_1 = round(25 * (l1 / max_len)) if max_len > 0 else 0
+            active_2 = round(25 * (l2 / max_len)) if max_len > 0 else 0
+            
+            p1 = obj.drone_props.led_pointers.add()
+            p1.value = 25.0 - active_1
+            p1.color_expression = import_color
+            
+            p2 = obj.drone_props.led_pointers.add()
+            p2.value = 25.0 + active_2
+            p2.color_expression = "[0, 0, 0]"
+                
+        if warnings:
+            self.report({'WARNING'}, f"Warning: {len(warnings)} LightBenders created with incremental IDs because manifest lacked enough.")
+        else:
+            self.report({'INFO'}, f"Successfully placed {len(points)} LightBenders from SVG.")
+            
+        context.view_layer.update()
+        
+        # Cleanup
+        try:
+            if os.path.exists(target_graph_yaml): os.remove(target_graph_yaml)
+            if os.path.exists(target_layout_yaml): os.remove(target_layout_yaml)
+        except Exception:
+            pass
+            
+        return {'FINISHED'}
+
+
 # ------------------------------------------------------------------------
 #    UI Panel
 # ------------------------------------------------------------------------
@@ -1377,7 +1655,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         obj = context.active_object
 
         # --- Drone Creation ---
-        layout.label(text="Add Drone:")
+        layout.label(text="Add LightBender:")
         row = layout.row()
         row.prop(scene.drone_props, "drone_type", text="")
 
@@ -1438,6 +1716,29 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             layout.operator("drone.force_update_leds", text="Test/Update LEDs", icon='LIGHT')
         else:
             layout.label(text="Select a drone to animate", icon='INFO')
+
+        layout.separator()
+
+        # --- SVG to Layout ---
+        layout.label(text="SVG Transform and Place:", icon='GRAPH')
+        box = layout.box()
+
+        box.prop(scene.drone_props, "import_svg_filepath")
+        box.prop(scene.drone_props, "import_manifest_filepath")
+        
+        row = box.row()
+        row.prop(scene.drone_props, "import_max_width")
+        row.prop(scene.drone_props, "import_max_length")
+        
+        row = box.row()
+        row.prop(scene.drone_props, "import_cx")
+        row.prop(scene.drone_props, "import_cy")
+        
+        row = box.row()
+        row.prop(scene.drone_props, "import_policy")
+        row.prop(scene.drone_props, "import_color")
+        
+        box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
 
         layout.separator()
 
@@ -1510,6 +1811,7 @@ classes = (
     DRONE_OT_reset_drift,
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
+    DRONE_OT_transform_and_place,
     EXPORT_OT_drone_yaml,
     EXPORT_OT_export_and_illuminate,
     VIEW3D_PT_drone_swarm,
