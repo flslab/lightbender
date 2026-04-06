@@ -97,6 +97,12 @@ def compute_lightbender_params(body: np.ndarray, tip1: np.ndarray, tip2: Optiona
         else:
             yaw = 0.0
 
+    # Force yaw to be in [-90, 90] to prefer "forward" facing direction
+    if yaw > 90.0:
+        yaw -= 180.0
+    elif yaw < -90.0:
+        yaw += 180.0
+
     yaw_rad = np.radians(yaw)
     cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
 
