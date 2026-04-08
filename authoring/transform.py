@@ -98,7 +98,7 @@ def normalize_and_scale_graph(raw_nodes, max_width, max_length, center_y, center
     for i, node in enumerate(raw_nodes):
         # Translate to origin, scale, then translate to target center
         new_y = (node['y'] - raw_center_y) * scale + center_y
-        new_z = (node['z'] - raw_center_z) * scale + center_z
+        new_z = (node['z'] - raw_center_z) * scale - center_z
 
         final_nodes.append({
             'id': i,
@@ -173,7 +173,7 @@ def main():
         print("No <path> elements found in the SVG.")
         return
 
-    print(f"Found {len(paths)} path elements. Building raw graph...")
+    print(f"Found {len(paths)} path elements.")
     raw_nodes, edges = build_raw_graph(paths)
 
     print(
