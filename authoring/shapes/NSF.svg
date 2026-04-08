@@ -1,0 +1,10 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 252 144" width="252" height="144">
+	<style>
+		.s0 { fill: none;stroke: #000000;stroke-miterlimit:100 } 
+	</style>
+	<g id="Layer 1">
+	</g>
+	<path class="s0" d="m4 113.35v-82.35l52.4 82.35v-82.35"/>
+	<path class="s0" d="m151.23 31h-52.4v42.42h52.4v39.93h-52.4"/>
+	<path class="s0" d="m248.56 31h-52.41v82.35m0-39.93h42.42"/>
+</svg>
