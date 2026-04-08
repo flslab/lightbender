@@ -10,6 +10,7 @@ import logging
 import yaml
 import os
 import argparse
+import time
 from mpl_toolkits.mplot3d import Axes3D  # Required for 3D plotting
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -219,7 +220,7 @@ class ResolutionOrder(Enum):
 
 
 class TrajectoryType(Enum):
-    POINT_SPECIFIC = auto()  # Camera -> Point
+    LINE_OF_SIGHT = auto()  # Camera -> Point
     GLOBAL_CENTROID = auto()  # Camera -> Centroid
 
 
@@ -378,7 +379,7 @@ class ResolutionStrategy:
 
             # Determine Trajectory Vector (normalized)
             # This vector points AWAY from the camera by default
-            if self.trajectory == TrajectoryType.POINT_SPECIFIC:
+            if self.trajectory == TrajectoryType.LINE_OF_SIGHT:
                 vec = original_pos - self.camera_pos
                 norm = np.linalg.norm(vec)
                 traj_vec = vec / norm if norm > 0 else np.array([0, 0, 1])
@@ -425,7 +426,7 @@ class ResolutionStrategy:
                 
                 graph.initial_positions[pid] = mid1
                 
-                if self.trajectory == TrajectoryType.POINT_SPECIFIC:
+                if self.trajectory == TrajectoryType.LINE_OF_SIGHT:
                     vec1 = mid1 - self.camera_pos
                     norm1 = np.linalg.norm(vec1)
                     traj_vec_1 = vec1 / norm1 if norm1 > 0 else np.array([0, 0, 1])
@@ -456,7 +457,7 @@ class ResolutionStrategy:
                     graph.node_overlaps[child2_id] = 0
                     graph.node_downwashes[child2_id] = 0
                     
-                    if self.trajectory == TrajectoryType.POINT_SPECIFIC:
+                    if self.trajectory == TrajectoryType.LINE_OF_SIGHT:
                         vec2 = mid2 - self.camera_pos
                         norm2 = np.linalg.norm(vec2)
                         traj_vec_2 = vec2 / norm2 if norm2 > 0 else np.array([0, 0, 1])
@@ -1142,7 +1143,7 @@ if __name__ == "__main__":
                         choices=[e.name for e in SelectionMethod], help="Selection method")
     parser.add_argument("--resolution_order", type=str, default="MAX_DEGREE",
                         choices=[e.name for e in ResolutionOrder], help="Resolution order")
-    parser.add_argument("--trajectory_type", type=str, default="POINT_SPECIFIC",
+    parser.add_argument("--trajectory_type", type=str, default="LINE_OF_SIGHT",
                         choices=[e.name for e in TrajectoryType], help="Trajectory type")
     parser.add_argument("--move_direction", type=str, default="HYBRID",
                         choices=[e.name for e in MoveDirection], help="Movement direction")
@@ -1199,6 +1200,7 @@ if __name__ == "__main__":
         exit(1)
 
     # 3. Build Graph
+    start_time = time.time()
     graph = InterferenceGraph(points_data, threshold_overlap=args.threshold_overlap, threshold_downwash=args.threshold_downwash)
 
     # 4. Initialize Solver
@@ -1214,6 +1216,7 @@ if __name__ == "__main__":
         placement_type=place_type,
         allow_split=args.allow_split
     )
+    end_time = time.time()
 
     num_split = len(extra_points)
     
@@ -1305,20 +1308,20 @@ if __name__ == "__main__":
     else:
         print("=" * 40)
         print("METRICS SUMMARY")
-        print(f"Initial Downwash conflicts:    {num_downwashes}  (per-node min/max: {init_min_dw}/{init_max_dw})")
-        print(f"Initial Overlap Conflicts:   {num_overlaps}  (per-node min/max: {init_min_col}/{init_max_col})")
-        print(f"Initial Total:                 (per-node min/max: {init_min_total}/{init_max_total})")
-        print(f"Unresolved Downwashes:         {unresolved_downwashes}  (per-node min/max: {final_min_dw}/{final_max_dw})")
-        print(f"Unresolved Overlaps:         {unresolved_overlaps}  (per-node min/max: {final_min_col}/{final_max_col})")
-        print(f"Unresolved Total:              (per-node min/max: {final_min_total}/{final_max_total})")
+        print(f"Execution Time:                {(end_time - start_time) * 1000:.3f} ms")
+        print(f"Initial Downwash Conflicts:    {num_downwashes}  (per-node min/max: {init_min_dw}/{init_max_dw})")
+        print(f"Initial Overlap Conflicts:     {num_overlaps}  (per-node min/max: {init_min_col}/{init_max_col})")
+        print(f"Initial Total Conflicts:       {num_downwashes + num_overlaps} (per-node min/max: {init_min_total}/{init_max_total})")
+        print(f"Unresolved Downwash Conflicts: {unresolved_downwashes}  (per-node min/max: {final_min_dw}/{final_max_dw})")
+        print(f"Unresolved Overlap Conflicts:  {unresolved_overlaps}  (per-node min/max: {final_min_col}/{final_max_col})")
+        print(f"Unresolved Total Conflicts:    {unresolved_downwashes + unresolved_overlaps}  (per-node min/max: {final_min_total}/{final_max_total})")
         print(f"LightBenders Selected to Move: {num_selected}")
-        print(f"LightBenders Actually Moved:   {num_moved}")
-        print(f"Complementary Points Added:    {num_split}")
-        print(f"Travel Distance - Avg:         {avg_dist:.4f}")
-        print(f"Travel Distance - Min:         {min_dist:.4f}")
-        print(f"Travel Distance - Max:         {max_dist:.4f}")
-        
-        print(f"Final Utilization:             {utilization:.1f}%")
+        print(f"LightBenders Moved:            {num_moved}")
+        print(f"Extra LightBenders Added:      {num_split}")
+        print(f"Travel Distance - Avg:         {avg_dist*1000:.0f} mm")
+        print(f"Travel Distance - Min:         {min_dist*1000:.0f} mm")
+        print(f"Travel Distance - Max:         {max_dist*1000:.0f} mm")
+        print(f"Utilization:                   {utilization:.1f}%")
         print("=" * 40)
 
     # 7. Save Results

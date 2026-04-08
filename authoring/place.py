@@ -711,7 +711,7 @@ class Allocator:
         else:
             raise ValueError(f"Unknown placement policy: {policy}")
 
-        print(f"Running Placement with {policy} policy...")
+        # print(f"Running Placement with {policy} policy...")
         return strategy.place(graph, self.max_length_limit)
 
 
@@ -847,8 +847,8 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         })
     with open(filepath, 'w') as f:
         yaml.dump({'points': data}, f, sort_keys=False)
-    if not getattr(args, 'csv', False):
-        print(f"Placed states saved to {filepath}")
+    # if not getattr(args, 'csv', False):
+        # print(f"Placed LightBenders saved to {filepath}")
 
 
 # --- Execution ---
@@ -891,14 +891,15 @@ if __name__ == "__main__":
     if args.csv:
         print(f"{(end_time - start_time) * 1000:.3f},{total_lbs},{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
     else:
-        print("\n--- Placement Metrics ---")
-        print(f"Policy:                 {args.policy}")
-        print(f"Execution Time:         {(end_time - start_time) * 1000:.3f}")
+        print("=" * 40)
+        print("METRICS SUMMARY")
+        # print(f"Policy:                 {args.policy}")
+        print(f"Execution Time:         {(end_time - start_time) * 1000:.3f} ms")
         print(f"Total LightBenders:     {total_lbs}")
         print(f"Total Rods Activated:   {total_rods}")
-        print(f"Average Rod Length:     {avg_rod_len:.2f}")
+        # print(f"Average Rod Length:     {avg_rod_len:.2f} m")
         print(f"Rod Length Utilization: {utilization:.1f}%")
-        print("--------------------------\n")
+        print("=" * 40)
 
     if not args.no_viz:
         visualize_placement(graph, lightbenders)
