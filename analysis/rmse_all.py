@@ -111,7 +111,7 @@ def set_axes_equal(ax, points):
 # ==========================================
 
 class DroneProcessor:
-    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
+    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, visualize_only=False):
         self.drone_id = drone_id
         self.yaml_config = yaml_config
         self.json_path = json_path
@@ -122,10 +122,15 @@ class DroneProcessor:
         self.max_j = max_j
         self.max_s = max_s
         self.ignore_rpy = ignore_rpy
+        self.visualize_only = visualize_only
 
         # Load Interpolators
         self._load_gt()
-        if self.act_yaml_config:
+        if self.visualize_only:
+            self.start_time = 0.0
+            self.stop_time = self.gt_duration
+            self.act_max_rel_time = self.gt_duration
+        elif self.act_yaml_config:
             self._load_act_from_yaml()
         else:
             self._load_act()
@@ -331,6 +336,11 @@ class DroneProcessor:
         g_rpy = [0.0, 0.0, float(g_yaw) * 180 / np.pi]
 
         # print(g_rpy)
+        
+        if self.visualize_only:
+            leds_local_gt = get_led_local_positions(g_servos[0], g_servos[1])
+            leds_gt_world = transform_points(leds_local_gt, g_pos, g_rpy)
+            return leds_gt_world, None, True
 
         # --- Actual State ---
         if self.act_yaml_config:
@@ -379,6 +389,8 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     drones_config = yaml_data.get('drones', {})
     processors = []
     
+    visualize_only = (tag is None and compare_yaml is None)
+
     if compare_yaml:
         print(f"Loading Comparison Configuration from {compare_yaml}...")
         with open(compare_yaml, 'r') as f:
@@ -388,6 +400,14 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 
     # 1. Initialize Processors (Find logs and parse)
     for drone_id, config in drones_config.items():
+        if visualize_only:
+            try:
+                p = DroneProcessor(drone_id, config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy, visualize_only=True)
+                processors.append(p)
+            except Exception as e:
+                print(f"Error loading data for {drone_id}: {e}")
+            continue
+
         if compare_yaml:
             act_config = compare_drones.get(drone_id)
             if not act_config:
@@ -453,23 +473,26 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
             gt_leds, act_leds, valid = p.get_state_at_relative_time(t)
 
             if valid:
-                diff = gt_leds - act_leds
-                sse = np.sum(diff ** 2)
-                count = len(gt_leds)  # 50
+                if act_leds is not None:
+                    diff = gt_leds - act_leds
+                    sse = np.sum(diff ** 2)
+                    count = len(gt_leds)  # 50
 
-                # Per drone metrics
-                rmse_val = np.sqrt(sse / count) * 1000.0  # mm
+                    # Per drone metrics
+                    rmse_val = np.sqrt(sse / count) * 1000.0  # mm
 
-                results['drones'][p.drone_id]['rmse'].append(rmse_val)
+                    results['drones'][p.drone_id]['rmse'].append(rmse_val)
+
+                    # Accumulate for Combined Metric
+                    frame_total_sse += sse
+                    frame_total_count += count
+                else:
+                    results['drones'][p.drone_id]['rmse'].append(np.nan)
 
                 # Store subsample for vis (every 10th step)
                 if len(results['drones'][p.drone_id]['rmse']) % 10 == 0:
                     results['drones'][p.drone_id]['leds_gt'].append(gt_leds)
                     results['drones'][p.drone_id]['leds_act'].append(act_leds)
-
-                # Accumulate for Combined Metric
-                frame_total_sse += sse
-                frame_total_count += count
             else:
                 # Store NaN to keep array length consistent with timestamps
                 results['drones'][p.drone_id]['rmse'].append(np.nan)
@@ -510,6 +533,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
             mean_d = np.nanmean(d_rmse)
             print(f"Drone {p.drone_id}: Max RMSE {max_d:.2f} mm, Mean RMSE {mean_d:.2f} mm")
 
+    if not visualize_only:
         # ==========================================
         # 5. EXPORT DATA TO JSON
         # ==========================================
@@ -553,28 +577,60 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     # ==========================================
 
     fig = plt.figure(figsize=(18, 8))
+    import matplotlib.gridspec as gridspec
+    
+    N = len(processors) if len(processors) > 0 else 1
+    gs = gridspec.GridSpec(N, 2, figure=fig)
+    
+    left_texts = {}
+    time_lines = {}
 
-    # Plot 1: RMSE over Time
-    ax1 = fig.add_subplot(1, 2, 1)
+    if not visualize_only:
+        # Plot 1: RMSE over Time
+        ax1 = fig.add_subplot(gs[:, 0])
 
-    # Plot Combined
-    ax1.plot(timestamps, results['combined_rmse'], 'k-', linewidth=3, alpha=0.8, label='All Drones (Combined)')
-    ax1.axhline(overall_comb_rmse, color='r', linestyle='--', label=f'Overall: {overall_comb_rmse:.3f}mm')
+        # Plot Combined
+        ax1.plot(timestamps, results['combined_rmse'], 'k-', linewidth=3, alpha=0.8, label='All Drones (Combined)')
+        if np.any(valid_comb):
+            ax1.axhline(overall_comb_rmse, color='r', linestyle='--', label=f'Overall: {overall_comb_rmse:.3f}mm')
 
-    # Plot Individuals
-    colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
-    for i, p in enumerate(processors):
-        rmse_data = results['drones'][p.drone_id]['rmse']
-        ax1.plot(timestamps, rmse_data, color=colors[i], linewidth=1, label=f'{p.drone_id}')
+        # Plot Individuals
+        colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
+        for i, p in enumerate(processors):
+            rmse_data = results['drones'][p.drone_id]['rmse']
+            ax1.plot(timestamps, rmse_data, color=colors[i], linewidth=1, label=f'{p.drone_id}')
 
-    ax1.set_title('RMSE over Time (mm)')
-    ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Error (mm)')
-    ax1.legend()
-    ax1.grid(True)
+        ax1.set_title('RMSE over Time (mm)')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Error (mm)')
+        ax1.legend()
+        ax1.grid(True)
+    else:
+        colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
+        for i, p in enumerate(processors):
+            ax = fig.add_subplot(gs[i, 0])
+            pos_data = p.gt_pos_fn(timestamps)
+            
+            ax.plot(timestamps, pos_data[:, 0], color='r', label='X')
+            ax.plot(timestamps, pos_data[:, 1], color='g', label='Y')
+            ax.plot(timestamps, pos_data[:, 2], color='b', label='Z')
+            
+            ax.set_ylabel(f'{p.drone_id} (m)')
+            if i == N - 1:
+                ax.set_xlabel('Time (s)')
+            if i == 0:
+                ax.set_title('Drone GT Positions (X, Y, Z)')
+                ax.legend(loc='upper right', fontsize=8)
+                
+            ax.grid(True, linestyle=':', alpha=0.6)
+            txt = ax.text(0.02, 0.90, '', transform=ax.transAxes, verticalalignment='top', fontsize=9, bbox=dict(facecolor='white', alpha=0.8))
+            left_texts[p.drone_id] = txt
+            
+            vl = ax.axvline(0, color='k', linestyle='--', alpha=0.5)
+            time_lines[p.drone_id] = vl
 
     # Plot 2: 3D Animation
-    ax_3d = fig.add_subplot(1, 2, 2, projection='3d')
+    ax_3d = fig.add_subplot(gs[:, 1], projection='3d')
 
     # Collect all valid points to set global bounds
     all_vis_pts = []
@@ -622,6 +678,15 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         # Approximate time for display (since we subsampled by 10)
         t_disp = timestamps[min(idx * 10, len(timestamps) - 1)]
         ax_3d.set_title(f"Multi-Drone Replay t={t_disp:.2f}s")
+        
+        if visualize_only:
+            for p in processors:
+                if p.drone_id in left_texts:
+                    pos = p.gt_pos_fn(t_disp)
+                    txt = left_texts[p.drone_id]
+                    txt.set_text(f"x: {pos[0]:.2f}    y: {pos[1]:.2f}    z: {pos[2]:.2f}")
+                if p.drone_id in time_lines:
+                    time_lines[p.drone_id].set_xdata([t_disp, t_disp])
 
         for p in processors:
             gt_list = results['drones'][p.drone_id]['leds_gt']
@@ -633,7 +698,10 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
                 gt_pts = gt_list[idx]
                 act_pts = act_list[idx]
                 s_gt._offsets3d = (gt_pts[:, 0], gt_pts[:, 1], gt_pts[:, 2])
-                s_act._offsets3d = (act_pts[:, 0], act_pts[:, 1], act_pts[:, 2])
+                if act_pts is not None:
+                    s_act._offsets3d = (act_pts[:, 0], act_pts[:, 1], act_pts[:, 2])
+                else:
+                    s_act._offsets3d = ([], [], [])
             else:
                 # Hide if invalid for this frame
                 s_gt._offsets3d = ([], [], [])
@@ -674,7 +742,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="RMSE Analysis Toolkit")
     parser.add_argument('--yaml', type=str, default='/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/reversing_arrow_blender.yaml', help='Path to mission yaml')
-    parser.add_argument('--tag', type=str, default='reversing_arrow_std_2026-03-19_11-18-28', help='Log file tag')
+    parser.add_argument('--tag', type=str, default=None, help='Log file tag (if omitted, visualizes YAML only)')
     parser.add_argument('--compare_yaml', type=str, default=None, help='Compare two yaml files directly without JSON logs')
     parser.add_argument('--kinematics', action='store_true', help='Enable kinematic modeling of ground truth')
     parser.add_argument('--max_v', type=float, default=1.0, help='Maximum velocity (m/s)')
