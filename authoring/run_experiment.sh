@@ -18,32 +18,32 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/skyline_split"
+BASE_RESULTS_DIR="results/apr13/a_z_25cm"
 mkdir -p "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
-TRANSFORM_MAX_WIDTH=2.0
-TRANSFORM_MAX_HEIGHT=1.0
+TRANSFORM_MAX_WIDTH=0.5
+TRANSFORM_MAX_HEIGHT=0.25
 
 # --- Placement Parameters ---
 MAX_LENGTH=0.16
 MAX_LENGTHS="0.13 0.16 0.24"
-MIN_CHUNK_LEN=0.001
-PLACEMENT_POLICIES=("VFG")
-# PLACEMENT_POLICIES=("VFG" "SC")
+MIN_CHUNK_LEN=0.01
+PLACEMENT_POLICIES=("VFG" "SC" "HYB")
+# PLACEMENT_POLICIES=("VFG" "SC" "HYB")
 
 # --- Stagger Parameters ---
-SELECTION_METHODS=("GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
+SELECTION_METHODS=("GREEDY_MAX_DEGREE")
 #SELECTION_METHODS=("BRUTE_FORCE" "GREEDY_MAX_DEGREE" "GREEDY_TOP_Z" "GREEDY_BOTTOM_Z" "RANDOM")
-RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
-#RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
-# TRAJECTORY_TYPES=("POINT_SPECIFIC")
-TRAJECTORY_TYPES=("POINT_SPECIFIC" "GLOBAL_CENTROID")
-# MOVE_DIRECTIONS=("HYBRID")
-MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
-# DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE")
-DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE" "LAYERS")
-ALLOW_SPLIT=true
+RESOLUTION_ORDERS=("MAX_DEGREE")
+# RESOLUTION_ORDERS=("MAX_DEGREE" "TOP_Z" "BOTTOM_Z" "RANDOM")
+TRAJECTORY_TYPES=("LINE_OF_SIGHT")
+# TRAJECTORY_TYPES=("LINE_OF_SIGHT" "GLOBAL_CENTROID")
+MOVE_DIRECTIONS=("HYBRID")
+# MOVE_DIRECTIONS=("AWAY_FROM_CAMERA" "TOWARDS_CAMERA" "HYBRID")
+# DECONFLICT_PLACEMENT_TYPES=("LAYERS")
+DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE")
+ALLOW_SPLIT=false
 
 # Shared Camera Position
 CAM_X=2.3
@@ -51,7 +51,7 @@ CAM_Y=0.0
 CAM_Z=0.0
 
 # Define the comprehensive CSV header
-CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,AddedLbs,NewUtilization,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthError,OverallAvgError,NormalizedError,SimilarityScore"
+CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,AddedLbs,NewUtilization,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthAbsError,AvgWidthRelError,OverallAvgError,NormalizedError,SimilarityScore"
 
 if [ "$PLACE_SCRIPT" == "place.py" ]; then
     MAX_LENGTH_REPORT="LB Length                : $MAX_LENGTH"

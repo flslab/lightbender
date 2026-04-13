@@ -519,6 +519,9 @@ class SetCoverStrategy(PlacementStrategy):
         # E. Solve Exact Set Cover with Overlap Penalty
         chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
 
+        if chosen_indices is None:
+            return self.vfg_lbs
+
         # 4.5 Resolve physical overlaps among chosen candidates
         edge_intervals = {e_idx: [] for e_idx in range(len(edge_data))}
         for idx in chosen_indices:
@@ -617,6 +620,13 @@ class SetCoverStrategy(PlacementStrategy):
         best_solution = greedy_sol
         better_than_greedy = 'No'
 
+        if hasattr(self, 'vfg_lbs'):
+            vfg_size = len(self.vfg_lbs)
+            if vfg_size < best_size or (vfg_size == best_size and greedy_overlap > 0):
+                best_size = vfg_size
+                best_overlap = 0
+                best_solution = None
+
         # Sort for B&B
         cand_order = list(range(len(valid_indices)))
         cand_order.sort(key=lambda x: bin(cand_masks[x]).count('1'), reverse=True)
@@ -629,12 +639,19 @@ class SetCoverStrategy(PlacementStrategy):
 
         iters = 0
         MAX_ITERS = 1000000
+        start_bb_time = time.perf_counter()
+        timeout_seconds = 0.4 if hasattr(self, 'vfg_lbs') else None
 
         def backtrack(cand_idx, current_mask, current_solution, current_overlap):
             nonlocal best_solution, best_size, best_overlap, iters, better_than_greedy
 
             if iters >= MAX_ITERS:
                 return
+
+            if timeout_seconds and (iters % 100 == 0):
+                if time.perf_counter() - start_bb_time > timeout_seconds:
+                    return
+
             iters += 1
 
             # If all chunks covered, check if it's the best so far
@@ -692,7 +709,16 @@ class SetCoverStrategy(PlacementStrategy):
             print(f"Total Iterations:   {iters}")
             print(f"Greedy Solution:    {len(greedy_sol)}")
             print(f"Greedy Overlap:     {greedy_overlap}")
+
+        if best_solution is None:
+            return None
         return [valid_indices[i] for i in best_solution]
+
+
+class HYBStrategy(SetCoverStrategy):
+    def place(self, graph: TargetGraph, max_length: float) -> List[Point3D]:
+        self.vfg_lbs = VFGStrategy().place(graph, max_length)
+        return super().place(graph, max_length)
 
 
 # --- Placement Processor ---
@@ -708,6 +734,8 @@ class Allocator:
             strategy = VFGStrategy()
         elif policy.upper() == "SC":
             strategy = SetCoverStrategy()
+        elif policy.upper() == "HYB":
+            strategy = HYBStrategy()
         else:
             raise ValueError(f"Unknown placement policy: {policy}")
 
@@ -857,7 +885,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Place LightBenders to Target Topology")
     parser.add_argument("--input", type=str, default="target_graph.yaml", help="Input YAML graph file")
     parser.add_argument("--output", type=str, default="initial_layout.yaml", help="Output YAML state file")
-    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VFG', 'SC'], default="VFG",
+    parser.add_argument("--policy", type=str, choices=['MIDPOINT', 'VFG', 'SC', 'HYB'], default="VFG",
                         help="Placement policy")
     parser.add_argument("--max_len", type=float, default=0.16, help="Maximum length limit for a rod")
     parser.add_argument("--min_chunck_len", type=float, default=0.001, help="Minimum length limit for a rod")
