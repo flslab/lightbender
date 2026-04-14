@@ -131,20 +131,41 @@ class DroneProcessor:
             self._load_act()
 
     def _load_gt(self):
-        waypoints = self.yaml_config['waypoints']
-        if not len(waypoints):
-            waypoints.append(self.yaml_config['target'])
-            waypoints.append(self.yaml_config['target'])
-        waypoints = np.array(waypoints, dtype=float)  # [x, y, z, yaw, dt]
+        base_waypoints = self.yaml_config.get('waypoints', [])
+        if not len(base_waypoints):
+            base_waypoints.append(self.yaml_config['target'])
+            base_waypoints.append(self.yaml_config['target'])
+        base_waypoints = np.array(base_waypoints, dtype=float)  # [x, y, z, yaw, dt]
         if 'position_offset' in self.yaml_config:
             offset = np.array(self.yaml_config['position_offset'])
-            waypoints[:, 0:3] += offset
-        servos = np.array(self.yaml_config['servos'])  # [rod1, rod2]
+            base_waypoints[:, 0:3] += offset
+        base_servos = np.array(self.yaml_config.get('servos', []))  # [rod1, rod2]
 
+        iterations = self.yaml_config.get('iterations', 1)
+
+        waypoints = []
+        servos = []
         times = [0.0]
-        for i in range(1, len(waypoints)):
-            dt = waypoints[i, 4] if len(waypoints[i]) == 5 else self.yaml_config['delta_t']
-            times.append(times[-1] + dt)
+
+        for it in range(iterations):
+            for i in range(len(base_waypoints)):
+                wp = np.copy(base_waypoints[i])
+                sv = np.copy(base_servos[i]) if len(base_servos) > i else np.array([0.0, 0.0])
+                
+                if it == 0 and i == 0:
+                    waypoints.append(wp)
+                    servos.append(sv)
+                else:
+                    if i == 0:
+                        dt = 0.1 # 100ms gap
+                    else:
+                        dt = wp[4] if len(wp) == 5 else self.yaml_config.get('delta_t', 0.0)
+                    times.append(times[-1] + dt)
+                    waypoints.append(wp)
+                    servos.append(sv)
+
+        waypoints = np.array(waypoints)
+        servos = np.array(servos)
 
         self.gt_times = np.array(times)
         self.gt_duration = times[-1]
@@ -242,20 +263,41 @@ class DroneProcessor:
         return interp1d(sim_times, pos, axis=0, kind='linear', fill_value='extrapolate')
 
     def _load_act_from_yaml(self):
-        waypoints = self.act_yaml_config['waypoints']
-        if not len(waypoints):
-            waypoints.append(self.act_yaml_config['target'])
-            waypoints.append(self.act_yaml_config['target'])
-        waypoints = np.array(waypoints, dtype=float)  # [x, y, z, yaw, dt]
+        base_waypoints = self.act_yaml_config.get('waypoints', [])
+        if not len(base_waypoints):
+            base_waypoints.append(self.act_yaml_config['target'])
+            base_waypoints.append(self.act_yaml_config['target'])
+        base_waypoints = np.array(base_waypoints, dtype=float)  # [x, y, z, yaw, dt]
         if 'position_offset' in self.act_yaml_config:
             offset = np.array(self.act_yaml_config['position_offset'])
-            waypoints[:, 0:3] += offset
-        servos = np.array(self.act_yaml_config['servos'])  # [rod1, rod2]
+            base_waypoints[:, 0:3] += offset
+        base_servos = np.array(self.act_yaml_config.get('servos', []))  # [rod1, rod2]
 
+        iterations = self.act_yaml_config.get('iterations', 1)
+
+        waypoints = []
+        servos = []
         times = [0.0]
-        for i in range(1, len(waypoints)):
-            dt = waypoints[i, 4] if len(waypoints[i]) == 5 else self.act_yaml_config['delta_t']
-            times.append(times[-1] + dt)
+
+        for it in range(iterations):
+            for i in range(len(base_waypoints)):
+                wp = np.copy(base_waypoints[i])
+                sv = np.copy(base_servos[i]) if len(base_servos) > i else np.array([0.0, 0.0])
+                
+                if it == 0 and i == 0:
+                    waypoints.append(wp)
+                    servos.append(sv)
+                else:
+                    if i == 0:
+                        dt = 0.1 # 100ms gap
+                    else:
+                        dt = wp[4] if len(wp) == 5 else self.act_yaml_config.get('delta_t', 0.0)
+                    times.append(times[-1] + dt)
+                    waypoints.append(wp)
+                    servos.append(sv)
+
+        waypoints = np.array(waypoints)
+        servos = np.array(servos)
 
         self.act_times = np.array(times)
         
