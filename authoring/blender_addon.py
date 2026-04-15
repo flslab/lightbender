@@ -44,6 +44,16 @@ class LEDPointer(bpy.types.PropertyGroup):
 class DrawEraseGroupItem(bpy.types.PropertyGroup):
     """A single drone assigned to a draw/erase group"""
     obj_ptr: PointerProperty(type=bpy.types.Object)
+    direction: EnumProperty(
+        name="Direction",
+        description="Draw direction for this LightBender (set after generation)",
+        items=[
+            ('AUTO', "Auto", "Direction auto-determined by pathfinding"),
+            ('FORWARD', "Forward", "Draw from start (low index) to end (high index)"),
+            ('BACKWARD', "Backward", "Draw from end (high index) to start (low index)"),
+        ],
+        default='AUTO'
+    )
 
 
 class DrawEraseGroup(bpy.types.PropertyGroup):
@@ -179,10 +189,10 @@ class DroneProperties(bpy.types.PropertyGroup):
     deconflict_trajectory: EnumProperty(
         name="Trajectory Type",
         items=[
-            ('POINT_SPECIFIC', "Line of Sight", ""),
+            ('LINE_OF_SIGHT', "Line of Sight", ""),
             ('GLOBAL_CENTROID', "Global", "")
         ],
-        default='POINT_SPECIFIC'
+        default='LINE_OF_SIGHT'
     )
     deconflict_direction: EnumProperty(
         name="Move Direction",
@@ -316,6 +326,28 @@ def get_led_material():
     return mat
 
 
+def get_structure_material():
+    """Returns a dark-gray diffuse material for drone structure meshes (hidden from render)"""
+    mat_name = "Drone_Structure_Material"
+    mat = bpy.data.materials.get(mat_name)
+    if not mat:
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+
+        node_out = nodes.new(type='ShaderNodeOutputMaterial')
+        node_bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+
+        # Almost-black dark gray
+        node_bsdf.inputs['Base Color'].default_value = (0.02, 0.02, 0.02, 1.0)
+        node_bsdf.inputs['Roughness'].default_value = 0.8
+
+        links.new(node_bsdf.outputs['BSDF'], node_out.inputs['Surface'])
+    return mat
+
+
 # ------------------------------------------------------------------------
 #    Geometry & Setup Operator
 # ------------------------------------------------------------------------
@@ -386,6 +418,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         obj = bpy.data.objects.new("Ring_Structure", mesh)
         context.collection.objects.link(obj)
         obj.parent = drone_base
+        obj.data.materials.append(get_structure_material())
+        obj.hide_render = True
 
         # LEDs
         led_mat = get_led_material()
@@ -480,6 +514,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         obj = bpy.data.objects.new("Arc_Structure", mesh)
         context.collection.objects.link(obj)
         obj.parent = drone_base
+        obj.data.materials.append(get_structure_material())
+        obj.hide_render = True
 
         # LEDs
         led_mat = get_led_material()
@@ -582,6 +618,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
             bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
             rod1.parent = drone_base
+            rod1.data.materials.append(get_structure_material())
+            rod1.hide_render = True
 
             for i in range(26):
                 bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
@@ -601,6 +639,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
             bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
             rod2.parent = drone_base
+            rod2.data.materials.append(get_structure_material())
+            rod2.hide_render = True
 
             for i in range(24):
                 bpy.ops.mesh.primitive_cube_add(size=LED_SIZE)
@@ -780,6 +820,119 @@ class DRONE_OT_move_drone_in_group(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DRONE_OT_reverse_de_direction(bpy.types.Operator):
+    """Toggle draw direction and reverse existing keyframes in-place if animation is already generated"""
+    bl_idname = "drone.reverse_de_direction"
+    bl_label = "Reverse Direction"
+    bl_options = {'REGISTER', 'UNDO'}
+    group_index: IntProperty()
+    drone_index: IntProperty()
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        if self.group_index >= len(props.de_groups):
+            return {'CANCELLED'}
+        group = props.de_groups[self.group_index]
+        if self.drone_index >= len(group.drones):
+            return {'CANCELLED'}
+        item = group.drones[self.drone_index]
+        lb = item.obj_ptr
+        if not lb:
+            return {'CANCELLED'}
+
+        # Toggle the stored direction flag (AUTO is treated as FORWARD on first click)
+        if item.direction == 'BACKWARD':
+            item.direction = 'FORWARD'
+        else:
+            item.direction = 'BACKWARD'
+
+        # If keyframes have already been generated, reverse them in-place via a flip+swap.
+        # The lit window is [ptr0, ptr1].  Reversing means:
+        #   new_ptr0 = v_min + v_max - old_ptr1
+        #   new_ptr1 = v_min + v_max - old_ptr0
+        # This keeps all timing intact and only flips which end is swept first.
+        if "de_orig_vmin" not in lb:
+            return {'FINISHED'}  # No animation yet – direction flag alone is enough
+
+        if not (lb.animation_data and lb.animation_data.action):
+            return {'FINISHED'}
+
+        v_min = lb["de_orig_vmin"]
+        v_max = lb["de_orig_vmax"]
+        action = lb.animation_data.action
+        fc0 = action.fcurves.find('drone_props.led_pointers[0].value')
+        fc1 = action.fcurves.find('drone_props.led_pointers[1].value')
+
+        if not fc0 or not fc1:
+            return {'FINISHED'}
+
+        # Read ALL values before touching anything (avoids read-after-write errors)
+        frames0 = [kp.co.x for kp in fc0.keyframe_points]
+        frames1 = [kp.co.x for kp in fc1.keyframe_points]
+        new_vals0 = [v_min + v_max - fc1.evaluate(f) for f in frames0]
+        new_vals1 = [v_min + v_max - fc0.evaluate(f) for f in frames1]
+
+        # Write new values; Blender recalcs LINEAR handles after fc.update()
+        for kp, val in zip(fc0.keyframe_points, new_vals0):
+            kp.co.y = val
+            kp.handle_left.y = val
+            kp.handle_right.y = val
+        fc0.update()
+
+        for kp, val in zip(fc1.keyframe_points, new_vals1):
+            kp.co.y = val
+            kp.handle_left.y = val
+            kp.handle_right.y = val
+        fc1.update()
+
+        return {'FINISHED'}
+
+
+class DRONE_OT_clear_draw_erase(bpy.types.Operator):
+    """Remove generated draw/erase keyframes and restore original pointer values"""
+    bl_idname = "drone.clear_draw_erase"
+    bl_label = "Clear Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.drone_props
+
+        all_lbs = set()
+        for group in props.de_groups:
+            for item in group.drones:
+                if item.obj_ptr:
+                    all_lbs.add(item.obj_ptr)
+
+        cleared = 0
+        for lb in all_lbs:
+            # Remove pointer keyframe fcurves
+            if lb.animation_data and lb.animation_data.action:
+                for ptr_idx in [0, 1]:
+                    fc = lb.animation_data.action.fcurves.find(
+                        f'drone_props.led_pointers[{ptr_idx}].value')
+                    if fc:
+                        lb.animation_data.action.fcurves.remove(fc)
+
+            # Restore original pointer values saved during generation
+            if len(lb.drone_props.led_pointers) >= 2:
+                if "de_orig_vmin" in lb:
+                    lb.drone_props.led_pointers[0].value = lb["de_orig_vmin"]
+                    del lb["de_orig_vmin"]
+                if "de_orig_vmax" in lb:
+                    lb.drone_props.led_pointers[1].value = lb["de_orig_vmax"]
+                    del lb["de_orig_vmax"]
+            cleared += 1
+
+        # Reset all item directions to AUTO so next generation starts fresh
+        for group in props.de_groups:
+            for item in group.drones:
+                item.direction = 'AUTO'
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Cleared draw/erase animation from {cleared} LBs.")
+        return {'FINISHED'}
+
+
 class UL_DrawEraseGroups(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.prop(item, "name", text="", emboss=False)
@@ -789,7 +942,18 @@ class UL_DrawEraseGroups(bpy.types.UIList):
 class UL_DrawEraseDrones(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if item.obj_ptr:
-            layout.label(text=item.obj_ptr.name, icon='LIGHT')
+            row = layout.row(align=True)
+            row.label(text=item.obj_ptr.name, icon='LIGHT')
+            # Show direction as an icon; clicking toggles FORWARD ↔ BACKWARD
+            if item.direction == 'FORWARD':
+                dir_icon = 'TRIA_RIGHT'
+            elif item.direction == 'BACKWARD':
+                dir_icon = 'TRIA_LEFT'
+            else:  # AUTO — not yet generated
+                dir_icon = 'QUESTION'
+            op = row.operator("drone.reverse_de_direction", text="", icon=dir_icon, emboss=False)
+            op.group_index = context.scene.drone_props.de_active_group_index
+            op.drone_index = index
         else:
             layout.label(text="<Missing Object>", icon='ERROR')
 
@@ -878,6 +1042,12 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
 
             lb_ranges[lb] = (v_min, v_max)
 
+            # Save originals once so Clear can restore them (don't overwrite on re-generate)
+            if "de_orig_vmin" not in lb:
+                lb["de_orig_vmin"] = v_min
+            if "de_orig_vmax" not in lb:
+                lb["de_orig_vmax"] = v_max
+
             # Remove old keyframes for pointers
             if lb.animation_data and lb.animation_data.action:
                 fc1 = lb.animation_data.action.fcurves.find('drone_props.led_pointers[0].value')
@@ -902,7 +1072,9 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
             real_g_idx = 0 if is_wrap_iteration else g_idx
 
             group = props.de_groups[real_g_idx]
-            valid_lbs = [item.obj_ptr for item in group.drones if item.obj_ptr]
+            valid_pairs = [(item, item.obj_ptr) for item in group.drones if item.obj_ptr]
+            valid_lbs = [pair[1] for pair in valid_pairs]
+            valid_items = [pair[0] for pair in valid_pairs]
             if not valid_lbs: continue
 
             if is_wrap_iteration:
@@ -914,48 +1086,55 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
 
             # --- DRAW PHASE ---
             if group.draw_mode == 'SEQUENTIAL':
-                for i, lb in enumerate(valid_lbs):
+                for i, (lb_item, lb) in enumerate(valid_pairs):
                     v_min, v_max = lb_ranges[lb]
                     p0, pmax = get_endpoints(lb, v_min, v_max)
                     if not p0:
                         directions.append("FORWARD")
                         continue
 
-                    # Heuristic Pathfinding based on active bounds
-                    if i == 0:
-                        if prev_connected_end:
-                            d0 = (p0 - prev_connected_end).length
-                            dm = (pmax - prev_connected_end).length
-                            direction = "FORWARD" if d0 < dm else "BACKWARD"
-                            connected_end = pmax if direction == "FORWARD" else p0
-                        else:
-                            if len(valid_lbs) > 1:
-                                next_lb = valid_lbs[1]
-                                next_vmin, next_vmax = lb_ranges[next_lb]
-                                p0_next, pmax_next = get_endpoints(next_lb, next_vmin, next_vmax)
-                                if p0_next:
-                                    d00 = (p0 - p0_next).length
-                                    d0m = (p0 - pmax_next).length
-                                    dm0 = (pmax - p0_next).length
-                                    dmm = (pmax - pmax_next).length
-                                    min_d = min(d00, d0m, dm0, dmm)
-                                    if min_d in (d00, d0m):
-                                        direction = "BACKWARD"
-                                        connected_end = p0
+                    # Respect manual direction override; otherwise use pathfinding
+                    if lb_item.direction != 'AUTO':
+                        direction = lb_item.direction
+                        connected_end = pmax if direction == 'FORWARD' else p0
+                    else:
+                        # Heuristic Pathfinding based on active bounds
+                        if i == 0:
+                            if prev_connected_end:
+                                d0 = (p0 - prev_connected_end).length
+                                dm = (pmax - prev_connected_end).length
+                                direction = "FORWARD" if d0 < dm else "BACKWARD"
+                                connected_end = pmax if direction == "FORWARD" else p0
+                            else:
+                                if len(valid_lbs) > 1:
+                                    next_lb = valid_lbs[1]
+                                    next_vmin, next_vmax = lb_ranges[next_lb]
+                                    p0_next, pmax_next = get_endpoints(next_lb, next_vmin, next_vmax)
+                                    if p0_next:
+                                        d00 = (p0 - p0_next).length
+                                        d0m = (p0 - pmax_next).length
+                                        dm0 = (pmax - p0_next).length
+                                        dmm = (pmax - pmax_next).length
+                                        min_d = min(d00, d0m, dm0, dmm)
+                                        if min_d in (d00, d0m):
+                                            direction = "BACKWARD"
+                                            connected_end = p0
+                                        else:
+                                            direction = "FORWARD"
+                                            connected_end = pmax
                                     else:
                                         direction = "FORWARD"
                                         connected_end = pmax
                                 else:
                                     direction = "FORWARD"
                                     connected_end = pmax
-                            else:
-                                direction = "FORWARD"
-                                connected_end = pmax
-                    else:
-                        d0 = (p0 - connected_end).length
-                        dm = (pmax - connected_end).length
-                        direction = "FORWARD" if d0 < dm else "BACKWARD"
-                        connected_end = pmax if direction == "FORWARD" else p0
+                        else:
+                            d0 = (p0 - connected_end).length
+                            dm = (pmax - connected_end).length
+                            direction = "FORWARD" if d0 < dm else "BACKWARD"
+                            connected_end = pmax if direction == "FORWARD" else p0
+                        # Store auto-determined direction so it can be seen and reversed in the UI
+                        lb_item.direction = direction
 
                     directions.append(direction)
 
@@ -983,19 +1162,23 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
 
             else:  # SIMULTANEOUS
                 max_dur = 0
-                for lb in valid_lbs:
+                for lb_item, lb in valid_pairs:
                     v_min, v_max = lb_ranges[lb]
                     p0, pmax = get_endpoints(lb, v_min, v_max)
                     if not p0:
                         directions.append("FORWARD")
                         continue
 
-                    if prev_connected_end:
-                        d0 = (p0 - prev_connected_end).length
-                        dm = (pmax - prev_connected_end).length
-                        direction = "FORWARD" if d0 < dm else "BACKWARD"
+                    if lb_item.direction != 'AUTO':
+                        direction = lb_item.direction
                     else:
-                        direction = "FORWARD"
+                        if prev_connected_end:
+                            d0 = (p0 - prev_connected_end).length
+                            dm = (pmax - prev_connected_end).length
+                            direction = "FORWARD" if d0 < dm else "BACKWARD"
+                        else:
+                            direction = "FORWARD"
+                        lb_item.direction = direction
 
                     directions.append(direction)
                     dur = (v_max - v_min) / props.de_draw_speed
@@ -2185,6 +2368,29 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+# --- SVG to Layout ---
+        layout.label(text="SVG Transform and Place:", icon='GRAPH')
+        box = layout.box()
+
+        box.prop(props, "import_svg_filepath")
+        box.prop(props, "import_manifest_filepath")
+
+        row = box.row()
+        row.prop(props, "import_max_width")
+        row.prop(props, "import_max_length")
+
+        row = box.row()
+        row.prop(props, "import_cx")
+        row.prop(props, "import_cy")
+
+        row = box.row()
+        row.prop(props, "import_policy")
+        row.prop(props, "import_color")
+
+        box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
+
+        layout.separator()
+        
         # --- Draw & Erase Sequencer ---
         layout.label(text="Automatic Draw & Erase:", icon='GREASEPENCIL')
         box = layout.box()
@@ -2220,30 +2426,9 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         row.prop(props, "de_draw_color", text="Draw RGB")
         row.prop(props, "de_bg_color", text="Erase RGB")
 
-        box.operator("drone.generate_draw_erase", text="Generate Wipe Animation", icon='KEYINGSET')
-
-        layout.separator()
-
-        # --- SVG to Layout ---
-        layout.label(text="SVG Transform and Place:", icon='GRAPH')
-        box = layout.box()
-
-        box.prop(props, "import_svg_filepath")
-        box.prop(props, "import_manifest_filepath")
-
-        row = box.row()
-        row.prop(props, "import_max_width")
-        row.prop(props, "import_max_length")
-
-        row = box.row()
-        row.prop(props, "import_cx")
-        row.prop(props, "import_cy")
-
-        row = box.row()
-        row.prop(props, "import_policy")
-        row.prop(props, "import_color")
-
-        box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
+        row = box.row(align=True)
+        row.operator("drone.generate_draw_erase", text="Generate Wipe Animation", icon='KEYINGSET')
+        row.operator("drone.clear_draw_erase", text="", icon='TRASH')
 
         layout.separator()
 
@@ -2319,6 +2504,8 @@ classes = (
     DRONE_OT_add_drones_to_group,
     DRONE_OT_remove_drone_from_group,
     DRONE_OT_move_drone_in_group,
+    DRONE_OT_reverse_de_direction,
+    DRONE_OT_clear_draw_erase,
     DRONE_OT_generate_draw_erase,
     DRONE_OT_apply_error,
     DRONE_OT_reset_error,
