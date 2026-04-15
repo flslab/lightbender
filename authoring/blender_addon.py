@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "HA",
-    "version": (1, 14),
+    "version": (1, 15),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create light-element drones, animate LEDs with pointers, add position errors, and export YAML",
@@ -38,6 +38,27 @@ class LEDPointer(bpy.types.PropertyGroup):
         name="Color",
         description="Color expression for LEDs after this pointer",
         default="[0, 255, 0]"
+    )
+
+
+class DrawEraseGroupItem(bpy.types.PropertyGroup):
+    """A single drone assigned to a draw/erase group"""
+    obj_ptr: PointerProperty(type=bpy.types.Object)
+
+
+class DrawEraseGroup(bpy.types.PropertyGroup):
+    """A collection of drones representing a single stroke or letter"""
+    name: StringProperty(name="Group Name", default="Stroke")
+    drones: CollectionProperty(type=DrawEraseGroupItem)
+    active_drone_index: IntProperty(default=0)
+
+    draw_mode: EnumProperty(
+        name="Mode",
+        items=[
+            ('SEQUENTIAL', "Sequential", "Draw one after the other"),
+            ('SIMULTANEOUS', "Simultaneous", "Draw all at once (Branching)")
+        ],
+        default='SEQUENTIAL'
     )
 
 
@@ -179,7 +200,7 @@ class DroneProperties(bpy.types.PropertyGroup):
         description="Name of the mission",
         default="blender_mission"
     )
-    
+
     export_dark_room: BoolProperty(
         name="Dark Room",
         description="Run in dark room mode",
@@ -253,6 +274,17 @@ class DroneProperties(bpy.types.PropertyGroup):
         description="Export only at keyframe locations (adds dt to waypoints)",
         default=False
     )
+
+    # Draw & Erase Sequencer
+    de_groups: CollectionProperty(type=DrawEraseGroup)
+    de_active_group_index: IntProperty(default=0)
+    de_draw_speed: FloatProperty(name="Draw Speed (LEDs/s)", default=50.0, min=1.0)
+    de_erase_speed: FloatProperty(name="Erase Speed (LEDs/s)", default=50.0, min=1.0)
+    de_hold_time: FloatProperty(name="Hold Time (s)", default=1.0, min=0.0)
+    de_overlap: FloatProperty(name="Overlap Next (%)", default=0.0, min=0.0, max=100.0, subtype='PERCENTAGE')
+    de_loop: BoolProperty(name="Loop Animation", default=False)
+    de_draw_color: StringProperty(name="Draw Color", default="[255, 255, 255]")
+    de_bg_color: StringProperty(name="Background", default="[0, 0, 0]")
 
 
 # ------------------------------------------------------------------------
@@ -395,7 +427,6 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         # Mid Radius = 148.5mm = 0.1485m
         R = 0.1485
         W = 0.003
-        THICK = 0.003
 
         # Shift Factor: Move rotation center to the midpoint of the arc.
         Z_SHIFT = R
@@ -421,7 +452,6 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
 
             y_in = -r_in * math.cos(alpha)
             z_in = -r_in * math.sin(alpha) + Z_SHIFT
-
             y_out = -r_out * math.cos(alpha)
             z_out = -r_out * math.sin(alpha) + Z_SHIFT
 
@@ -429,7 +459,6 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             v2 = bm.verts.new((x_half, y_out, z_out))
             v3 = bm.verts.new((x_half, y_in, z_in))
             v4 = bm.verts.new((-x_half, y_in, z_in))
-
             current_verts = [v1, v2, v3, v4]
 
             if prev_verts:
@@ -660,7 +689,445 @@ class UL_DronePointerList(bpy.types.UIList):
 
 
 # ------------------------------------------------------------------------
-#    Position Error Feature
+#    Draw & Erase Sequencer Feature
+# ------------------------------------------------------------------------
+
+class DRONE_OT_add_de_group(bpy.types.Operator):
+    """Add a new Draw/Erase Group"""
+    bl_idname = "drone.add_de_group"
+    bl_label = "Add Group"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        item = props.de_groups.add()
+        item.name = f"Stroke {len(props.de_groups)}"
+        props.de_active_group_index = len(props.de_groups) - 1
+        return {'FINISHED'}
+
+
+class DRONE_OT_remove_de_group(bpy.types.Operator):
+    """Remove active Draw/Erase Group"""
+    bl_idname = "drone.remove_de_group"
+    bl_label = "Remove Group"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        idx = props.de_active_group_index
+        if len(props.de_groups) > 0:
+            props.de_groups.remove(idx)
+            props.de_active_group_index = max(0, idx - 1)
+        return {'FINISHED'}
+
+
+class DRONE_OT_add_drones_to_group(bpy.types.Operator):
+    """Add selected LBs to active Draw/Erase Group"""
+    bl_idname = "drone.add_drones_to_group"
+    bl_label = "Assign Selected"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        if not props.de_groups: return {'CANCELLED'}
+        group = props.de_groups[props.de_active_group_index]
+
+        added = 0
+        for obj in context.selected_objects:
+            if "servo_1" in obj and obj.name.startswith("lb"):
+                # Avoid duplicates
+                exists = any(item.obj_ptr == obj for item in group.drones)
+                if not exists:
+                    new_item = group.drones.add()
+                    new_item.obj_ptr = obj
+                    added += 1
+
+        self.report({'INFO'}, f"Added {added} drones to {group.name}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_remove_drone_from_group(bpy.types.Operator):
+    """Remove selected drone from the active group list"""
+    bl_idname = "drone.remove_drone_from_group"
+    bl_label = "Remove Drone"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        if not props.de_groups: return {'CANCELLED'}
+        group = props.de_groups[props.de_active_group_index]
+        idx = group.active_drone_index
+        if len(group.drones) > 0:
+            group.drones.remove(idx)
+            group.active_drone_index = max(0, idx - 1)
+        return {'FINISHED'}
+
+
+class DRONE_OT_move_drone_in_group(bpy.types.Operator):
+    """Move drone up or down in the sequence"""
+    bl_idname = "drone.move_drone_in_group"
+    bl_label = "Move Drone"
+    direction: EnumProperty(items=[('UP', "Up", ""), ('DOWN', "Down", "")])
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        if not props.de_groups: return {'CANCELLED'}
+        group = props.de_groups[props.de_active_group_index]
+        idx = group.active_drone_index
+
+        if self.direction == 'UP' and idx > 0:
+            group.drones.move(idx, idx - 1)
+            group.active_drone_index -= 1
+        elif self.direction == 'DOWN' and idx < len(group.drones) - 1:
+            group.drones.move(idx, idx + 1)
+            group.active_drone_index += 1
+        return {'FINISHED'}
+
+
+class UL_DrawEraseGroups(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.prop(item, "name", text="", emboss=False)
+        layout.prop(item, "draw_mode", text="")
+
+
+class UL_DrawEraseDrones(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if item.obj_ptr:
+            layout.label(text=item.obj_ptr.name, icon='LIGHT')
+        else:
+            layout.label(text="<Missing Object>", icon='ERROR')
+
+
+def get_endpoints(lb_obj, v_min, v_max):
+    """Helper to find the 3D coordinates of the active ends of a LightBender"""
+    leds = []
+
+    def find_leds(obj):
+        if "led_index" in obj: leds.append(obj)
+        for c in obj.children: find_leds(c)
+
+    find_leds(lb_obj)
+    if not leds: return None, None
+    leds.sort(key=lambda x: x["led_index"])
+
+    idx_min = max(0, min(len(leds) - 1, int(round(v_min))))
+    idx_max = max(0, min(len(leds) - 1, int(round(v_max))))
+
+    return leds[idx_min].matrix_world.translation, leds[idx_max].matrix_world.translation
+
+
+def get_interpolated_value(time_dict, t):
+    """Linear interpolation helper for time folding"""
+    times = sorted(time_dict.keys())
+    if not times: return 0
+    if t <= times[0]: return time_dict[times[0]]
+    if t >= times[-1]: return time_dict[times[-1]]
+    for i in range(len(times) - 1):
+        t1, t2 = times[i], times[i + 1]
+        if t1 <= t <= t2:
+            v1, v2 = time_dict[t1], time_dict[t2]
+            return v1 + (v2 - v1) * (t - t1) / (t2 - t1)
+    return 0
+
+
+class DRONE_OT_generate_draw_erase(bpy.types.Operator):
+    """Automatically generate keyframes for drawing and erasing"""
+    bl_idname = "drone.generate_draw_erase"
+    bl_label = "Generate Draw/Erase Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+        fps = scene.render.fps
+
+        if not props.de_groups:
+            self.report({'WARNING'}, "No groups defined.")
+            return {'CANCELLED'}
+
+        # 1. Setup Data & Clean Existing Keys
+        all_lbs = set()
+        for group in props.de_groups:
+            for item in group.drones:
+                if item.obj_ptr:
+                    all_lbs.add(item.obj_ptr)
+
+        lb_ranges = {}
+
+        for lb in all_lbs:
+            N = lb.get("led_count", 50)
+
+            # Read existing bounds
+            if len(lb.drone_props.led_pointers) >= 2:
+                vals = [p.value for p in lb.drone_props.led_pointers]
+                v_min = min(vals)
+                v_max = max(vals)
+                while len(lb.drone_props.led_pointers) > 2:
+                    lb.drone_props.led_pointers.remove(len(lb.drone_props.led_pointers) - 1)
+            elif len(lb.drone_props.led_pointers) == 1:
+                v_min = 0.0
+                v_max = lb.drone_props.led_pointers[0].value
+                lb.drone_props.led_pointers.add()
+            else:
+                v_min = 0.0
+                v_max = float(N)
+                lb.drone_props.led_pointers.add()
+                lb.drone_props.led_pointers.add()
+
+            # Setup base and active colors
+            lb.drone_props.led_mode = 'POINTERS'
+            lb.drone_props.led_base_color = props.de_bg_color
+            lb.drone_props.led_pointers[0].color_expression = props.de_draw_color
+            lb.drone_props.led_pointers[1].color_expression = props.de_bg_color
+
+            lb_ranges[lb] = (v_min, v_max)
+
+            # Remove old keyframes for pointers
+            if lb.animation_data and lb.animation_data.action:
+                fc1 = lb.animation_data.action.fcurves.find('drone_props.led_pointers[0].value')
+                if fc1: lb.animation_data.action.fcurves.remove(fc1)
+                fc2 = lb.animation_data.action.fcurves.find('drone_props.led_pointers[1].value')
+                if fc2: lb.animation_data.action.fcurves.remove(fc2)
+
+        # 2. Time Logic & Pathfinding
+        current_time = 0.0
+        kf_commands = []  # List of (lb, pointer_index, time, value)
+
+        iterations = len(props.de_groups)
+        if props.de_loop and iterations > 0:
+            iterations += 1  # Add a wrap iteration
+
+        loop_time_point = 0.0
+
+        for g_idx in range(iterations):
+            prev_connected_end = None
+
+            is_wrap_iteration = (g_idx == len(props.de_groups))
+            real_g_idx = 0 if is_wrap_iteration else g_idx
+
+            group = props.de_groups[real_g_idx]
+            valid_lbs = [item.obj_ptr for item in group.drones if item.obj_ptr]
+            if not valid_lbs: continue
+
+            if is_wrap_iteration:
+                loop_time_point = current_time
+
+            group_start_time = current_time
+            group_draw_end = current_time
+            directions = []  # Store to replay in erase phase
+
+            # --- DRAW PHASE ---
+            if group.draw_mode == 'SEQUENTIAL':
+                for i, lb in enumerate(valid_lbs):
+                    v_min, v_max = lb_ranges[lb]
+                    p0, pmax = get_endpoints(lb, v_min, v_max)
+                    if not p0:
+                        directions.append("FORWARD")
+                        continue
+
+                    # Heuristic Pathfinding based on active bounds
+                    if i == 0:
+                        if prev_connected_end:
+                            d0 = (p0 - prev_connected_end).length
+                            dm = (pmax - prev_connected_end).length
+                            direction = "FORWARD" if d0 < dm else "BACKWARD"
+                            connected_end = pmax if direction == "FORWARD" else p0
+                        else:
+                            if len(valid_lbs) > 1:
+                                next_lb = valid_lbs[1]
+                                next_vmin, next_vmax = lb_ranges[next_lb]
+                                p0_next, pmax_next = get_endpoints(next_lb, next_vmin, next_vmax)
+                                if p0_next:
+                                    d00 = (p0 - p0_next).length
+                                    d0m = (p0 - pmax_next).length
+                                    dm0 = (pmax - p0_next).length
+                                    dmm = (pmax - pmax_next).length
+                                    min_d = min(d00, d0m, dm0, dmm)
+                                    if min_d in (d00, d0m):
+                                        direction = "BACKWARD"
+                                        connected_end = p0
+                                    else:
+                                        direction = "FORWARD"
+                                        connected_end = pmax
+                                else:
+                                    direction = "FORWARD"
+                                    connected_end = pmax
+                            else:
+                                direction = "FORWARD"
+                                connected_end = pmax
+                    else:
+                        d0 = (p0 - connected_end).length
+                        dm = (pmax - connected_end).length
+                        direction = "FORWARD" if d0 < dm else "BACKWARD"
+                        connected_end = pmax if direction == "FORWARD" else p0
+
+                    directions.append(direction)
+
+                    # Duration relative to actual range length
+                    dur = (v_max - v_min) / props.de_draw_speed
+                    if dur <= 0: dur = 0.01
+
+                    self.report({'INFO'}, f"{lb} {direction}.")
+
+                    if direction == "FORWARD":
+                        kf_commands.append((lb, 0, current_time, v_min))
+                        kf_commands.append((lb, 0, current_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_time, v_min))
+                        kf_commands.append((lb, 1, current_time + dur, v_max))
+                    else:
+                        kf_commands.append((lb, 0, current_time, v_max))
+                        kf_commands.append((lb, 0, current_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_time, v_max))
+                        kf_commands.append((lb, 1, current_time + dur, v_max))
+
+                    current_time += dur
+
+                group_draw_end = current_time
+                prev_connected_end = connected_end
+
+            else:  # SIMULTANEOUS
+                max_dur = 0
+                for lb in valid_lbs:
+                    v_min, v_max = lb_ranges[lb]
+                    p0, pmax = get_endpoints(lb, v_min, v_max)
+                    if not p0:
+                        directions.append("FORWARD")
+                        continue
+
+                    if prev_connected_end:
+                        d0 = (p0 - prev_connected_end).length
+                        dm = (pmax - prev_connected_end).length
+                        direction = "FORWARD" if d0 < dm else "BACKWARD"
+                    else:
+                        direction = "FORWARD"
+
+                    directions.append(direction)
+                    dur = (v_max - v_min) / props.de_draw_speed
+                    if dur <= 0: dur = 0.01
+                    max_dur = max(max_dur, dur)
+
+                    if direction == "FORWARD":
+                        kf_commands.append((lb, 0, current_time, v_min))
+                        kf_commands.append((lb, 0, current_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_time, v_min))
+                        kf_commands.append((lb, 1, current_time + dur, v_max))
+                    else:
+                        kf_commands.append((lb, 0, current_time, v_max))
+                        kf_commands.append((lb, 0, current_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_time, v_max))
+                        kf_commands.append((lb, 1, current_time + dur, v_max))
+
+                current_time += max_dur
+                group_draw_end = current_time
+                if valid_lbs:
+                    last_lb = valid_lbs[-1]
+                    l_vmin, l_vmax = lb_ranges[last_lb]
+                    p0, pmax = get_endpoints(last_lb, l_vmin, l_vmax)
+                    if p0: prev_connected_end = pmax
+
+            # --- ERASE PHASE ---
+            group_erase_start = group_draw_end + props.de_hold_time
+            current_erase_time = group_erase_start
+
+            if group.draw_mode == 'SEQUENTIAL':
+                for i, lb in enumerate(valid_lbs):
+                    direction = directions[i]
+                    v_min, v_max = lb_ranges[lb]
+                    dur = (v_max - v_min) / props.de_erase_speed
+                    if dur <= 0: dur = 0.01
+
+                    if direction == "FORWARD":
+                        kf_commands.append((lb, 0, current_erase_time, v_min))
+                        kf_commands.append((lb, 0, current_erase_time + dur, v_max))
+                        kf_commands.append((lb, 1, current_erase_time, v_max))
+                        kf_commands.append((lb, 1, current_erase_time + dur, v_max))
+                    else:
+                        kf_commands.append((lb, 0, current_erase_time, v_min))
+                        kf_commands.append((lb, 0, current_erase_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_erase_time, v_max))
+                        kf_commands.append((lb, 1, current_erase_time + dur, v_min))
+
+                    current_erase_time += dur
+                group_erase_end = current_erase_time
+            else:
+                max_erase_dur = 0
+                for i, lb in enumerate(valid_lbs):
+                    direction = directions[i]
+                    v_min, v_max = lb_ranges[lb]
+                    dur = (v_max - v_min) / props.de_erase_speed
+                    if dur <= 0: dur = 0.01
+                    max_erase_dur = max(max_erase_dur, dur)
+
+                    if direction == "FORWARD":
+                        kf_commands.append((lb, 0, current_erase_time, v_min))
+                        kf_commands.append((lb, 0, current_erase_time + dur, v_max))
+                        kf_commands.append((lb, 1, current_erase_time, v_max))
+                        kf_commands.append((lb, 1, current_erase_time + dur, v_max))
+                    else:
+                        kf_commands.append((lb, 0, current_erase_time, v_min))
+                        kf_commands.append((lb, 0, current_erase_time + dur, v_min))
+                        kf_commands.append((lb, 1, current_erase_time, v_max))
+                        kf_commands.append((lb, 1, current_erase_time + dur, v_min))
+
+                current_erase_time += max_erase_dur
+                group_erase_end = current_erase_time
+
+            if is_wrap_iteration:
+                break
+
+            overlap_sec = (group_erase_end - group_erase_start) * (props.de_overlap / 100.0)
+            current_time = group_erase_end - overlap_sec
+
+        # 3. Collapse Tracks and Handle Looping
+        tracks = {}
+        for lb, ptr_idx, t, val in kf_commands:
+            key = (lb, ptr_idx)
+            if key not in tracks: tracks[key] = {}
+            tracks[key][t] = val
+
+        if props.de_loop and loop_time_point > 0:
+            for key, time_dict in tracks.items():
+                v_loop = get_interpolated_value(time_dict, loop_time_point)
+                new_dict = {}
+                for t, val in time_dict.items():
+                    if t <= loop_time_point:
+                        new_dict[t] = val
+                    else:
+                        # Time folding wrap
+                        wrap_t = t - loop_time_point
+                        if wrap_t not in new_dict:
+                            new_dict[wrap_t] = val
+
+                new_dict[0.0] = v_loop
+                new_dict[loop_time_point] = v_loop
+                tracks[key] = new_dict
+
+            scene.frame_end = int(loop_time_point * fps)
+            scene.frame_start = 0
+        else:
+            max_t = 0
+            for td in tracks.values():
+                if td: max_t = max(max_t, max(td.keys()))
+            scene.frame_end = int(max_t * fps)
+
+        # 4. Insert Final Keyframes
+        for (lb, ptr_idx), time_dict in tracks.items():
+            if not lb.animation_data: lb.animation_data_create()
+            if not lb.animation_data.action: lb.animation_data.action = bpy.data.actions.new(name=f"{lb.name}_DE")
+
+            ptr = lb.drone_props.led_pointers[ptr_idx]
+            for t, val in sorted(time_dict.items()):
+                frame = int(round(t * fps))
+                ptr.value = val
+                ptr.keyframe_insert(data_path="value", frame=frame)
+
+            fc = lb.animation_data.action.fcurves.find(f'drone_props.led_pointers[{ptr_idx}].value')
+            if fc:
+                for kp in fc.keyframe_points:
+                    kp.interpolation = 'LINEAR'
+
+        self.report({'INFO'}, "Successfully generated draw/erase keyframes.")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+#    Position Error & Drift Simulator
 # ------------------------------------------------------------------------
 
 def revert_drone_error(obj):
@@ -855,14 +1322,14 @@ def revert_deconflict_stagger(obj):
         del obj["deconflict_orig_y"]
         del obj["deconflict_orig_z"]
         restored = True
-        
+
     if "deconflict_scale_factor" in obj:
         scale_factor = obj["deconflict_scale_factor"]
         if scale_factor > 0.0 and scale_factor != 1.0:
             inv_scale = 1.0 / scale_factor
             for ptr in obj.drone_props.led_pointers:
                 ptr.value = 25.0 + (ptr.value - 25.0) * inv_scale
-                
+
             if obj.animation_data and obj.animation_data.action:
                 for fc in obj.animation_data.action.fcurves:
                     if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
@@ -873,8 +1340,8 @@ def revert_deconflict_stagger(obj):
                         fc.update()
         del obj["deconflict_scale_factor"]
         restored = True
-        
     return restored
+
 
 class DRONE_OT_deconflict_stagger(bpy.types.Operator):
     """Call deconflict.py to stagger drones based on camera perspective"""
@@ -887,17 +1354,17 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         import subprocess
         import re
         import math
-        
+
         scene = context.scene
         props = scene.drone_props
-        
+
         cam = scene.camera
         if not cam:
             self.report({'ERROR'}, "No camera found in scene. Necessary for deconfliction.")
             return {'CANCELLED'}
-            
+
         cam_pos = cam.matrix_world.translation
-        
+
         # Gather drones
         points = []
         drones = []
@@ -906,18 +1373,18 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
             if m:
                 d_id = int(m.group(1))
                 drones.append(obj)
-                
+
                 # Save original if not already saved
                 if "deconflict_orig_x" not in obj:
                     obj["deconflict_orig_x"] = obj.location.x
                     obj["deconflict_orig_y"] = obj.location.y
                     obj["deconflict_orig_z"] = obj.location.z
-                
+
                 # Angles
                 a1 = obj.get("servo_1", 0.0)
                 a2 = obj.get("servo_2", 0.0)
                 yaw = math.degrees(obj.matrix_world.to_euler('XYZ').z)
-                
+
                 points.append({
                     'id': d_id,
                     'x': round(obj.location.x, 4),
@@ -930,11 +1397,11 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                     'yaw': yaw,
                     'max_length_limit': 0.16
                 })
-        
+
         if not points:
             self.report({'WARNING'}, "No lb# drones found.")
             return {'CANCELLED'}
-            
+
         import tempfile
         try:
             addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -943,7 +1410,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
         input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
         output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
-        
+
         deconflict_script = os.path.join(addon_dir, "deconflict.py")
         if not os.path.exists(deconflict_script):
             alt_path = "/Users/hamed/Documents/Holodeck/lightbender/authoring/deconflict.py"
@@ -952,7 +1419,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
             else:
                 self.report({'ERROR'}, f"Cannot find deconflict.py at {deconflict_script}")
                 return {'CANCELLED'}
-        
+
         # Write input YAML manually
         try:
             with open(input_yaml, 'w') as f:
@@ -971,7 +1438,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to write yaml: {e}")
             return {'CANCELLED'}
-            
+
         cmd_str = (
             f"python3 '{deconflict_script}' "
             f"--input_file '{input_yaml}' "
@@ -985,7 +1452,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
             f"--camera_pos {round(cam_pos.x, 4)} {round(cam_pos.y, 4)} {round(cam_pos.z, 4)} "
             f"--no_viz"
         )
-        
+
         try:
             # Use zsh login shell to ensure user's actual Python environment (with pandas, etc.) is loaded
             res = subprocess.run(["/bin/zsh", "-l", "-c", cmd_str], check=False, capture_output=True, text=True)
@@ -997,11 +1464,11 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to run script: {e}")
             return {'CANCELLED'}
-            
+
         if not os.path.exists(output_yaml):
             self.report({'ERROR'}, "No output yaml generated by deconflict.py")
             return {'CANCELLED'}
-            
+
         # Parse output safely
         out_points = {}
         curr_p = {}
@@ -1029,7 +1496,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to parse output: {e}")
             return {'CANCELLED'}
-            
+
         # Apply positions
         applied = 0
         for obj in drones:
@@ -1041,14 +1508,14 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                     obj.location.x = p.get('x', obj.location.x)
                     obj.location.y = p.get('y', obj.location.y)
                     obj.location.z = p.get('z', obj.location.z)
-                    
+
                     scale_factor = p.get('scale_factor', 1.0)
                     if scale_factor != 1.0:
                         obj["deconflict_scale_factor"] = scale_factor
                         # Scale pointers based on central index 25
                         for ptr in obj.drone_props.led_pointers:
                             ptr.value = 25.0 + (ptr.value - 25.0) * scale_factor
-                            
+
                         # Scale pointer keyframes
                         if obj.animation_data and obj.animation_data.action:
                             for fc in obj.animation_data.action.fcurves:
@@ -1058,19 +1525,19 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                                         kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * scale_factor
                                         kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * scale_factor
                                     fc.update()
-                    
+
                     applied += 1
-                    
+
         context.view_layer.update()
         self.report({'INFO'}, f"Staggered {applied} drones.")
-        
+
         # Cleanup
         try:
             if os.path.exists(input_yaml): os.remove(input_yaml)
             if os.path.exists(output_yaml): os.remove(output_yaml)
         except Exception:
             pass
-            
+
         return {'FINISHED'}
 
 
@@ -1244,7 +1711,7 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
         mission_name = scene.drone_props.export_mission_name.strip()
         if not mission_name:
             mission_name = scene.name.replace(' ', '_')
-            
+
         output_lines.append(f"name: {mission_name}")
         output_lines.append("drones:")
 
@@ -1295,6 +1762,7 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
 
                 # Capture Pointers
                 ptrs = [round(p.value, 2) for p in drone.drone_props.led_pointers]
+
                 pointer_data.append(f"[{', '.join(map(str, ptrs))}]")
 
                 if use_keyframes:
@@ -1368,13 +1836,13 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
 
         scene = context.scene
         props = scene.drone_props
-        
+
         # Select all lb# drones
         drones_to_export = []
         for obj in scene.objects:
             if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj:
                 drones_to_export.append(obj)
-                
+
         if not drones_to_export:
             self.report({'ERROR'}, "No lb# drones found in scene")
             return {'CANCELLED'}
@@ -1406,14 +1874,14 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
             activate
         end tell
         '''
-            
+
         try:
             subprocess.Popen(["osascript", "-e", apple_script])
             self.report({'INFO'}, "Exported and started orchestrator")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to run orchestrator: {e}")
             return {'CANCELLED'}
-        
+
         return {'FINISHED'}
 
 
@@ -1428,26 +1896,26 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         import subprocess
         import tempfile
         import json
-        
+
         scene = context.scene
         props = scene.drone_props
-        
+
         svg_path = bpy.path.abspath(props.import_svg_filepath)
         if not os.path.isfile(svg_path):
             self.report({'ERROR'}, f"SVG File not found: {svg_path}")
             return {'CANCELLED'}
-            
+
         # try:
         #     addon_dir = os.path.dirname(os.path.realpath(__file__))
         # except NameError:
         addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
-        
+
         temp_dir = tempfile.gettempdir()
         target_graph_yaml = os.path.join(temp_dir, "temp_target_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_target_layout.yaml")
-        
+
         # 1. Call transform.py
         cmd_transform = [
             "python3", f"'{transform_script}'",
@@ -1462,7 +1930,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         if res1.returncode != 0:
             self.report({'ERROR'}, f"Transform failed: {res1.stderr}")
             return {'CANCELLED'}
-            
+
         # 2. Call place.py
         cmd_place = [
             "python3", f"'{place_script}'",
@@ -1476,11 +1944,11 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         if res2.returncode != 0:
             self.report({'ERROR'}, f"Place failed: {res2.stderr}")
             return {'CANCELLED'}
-            
+
         if not os.path.exists(target_layout_yaml):
             self.report({'ERROR'}, "Placement layout file not generated")
             return {'CANCELLED'}
-            
+
         def load_yaml_safe(filepath):
             try:
                 # Use external Python to parse YAML and dump as JSON since Blender might lack PyYAML
@@ -1493,7 +1961,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
 
         layout_data = load_yaml_safe(target_layout_yaml)
         points = layout_data.get('points', [])
-        
+
         # 3. Process Manifest
         inventory = {'H': [], 'V': []}
         manifest_path = bpy.path.abspath(props.import_manifest_filepath)
@@ -1503,30 +1971,30 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
                 t = d.get('type')
                 if t in ('H', 'V'):
                     inventory[t].append(d['id'])
-        
+
         # 4. Angle Logic & Assignment
         def get_type_matches(a1, a2, l1, l2):
             def fits_H(a, b):
                 am = a % 360
                 bm = b % 360
-                
+
                 # type H: 0 <= angle_1 <= 180, 180 <= angle_2 <= 360
                 ok_a = (l1 == 0) or (0 <= am <= 180)
                 bs = 360 if bm == 0 else bm
-                ok_b = (l2 == 0) or (180 <= bs <= 360) 
-                
+                ok_b = (l2 == 0) or (180 <= bs <= 360)
+
                 if ok_a and ok_b: return (am, bs)
                 return None
-                
+
             def fits_V(a, b):
                 am = a % 360
                 bm = b % 360
-                
+
                 # type V: 90 <= angle_1 <= 270, 270 <= angle_2 <= 450
                 ok_a = (l1 == 0) or (90 <= am <= 270)
                 bs = bm if bm > 270 else bm + 360
                 ok_b = (l2 == 0) or (270 <= bs <= 450)
-                
+
                 if ok_a and ok_b: return (am, bs)
                 return None
 
@@ -1535,18 +2003,18 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
             if res_h: matches['H'] = (res_h[0], res_h[1], l1, l2, False)
             res_v = fits_V(a1, a2)
             if res_v: matches['V'] = (res_v[0], res_v[1], l1, l2, False)
-            
+
             # Allow swapping parameters
             res_h_s = fits_H(a2, a1)
             if res_h_s and 'H' not in matches: matches['H'] = (res_h_s[0], res_h_s[1], l2, l1, True)
             res_v_s = fits_V(a2, a1)
             if res_v_s and 'V' not in matches: matches['V'] = (res_v_s[0], res_v_s[1], l2, l1, True)
-            
+
             return matches
 
         assignments = [None] * len(points)
         created_counts = {'H': 0, 'V': 0}
-        
+
         ambiguous = []
         for i, pt in enumerate(points):
             matches = get_type_matches(pt['angle_1'], pt['angle_2'], pt['length_1'], pt['length_2'])
@@ -1555,19 +2023,19 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
                 assignments[i] = (t, matches[t])
             elif len(matches) == 0:
                 t = 'H' if len(inventory['H']) >= len(inventory['V']) else 'V'
-                assignments[i] = (t, (pt['angle_1']%360, pt['angle_2']%360, pt['length_1'], pt['length_2'], False))
+                assignments[i] = (t, (pt['angle_1'] % 360, pt['angle_2'] % 360, pt['length_1'], pt['length_2'], False))
             else:
                 ambiguous.append((i, matches))
-                
+
         # Handle ambiguous by assigning them to whichever type has most remaining inventory
         for i, matches in ambiguous:
             t = 'H' if len(inventory['H']) >= len(inventory['V']) else 'V'
             assignments[i] = (t, matches[t])
             if len(inventory[t]) > 0:
-                inventory[t].pop(0) # pop from front
+                inventory[t].pop(0)  # pop from front
             else:
                 created_counts[t] += 1
-            
+
         # Refill inventory arrays for actual generation since we mutated it
         inventory = {'H': [], 'V': []}
         if os.path.isfile(manifest_path):
@@ -1576,66 +2044,67 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
                 t = d.get('type')
                 if t in ('H', 'V'):
                     inventory[t].append(d['id'])
-            
+
         # 5. Spawn Drones
         warnings = []
         created_counts = {'H': 0, 'V': 0}
         for i, pt in enumerate(points):
             t, (a1, a2, l1, l2, swapped) = assignments[i]
-            
+
             if len(inventory[t]) > 0:
                 lb_id = inventory[t].pop(0)
             else:
                 created_counts[t] += 1
                 lb_id = f"lb_extra_{t}_{created_counts[t]}"
                 warnings.append(lb_id)
-                
+
             bpy.ops.drone.add_drone(drone_type=f'TYPE_{t}')
             obj = context.active_object
             obj.name = lb_id
-            
+
             obj.location = (pt['x'], pt['y'], pt['z'])
-            
+
             import math
             obj.rotation_euler.z = math.radians(pt['yaw'])
-            
+
             obj["servo_1"] = a1
             obj["servo_2"] = a2
-            
+
             obj.drone_props.led_mode = 'POINTERS'
             obj.drone_props.led_base_color = "[0, 0, 0]"
-            
+
             obj.drone_props.led_pointers.clear()
-            
+
             import_color = props.import_color
             max_len = pt.get('max_length_limit', 0.16)
-            
+
             # The length from middle to the tip of rods
             active_1 = round(25 * (l1 / max_len)) if max_len > 0 else 0
             active_2 = round(25 * (l2 / max_len)) if max_len > 0 else 0
-            
+
             p1 = obj.drone_props.led_pointers.add()
             p1.value = 25.0 - active_1
             p1.color_expression = import_color
-            
+
             p2 = obj.drone_props.led_pointers.add()
             p2.value = 25.0 + active_2
             p2.color_expression = "[0, 0, 0]"
-                
+
         if warnings:
-            self.report({'WARNING'}, f"Warning: {len(warnings)} LightBenders created with incremental IDs because manifest lacked enough.")
+            self.report({'WARNING'},
+                        f"Warning: {len(warnings)} LightBenders created with incremental IDs because manifest lacked enough.")
         else:
             self.report({'INFO'}, f"Successfully placed {len(points)} LightBenders from SVG.")
-            
+
         context.view_layer.update()
-        
+
         # Cleanup
         try:
             if os.path.exists(target_graph_yaml): os.remove(target_graph_yaml)
             if os.path.exists(target_layout_yaml): os.remove(target_layout_yaml)
         except Exception:
             pass
-            
+
         return {'FINISHED'}
 
 
@@ -1652,26 +2121,27 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
+        props = scene.drone_props
         obj = context.active_object
 
         # --- Drone Creation ---
         layout.label(text="Add LightBender:")
         row = layout.row()
-        row.prop(scene.drone_props, "drone_type", text="")
+        row.prop(props, "drone_type", text="")
 
         # Display Radius property strictly before creation if Ring is selected
-        if scene.drone_props.drone_type == 'TYPE_RING':
-            layout.prop(scene.drone_props, "ring_radius")
+        if props.drone_type == 'TYPE_RING':
+            layout.prop(props, "ring_radius")
 
-        row.operator("drone.add_drone", text="Create").drone_type = scene.drone_props.drone_type
+        row.operator("drone.add_drone", text="Create").drone_type = props.drone_type
 
         layout.separator()
 
         # --- Selected Drone Controls ---
         if obj and "servo_1" in obj:
-            props = obj.drone_props
-            is_semi = 'SEMI' in props.drone_type
-            is_ring = 'RING' in props.drone_type
+            obj_props = obj.drone_props
+            is_semi = 'SEMI' in obj_props.drone_type
+            is_ring = 'RING' in obj_props.drone_type
 
             layout.label(text=f"Selected: {obj.name}")
             col = layout.column(align=True)
@@ -1690,26 +2160,22 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
             layout.separator()
             layout.label(text="LED Configuration:")
-            layout.prop(props, "led_mode", text="Mode")
+            layout.prop(obj_props, "led_mode", text="Mode")
 
-            if props.led_mode == 'EXPRESSION':
-                layout.prop(props, "led_formula", text="")
+            if obj_props.led_mode == 'EXPRESSION':
+                layout.prop(obj_props, "led_formula", text="")
             else:
                 # Pointer Mode UI
                 box = layout.box()
                 box.label(text="Base Color (Start):")
-                box.prop(props, "led_base_color", text="")
-
+                box.prop(obj_props, "led_base_color", text="")
                 box.label(text="Pointers (Split Points):")
-
                 row = box.row()
-                row.template_list("UL_DronePointerList", "", props, "led_pointers", props, "active_pointer_index")
-
+                row.template_list("UL_DronePointerList", "", obj_props, "led_pointers", obj_props,
+                                  "active_pointer_index")
                 col = row.column(align=True)
                 col.operator("drone.add_pointer", icon='ADD', text="")
                 col.operator("drone.remove_pointer", icon='REMOVE', text="")
-
-                # Hint for usage
                 box.label(text="Pos | Right-Side Color", icon='INFO')
 
             layout.separator()
@@ -1719,25 +2185,64 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+        # --- Draw & Erase Sequencer ---
+        layout.label(text="Automatic Draw & Erase:", icon='GREASEPENCIL')
+        box = layout.box()
+
+        row = box.row()
+        row.template_list("UL_DrawEraseGroups", "", props, "de_groups", props, "de_active_group_index", rows=3)
+        col = row.column(align=True)
+        col.operator("drone.add_de_group", icon='ADD', text="")
+        col.operator("drone.remove_de_group", icon='REMOVE', text="")
+
+        if props.de_groups and props.de_active_group_index < len(props.de_groups):
+            act_grp = props.de_groups[props.de_active_group_index]
+            box.label(text=f"Drones in {act_grp.name}:")
+
+            row = box.row()
+            row.template_list("UL_DrawEraseDrones", "", act_grp, "drones", act_grp, "active_drone_index", rows=4)
+            col = row.column(align=True)
+            col.operator("drone.add_drones_to_group", icon='ADD', text="")
+            col.operator("drone.remove_drone_from_group", icon='REMOVE', text="")
+            col.separator()
+            col.operator("drone.move_drone_in_group", icon='TRIA_UP', text="").direction = 'UP'
+            col.operator("drone.move_drone_in_group", icon='TRIA_DOWN', text="").direction = 'DOWN'
+
+        box.separator()
+        box.label(text="Settings:")
+        box.prop(props, "de_draw_speed")
+        box.prop(props, "de_erase_speed")
+        box.prop(props, "de_hold_time")
+        box.prop(props, "de_overlap")
+        box.prop(props, "de_loop")
+
+        row = box.row(align=True)
+        row.prop(props, "de_draw_color", text="Draw RGB")
+        row.prop(props, "de_bg_color", text="Erase RGB")
+
+        box.operator("drone.generate_draw_erase", text="Generate Wipe Animation", icon='KEYINGSET')
+
+        layout.separator()
+
         # --- SVG to Layout ---
         layout.label(text="SVG Transform and Place:", icon='GRAPH')
         box = layout.box()
 
-        box.prop(scene.drone_props, "import_svg_filepath")
-        box.prop(scene.drone_props, "import_manifest_filepath")
-        
+        box.prop(props, "import_svg_filepath")
+        box.prop(props, "import_manifest_filepath")
+
         row = box.row()
-        row.prop(scene.drone_props, "import_max_width")
-        row.prop(scene.drone_props, "import_max_length")
-        
+        row.prop(props, "import_max_width")
+        row.prop(props, "import_max_length")
+
         row = box.row()
-        row.prop(scene.drone_props, "import_cx")
-        row.prop(scene.drone_props, "import_cy")
-        
+        row.prop(props, "import_cx")
+        row.prop(props, "import_cy")
+
         row = box.row()
-        row.prop(scene.drone_props, "import_policy")
-        row.prop(scene.drone_props, "import_color")
-        
+        row.prop(props, "import_policy")
+        row.prop(props, "import_color")
+
         box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
 
         layout.separator()
@@ -1747,7 +2252,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         box = layout.box()
 
         box.label(text="Static Error (YZ Plane):")
-        box.prop(scene.drone_props, "error_distance")
+        box.prop(props, "error_distance")
         row = box.row(align=True)
         row.operator("drone.apply_error", text="Apply Static Error")
         row.operator("drone.reset_error", text="Reset Static")
@@ -1755,9 +2260,9 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         box.separator()
 
         box.label(text="Dynamic Drift (XYZ):")
-        box.prop(scene.drone_props, "drift_xy", text="Max Drift XY")
-        box.prop(scene.drone_props, "drift_z", text="Max Drift Z")
-        box.prop(scene.drone_props, "drift_speed", text="Wave Scale (Slower=Higher)")
+        box.prop(props, "drift_xy", text="Max Drift XY")
+        box.prop(props, "drift_z", text="Max Drift Z")
+        box.prop(props, "drift_speed", text="Wave Scale (Slower=Higher)")
         row = box.row(align=True)
         row.operator("drone.apply_drift", text="Apply Drift")
         row.operator("drone.reset_drift", text="Reset Drift")
@@ -1767,28 +2272,28 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         # --- Deconfliction Simulator ---
         layout.label(text="Stagger:", icon='PARTICLES')
         box = layout.box()
-        
-        box.prop(scene.drone_props, "deconflict_overlap")
-        box.prop(scene.drone_props, "deconflict_downwash")
-        box.prop(scene.drone_props, "deconflict_selection")
-        box.prop(scene.drone_props, "deconflict_resolution")
-        box.prop(scene.drone_props, "deconflict_trajectory")
-        box.prop(scene.drone_props, "deconflict_direction")
-        
+
+        box.prop(props, "deconflict_overlap")
+        box.prop(props, "deconflict_downwash")
+        box.prop(props, "deconflict_selection")
+        box.prop(props, "deconflict_resolution")
+        box.prop(props, "deconflict_trajectory")
+        box.prop(props, "deconflict_direction")
+
         row = box.row(align=True)
         row.operator("drone.deconflict_stagger", text="Stagger")
         row.operator("drone.deconflict_reset", text="Reset Stagger")
-        
+
         layout.separator()
 
         # --- Export Config ---
         layout.label(text="Export Config:")
-        layout.prop(scene.drone_props, "export_mission_name")
-        layout.prop(scene.drone_props, "export_dark_room")
-        layout.prop(scene.drone_props, "export_at_keyframes")
+        layout.prop(props, "export_mission_name")
+        layout.prop(props, "export_dark_room")
+        layout.prop(props, "export_at_keyframes")
 
-        if not scene.drone_props.export_at_keyframes:
-            layout.prop(scene.drone_props, "export_rate")
+        if not props.export_at_keyframes:
+            layout.prop(props, "export_rate")
 
         layout.operator("drone.export_yaml", text="Export to YAML", icon='EXPORT')
         layout.operator("drone.export_and_illuminate", text="Export and Illuminate", icon='PLAY')
@@ -1800,11 +2305,21 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
 classes = (
     LEDPointer,
+    DrawEraseGroupItem,
+    DrawEraseGroup,
     DroneProperties,
     OBJECT_OT_add_drone,
     DRONE_OT_add_pointer,
     DRONE_OT_remove_pointer,
     UL_DronePointerList,
+    UL_DrawEraseGroups,
+    UL_DrawEraseDrones,
+    DRONE_OT_add_de_group,
+    DRONE_OT_remove_de_group,
+    DRONE_OT_add_drones_to_group,
+    DRONE_OT_remove_drone_from_group,
+    DRONE_OT_move_drone_in_group,
+    DRONE_OT_generate_draw_erase,
     DRONE_OT_apply_error,
     DRONE_OT_reset_error,
     DRONE_OT_apply_drift,
