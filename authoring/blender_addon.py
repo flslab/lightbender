@@ -296,6 +296,18 @@ class DroneProperties(bpy.types.PropertyGroup):
     de_draw_color: StringProperty(name="Draw Color", default="[255, 255, 255]")
     de_bg_color: StringProperty(name="Background", default="[0, 0, 0]")
 
+    # Depth Fly-In Feature
+    flyin_ref_distance: FloatProperty(name="Ref Distance", description="Distance of reference point from centroid behind LBs", default=2.0, min=0.1)
+    flyin_x_min: FloatProperty(name="X Min", default=-5.0)
+    flyin_x_max: FloatProperty(name="X Max", default=5.0)
+    flyin_y_min: FloatProperty(name="Y Min", default=-5.0)
+    flyin_y_max: FloatProperty(name="Y Max", default=5.0)
+    flyin_z_min: FloatProperty(name="Z Min", default=-5.0)
+    flyin_z_max: FloatProperty(name="Z Max", default=5.0)
+    flyin_outward_duration: FloatProperty(name="Outward Duration(s)", default=2.0, min=0.1)
+    flyin_hold_duration: FloatProperty(name="Hold Duration(s)", default=0.5, min=0.0)
+    flyin_inward_duration: FloatProperty(name="Inward Duration(s)", default=3.0, min=0.1)
+
 
 # ------------------------------------------------------------------------
 #    Material Helper
@@ -2292,6 +2304,231 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
+#    Depth Fly-In Feature
+# ------------------------------------------------------------------------
+
+class DRONE_OT_generate_flyin(bpy.types.Operator):
+    """Generate fly-in exploded assembly animation"""
+    bl_idname = "drone.generate_flyin"
+    bl_label = "Generate Fly-In"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import re
+        from mathutils import Vector
+        from bpy_extras.object_utils import world_to_camera_view
+        
+        scene = context.scene
+        props = scene.drone_props
+        cam = scene.camera
+        if not cam:
+            self.report({'ERROR'}, "A camera is required for Depth Fly-In.")
+            return {'CANCELLED'}
+
+        # Get target drones (lb*)
+        lbs = [obj for obj in scene.objects if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+        if not lbs:
+            self.report({'WARNING'}, "No LightBenders found.")
+            return {'CANCELLED'}
+
+        # Calculate Centroid
+        centroid = Vector((0.0, 0.0, 0.0))
+        for lb in lbs:
+            centroid += lb.matrix_world.translation
+        centroid /= len(lbs)
+
+        # Camera Look Vector (+Z in local space)
+        cam_z = cam.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
+        cam_z.normalize()
+
+        # Reference Point
+        ref_point = centroid - cam_z * props.flyin_ref_distance
+
+        orig_positions = {}
+        closest_lb = None
+        min_depth = float('inf')
+
+        for lb in lbs:
+            pos = lb.matrix_world.translation
+            orig_positions[lb] = pos.copy()
+            cam_to_lb = pos - cam.matrix_world.translation
+            depth = cam_to_lb.dot(cam_z)
+            if depth < min_depth:
+                min_depth = depth
+                closest_lb = lb
+
+        if not closest_lb:
+            return {'CANCELLED'}
+
+        # Bounding box constraints
+        b_min = Vector((props.flyin_x_min, props.flyin_y_min, props.flyin_z_min))
+        b_max = Vector((props.flyin_x_max, props.flyin_y_max, props.flyin_z_max))
+
+        # We need a uniform scale K that keeps everything in bounds.
+        # Find maximum K such that all LBs remain in bounding box
+        k_target = 1000.0  # start with a large upper bound
+        for lb in lbs:
+            v_i = orig_positions[lb] - ref_point
+            # We check intersection with all 6 planes for this particular ray
+            t_candidates = []
+            for i in range(3):
+                if abs(v_i[i]) > 1e-6:
+                    t1 = (b_min[i] - ref_point[i]) / v_i[i]
+                    t2 = (b_max[i] - ref_point[i]) / v_i[i]
+                    if t1 > 1.0: t_candidates.append(t1)
+                    if t2 > 1.0: t_candidates.append(t2)
+            if t_candidates:
+                k_target = min(k_target, min(t_candidates))
+
+        if k_target < 1.0:
+            k_target = 1.0
+
+        # Now we apply this k_target to all LBs and check/adjust for visibility.
+        outward_positions = {}
+        for lb in lbs:
+            v_dir = orig_positions[lb] - ref_point
+            curr_pos = ref_point + k_target * v_dir
+            
+            # Check visibility and adjust "ray" to push outward
+            is_visible = True
+            adjust_iters = 0
+            
+            while is_visible and adjust_iters < 50:
+                co_ndc = world_to_camera_view(scene, cam, curr_pos)
+                if co_ndc.z < 0 or co_ndc.x < -0.1 or co_ndc.x > 1.1 or co_ndc.y < -0.1 or co_ndc.y > 1.1:
+                    is_visible = False
+                    break
+                
+                # Push outwards from camera center (NDC 0.5, 0.5)
+                push_vector = Vector((co_ndc.x - 0.5, co_ndc.y - 0.5, 0.0))
+                if push_vector.length < 1e-4:
+                    push_vector = Vector((1.0, 0.0, 0.0))
+                push_vector.normalize()
+                push_vector *= 0.1  # Step size in NDC
+                
+                # Move curr_pos locally along camera X/Y
+                cam_x = cam.matrix_world.to_3x3() @ Vector((1.0, 0.0, 0.0))
+                cam_y = cam.matrix_world.to_3x3() @ Vector((0.0, 1.0, 0.0))
+                
+                curr_pos += cam_x * push_vector.x * max(0.1, co_ndc.z)
+                curr_pos += cam_y * push_vector.y * max(0.1, co_ndc.z)
+                
+                adjust_iters += 1
+            
+            # Clamp to bounds strictly after adjustments
+            curr_pos.x = max(b_min.x, min(b_max.x, curr_pos.x))
+            curr_pos.y = max(b_min.y, min(b_max.y, curr_pos.y))
+            curr_pos.z = max(b_min.z, min(b_max.z, curr_pos.z))
+            
+            outward_positions[lb] = curr_pos
+
+        # Generate Animation
+        fps = scene.render.fps
+        t_start = 0.0
+        t_out = props.flyin_outward_duration
+        t_hold = t_out + props.flyin_hold_duration
+        t_in = t_hold + props.flyin_inward_duration
+
+        for lb in lbs:
+            if not lb.animation_data: lb.animation_data_create()
+            if not lb.animation_data.action: lb.animation_data.action = bpy.data.actions.new(name=f"{lb.name}_FlyIn")
+            
+            # Save original position to property so we can clear
+            if "flyin_orig_x" not in lb:
+                lb["flyin_orig_x"] = orig_positions[lb].x
+                lb["flyin_orig_y"] = orig_positions[lb].y
+                lb["flyin_orig_z"] = orig_positions[lb].z
+
+            out_pos = outward_positions[lb]
+            orig_pos = orig_positions[lb]
+
+            # Clear existing location fcurves
+            action = lb.animation_data.action
+            for i in range(3):
+                fc = action.fcurves.find('location', index=i)
+                if fc: action.fcurves.remove(fc)
+
+            # Insert keys
+            lb.location = orig_pos
+            lb.keyframe_insert(data_path="location", frame=max(1, int(t_start * fps)))
+            
+            lb.location = out_pos
+            lb.keyframe_insert(data_path="location", frame=max(1, int(t_out * fps)))
+            lb.keyframe_insert(data_path="location", frame=max(1, int(t_hold * fps)))
+            
+            lb.location = orig_pos
+            lb.keyframe_insert(data_path="location", frame=max(1, int(t_in * fps)))
+
+            # Edit pointer expressions
+            if lb.drone_props.led_mode == 'POINTERS':
+                # Base Color
+                base_expr = lb.drone_props.led_base_color
+                if "flyin_orig_base" not in lb:
+                    lb["flyin_orig_base"] = base_expr
+                match_base = re.search(r"\((.*?)\) if t >= \d+\.?\d* else \[0, \s*0, \s*0\]", base_expr)
+                if match_base: base_expr = match_base.group(1)
+                lb.drone_props.led_base_color = f"({base_expr}) if t >= {t_hold} else [0, 0, 0]"
+
+                for ptr in lb.drone_props.led_pointers:
+                    orig_expr = ptr.color_expression
+                    if "flyin_orig_expr" not in ptr:
+                        ptr["flyin_orig_expr"] = orig_expr
+                    match = re.search(r"\((.*?)\) if t >= \d+\.?\d* else \[0, \s*0, \s*0\]", orig_expr)
+                    if match: orig_expr = match.group(1)
+                    ptr.color_expression = f"({orig_expr}) if t >= {t_hold} else [0, 0, 0]"
+
+        scene.frame_start = 1
+        scene.frame_end = int(t_in * fps)
+        
+        self.report({'INFO'}, "Depth Fly-In generated.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_clear_flyin(bpy.types.Operator):
+    """Clear fly-in animation and restore LEDs"""
+    bl_idname = "drone.clear_flyin"
+    bl_label = "Clear Fly-In"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import re
+        lbs = [obj for obj in context.scene.objects if re.match(r"^lb\d+", obj.name)]
+        for lb in lbs:
+            # Restore location
+            if "flyin_orig_x" in lb:
+                lb.location.x = lb["flyin_orig_x"]
+                lb.location.y = lb["flyin_orig_y"]
+                lb.location.z = lb["flyin_orig_z"]
+                del lb["flyin_orig_x"]
+                del lb["flyin_orig_y"]
+                del lb["flyin_orig_z"]
+                
+                if lb.animation_data and lb.animation_data.action:
+                    for i in range(3):
+                        fc = lb.animation_data.action.fcurves.find('location', index=i)
+                        if fc: lb.animation_data.action.fcurves.remove(fc)
+
+            # Restore explicit property backup
+            if "flyin_orig_base" in lb:
+                lb.drone_props.led_base_color = lb["flyin_orig_base"]
+                del lb["flyin_orig_base"]
+            else:
+                match_base = re.search(r"\((.*?)\) if t >= \d+\.?\d* else \[0, \s*0, \s*0\]", lb.drone_props.led_base_color)
+                if match_base: lb.drone_props.led_base_color = match_base.group(1)
+
+            for ptr in lb.drone_props.led_pointers:
+                if "flyin_orig_expr" in ptr:
+                    ptr.color_expression = ptr["flyin_orig_expr"]
+                    del ptr["flyin_orig_expr"]
+                else:
+                    match = re.search(r"\((.*?)\) if t >= \d+\.?\d* else \[0, \s*0, \s*0\]", ptr.color_expression)
+                    if match: ptr.color_expression = match.group(1)
+
+        self.report({'INFO'}, "Fly-In animation cleared.")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
 #    UI Panel
 # ------------------------------------------------------------------------
 
@@ -2432,6 +2669,32 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         layout.separator()
 
+        # --- Depth Fly-In Feature ---
+        layout.label(text="Depth Fly-In:", icon='OUTLINER_OB_CAMERA')
+        box = layout.box()
+        
+        box.prop(props, "flyin_ref_distance")
+
+        row = box.row(align=True)
+        row.prop(props, "flyin_x_min", text="Min X")
+        row.prop(props, "flyin_x_max", text="Max X")
+        row = box.row(align=True)
+        row.prop(props, "flyin_y_min", text="Min Y")
+        row.prop(props, "flyin_y_max", text="Max Y")
+        row = box.row(align=True)
+        row.prop(props, "flyin_z_min", text="Min Z")
+        row.prop(props, "flyin_z_max", text="Max Z")
+
+        box.prop(props, "flyin_outward_duration")
+        box.prop(props, "flyin_hold_duration")
+        box.prop(props, "flyin_inward_duration")
+
+        row = box.row(align=True)
+        row.operator("drone.generate_flyin", text="Generate Fly-In", icon='KEYINGSET')
+        row.operator("drone.clear_flyin", text="", icon='TRASH')
+
+        layout.separator()
+
         # --- Error & Drift Simulator ---
         layout.label(text="Error & Drift Simulators:", icon='MOD_NOISE')
         box = layout.box()
@@ -2507,6 +2770,8 @@ classes = (
     DRONE_OT_reverse_de_direction,
     DRONE_OT_clear_draw_erase,
     DRONE_OT_generate_draw_erase,
+    DRONE_OT_generate_flyin,
+    DRONE_OT_clear_flyin,
     DRONE_OT_apply_error,
     DRONE_OT_reset_error,
     DRONE_OT_apply_drift,
