@@ -285,6 +285,35 @@ class DroneProperties(bpy.types.PropertyGroup):
         default=False
     )
 
+    # Morph Animation Settings
+    morph_svg_filepath: StringProperty(
+        name="Shape 2 SVG",
+        description="Path to the SVG file for the target shape",
+        subtype="FILE_PATH",
+        default=""
+    )
+    
+    morph_duration: FloatProperty(
+        name="Morph Duration",
+        description="Time it takes to move between shapes (sec)",
+        default=2.0,
+        min=0.1
+    )
+    
+    morph_hold_1: FloatProperty(
+        name="Hold Shape 1",
+        description="Time to hold the first shape before moving (sec)",
+        default=2.0,
+        min=0.0
+    )
+    
+    morph_hold_2: FloatProperty(
+        name="Hold Shape 2",
+        description="Time to hold the second shape after moving (sec)",
+        default=5.0,
+        min=0.0
+    )
+
     # Draw & Erase Sequencer
     de_groups: CollectionProperty(type=DrawEraseGroup)
     de_active_group_index: IntProperty(default=0)
@@ -1509,6 +1538,16 @@ class DRONE_OT_reset_drift(bpy.types.Operator):
 
 def revert_deconflict_stagger(obj):
     restored = False
+    restored_action = False
+
+    if "deconflict_orig_action" in obj:
+        action_name = obj["deconflict_orig_action"]
+        if action_name in bpy.data.actions:
+            obj.animation_data.action = bpy.data.actions[action_name]
+            restored_action = True
+            restored = True
+        del obj["deconflict_orig_action"]
+
     if "deconflict_orig_x" in obj and "deconflict_orig_y" in obj and "deconflict_orig_z" in obj:
         obj.location.x = obj["deconflict_orig_x"]
         obj.location.y = obj["deconflict_orig_y"]
@@ -1520,20 +1559,21 @@ def revert_deconflict_stagger(obj):
 
     if "deconflict_scale_factor" in obj:
         scale_factor = obj["deconflict_scale_factor"]
-        if scale_factor > 0.0 and scale_factor != 1.0:
-            inv_scale = 1.0 / scale_factor
-            for ptr in obj.drone_props.led_pointers:
-                ptr.value = 25.0 + (ptr.value - 25.0) * inv_scale
-
-            if obj.animation_data and obj.animation_data.action:
-                for fc in obj.animation_data.action.fcurves:
-                    if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
-                        for kp in fc.keyframe_points:
-                            kp.co.y = 25.0 + (kp.co.y - 25.0) * inv_scale
-                            kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * inv_scale
-                            kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * inv_scale
-                        fc.update()
         del obj["deconflict_scale_factor"]
+        if scale_factor > 0.0 and scale_factor != 1.0:
+            if not restored_action:
+                inv_scale = 1.0 / scale_factor
+                for ptr in obj.drone_props.led_pointers:
+                    ptr.value = 25.0 + (ptr.value - 25.0) * inv_scale
+
+                if obj.animation_data and obj.animation_data.action:
+                    for fc in obj.animation_data.action.fcurves:
+                        if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
+                            for kp in fc.keyframe_points:
+                                kp.co.y = 25.0 + (kp.co.y - 25.0) * inv_scale
+                                kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * inv_scale
+                                kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * inv_scale
+                            fc.update()
         restored = True
     return restored
 
@@ -1561,12 +1601,10 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         cam_pos = cam.matrix_world.translation
 
         # Gather drones
-        points = []
         drones = []
         for obj in scene.objects:
             m = re.match(r"^lb(\d+)", obj.name)
             if m:
-                d_id = int(m.group(1))
                 drones.append(obj)
 
                 # Save original if not already saved
@@ -1575,27 +1613,29 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                     obj["deconflict_orig_y"] = obj.location.y
                     obj["deconflict_orig_z"] = obj.location.z
 
-                # Angles
-                a1 = obj.get("servo_1", 0.0)
-                a2 = obj.get("servo_2", 0.0)
-                yaw = math.degrees(obj.matrix_world.to_euler('XYZ').z)
+                # Save original action if not already saved
+                if "deconflict_orig_action" not in obj:
+                    if obj.animation_data and obj.animation_data.action:
+                        orig_act = obj.animation_data.action.copy()
+                        orig_act.use_fake_user = True
+                        obj["deconflict_orig_action"] = orig_act.name
 
-                points.append({
-                    'id': d_id,
-                    'x': round(obj.location.x, 4),
-                    'y': round(obj.location.y, 4),
-                    'z': round(obj.location.z, 4),
-                    'length_1': 0.08,
-                    'length_2': 0.08,
-                    'angle_1': a1,
-                    'angle_2': a2,
-                    'yaw': yaw,
-                    'max_length_limit': 0.16
-                })
-
-        if not points:
+        if not drones:
             self.report({'WARNING'}, "No lb# drones found.")
             return {'CANCELLED'}
+
+        # Find frames with location keyframes
+        frames_to_stagger = set()
+        for obj in drones:
+            if obj.animation_data and obj.animation_data.action:
+                for fc in obj.animation_data.action.fcurves:
+                    if fc.data_path == "location":
+                        for kp in fc.keyframe_points:
+                            frames_to_stagger.add(int(round(kp.co.x)))
+
+        frames_to_stagger = sorted(list(frames_to_stagger))
+        if not frames_to_stagger:
+            frames_to_stagger = [scene.frame_current]
 
         import tempfile
         try:
@@ -1615,116 +1655,151 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                 self.report({'ERROR'}, f"Cannot find deconflict.py at {deconflict_script}")
                 return {'CANCELLED'}
 
-        # Write input YAML manually
-        try:
-            with open(input_yaml, 'w') as f:
-                f.write("points:\n")
-                for p in points:
-                    f.write(f"- id: {p['id']}\n")
-                    f.write(f"  x: {p['x']}\n")
-                    f.write(f"  y: {p['y']}\n")
-                    f.write(f"  z: {p['z']}\n")
-                    f.write(f"  length_1: {p['length_1']}\n")
-                    f.write(f"  length_2: {p['length_2']}\n")
-                    f.write(f"  angle_1: {p['angle_1']}\n")
-                    f.write(f"  angle_2: {p['angle_2']}\n")
-                    f.write(f"  yaw: {p['yaw']}\n")
-                    f.write(f"  max_length_limit: {p['max_length_limit']}\n")
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to write yaml: {e}")
-            return {'CANCELLED'}
+        original_frame = scene.frame_current
+        applied_at_least_once = False
 
-        cmd_str = (
-            f"python3 '{deconflict_script}' "
-            f"--input_file '{input_yaml}' "
-            f"--output_file '{output_yaml}' "
-            f"--threshold_overlap {props.deconflict_overlap} "
-            f"--threshold_downwash {props.deconflict_downwash} "
-            f"--selection_method {props.deconflict_selection} "
-            f"--resolution_order {props.deconflict_resolution} "
-            f"--trajectory_type {props.deconflict_trajectory} "
-            f"--move_direction {props.deconflict_direction} "
-            f"--camera_pos {round(cam_pos.x, 4)} {round(cam_pos.y, 4)} {round(cam_pos.z, 4)} "
-            f"--no_viz"
-        )
+        for frame in frames_to_stagger:
+            scene.frame_set(frame)
 
-        try:
-            # Use zsh login shell to ensure user's actual Python environment (with pandas, etc.) is loaded
-            res = subprocess.run(["/bin/zsh", "-l", "-c", cmd_str], check=False, capture_output=True, text=True)
-            if res.returncode != 0:
-                short_err = res.stderr.strip().split('\n')[-1] if res.stderr else "Unknown error"
-                self.report({'ERROR'}, f"Deconflict failed: {short_err}")
-                print(f"Deconflict error:\n{res.stderr}")
+            points = []
+            for obj in drones:
+                m = re.match(r"^lb(\d+)", obj.name)
+                d_id = int(m.group(1))
+
+                a1 = obj.get("servo_1", 0.0)
+                a2 = obj.get("servo_2", 0.0)
+                yaw = math.degrees(obj.matrix_world.to_euler('XYZ').z)
+
+                points.append({
+                    'id': d_id,
+                    'x': round(obj.location.x, 4),
+                    'y': round(obj.location.y, 4),
+                    'z': round(obj.location.z, 4),
+                    'length_1': 0.08,
+                    'length_2': 0.08,
+                    'angle_1': a1,
+                    'angle_2': a2,
+                    'yaw': yaw,
+                    'max_length_limit': 0.16
+                })
+
+            try:
+                with open(input_yaml, 'w') as f:
+                    f.write("points:\n")
+                    for p in points:
+                        f.write(f"- id: {p['id']}\n")
+                        f.write(f"  x: {p['x']}\n")
+                        f.write(f"  y: {p['y']}\n")
+                        f.write(f"  z: {p['z']}\n")
+                        f.write(f"  length_1: {p['length_1']}\n")
+                        f.write(f"  length_2: {p['length_2']}\n")
+                        f.write(f"  angle_1: {p['angle_1']}\n")
+                        f.write(f"  angle_2: {p['angle_2']}\n")
+                        f.write(f"  yaw: {p['yaw']}\n")
+                        f.write(f"  max_length_limit: {p['max_length_limit']}\n")
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to write yaml: {e}")
+                scene.frame_set(original_frame)
                 return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to run script: {e}")
-            return {'CANCELLED'}
 
-        if not os.path.exists(output_yaml):
-            self.report({'ERROR'}, "No output yaml generated by deconflict.py")
-            return {'CANCELLED'}
+            cmd_str = (
+                f"python3 '{deconflict_script}' "
+                f"--input_file '{input_yaml}' "
+                f"--output_file '{output_yaml}' "
+                f"--threshold_overlap {props.deconflict_overlap} "
+                f"--threshold_downwash {props.deconflict_downwash} "
+                f"--selection_method {props.deconflict_selection} "
+                f"--resolution_order {props.deconflict_resolution} "
+                f"--trajectory_type {props.deconflict_trajectory} "
+                f"--move_direction {props.deconflict_direction} "
+                f"--camera_pos {round(cam_pos.x, 4)} {round(cam_pos.y, 4)} {round(cam_pos.z, 4)} "
+                f"--no_viz"
+            )
 
-        # Parse output safely
-        out_points = {}
-        curr_p = {}
-        try:
-            with open(output_yaml, 'r') as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped.startswith('- id:'):
-                        if curr_p and 'id' in curr_p:
-                            out_points[curr_p['id']] = curr_p
-                        try:
-                            curr_p = {'id': int(stripped.split(':')[1].strip())}
-                        except ValueError:
-                            curr_p = {}
-                    elif stripped.startswith('x:') and curr_p:
-                        curr_p['x'] = float(stripped.split(':')[1].strip())
-                    elif stripped.startswith('y:') and curr_p:
-                        curr_p['y'] = float(stripped.split(':')[1].strip())
-                    elif stripped.startswith('z:') and curr_p:
-                        curr_p['z'] = float(stripped.split(':')[1].strip())
-                    elif stripped.startswith('scale_factor:') and curr_p:
-                        curr_p['scale_factor'] = float(stripped.split(':')[1].strip())
-            if curr_p and 'id' in curr_p:
-                out_points[curr_p['id']] = curr_p
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to parse output: {e}")
-            return {'CANCELLED'}
+            try:
+                res = subprocess.run(["/bin/zsh", "-l", "-c", cmd_str], check=False, capture_output=True, text=True)
+                if res.returncode != 0:
+                    short_err = res.stderr.strip().split('\n')[-1] if res.stderr else "Unknown error"
+                    self.report({'ERROR'}, f"Deconflict failed on frame {frame}: {short_err}")
+                    print(f"Deconflict error on frame {frame}:\n{res.stderr}")
+                    continue
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to run script: {e}")
+                scene.frame_set(original_frame)
+                return {'CANCELLED'}
 
-        # Apply positions
-        applied = 0
-        for obj in drones:
-            m = re.match(r"^lb(\d+)", obj.name)
-            if m:
+            if not os.path.exists(output_yaml):
+                continue
+
+            out_points = {}
+            curr_p = {}
+            try:
+                with open(output_yaml, 'r') as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped.startswith('- id:'):
+                            if curr_p and 'id' in curr_p:
+                                out_points[curr_p['id']] = curr_p
+                            try:
+                                curr_p = {'id': int(stripped.split(':')[1].strip())}
+                            except ValueError:
+                                curr_p = {}
+                        elif stripped.startswith('x:') and curr_p:
+                            curr_p['x'] = float(stripped.split(':')[1].strip())
+                        elif stripped.startswith('y:') and curr_p:
+                            curr_p['y'] = float(stripped.split(':')[1].strip())
+                        elif stripped.startswith('z:') and curr_p:
+                            curr_p['z'] = float(stripped.split(':')[1].strip())
+                        elif stripped.startswith('scale_factor:') and curr_p:
+                            curr_p['scale_factor'] = float(stripped.split(':')[1].strip())
+                if curr_p and 'id' in curr_p:
+                    out_points[curr_p['id']] = curr_p
+            except Exception as e:
+                print(f"Failed to parse output on frame {frame}: {e}")
+                continue
+
+            for obj in drones:
+                m = re.match(r"^lb(\d+)", obj.name)
                 d_id = int(m.group(1))
                 if d_id in out_points:
                     p = out_points[d_id]
                     obj.location.x = p.get('x', obj.location.x)
                     obj.location.y = p.get('y', obj.location.y)
                     obj.location.z = p.get('z', obj.location.z)
+                    
+                    if len(frames_to_stagger) > 1:
+                        obj.keyframe_insert(data_path="location", frame=frame)
 
                     scale_factor = p.get('scale_factor', 1.0)
                     if scale_factor != 1.0:
                         obj["deconflict_scale_factor"] = scale_factor
-                        # Scale pointers based on central index 25
                         for ptr in obj.drone_props.led_pointers:
                             ptr.value = 25.0 + (ptr.value - 25.0) * scale_factor
+                            if len(frames_to_stagger) > 1:
+                                ptr.keyframe_insert(data_path="value", frame=frame)
 
-                        # Scale pointer keyframes
-                        if obj.animation_data and obj.animation_data.action:
-                            for fc in obj.animation_data.action.fcurves:
-                                if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
-                                    for kp in fc.keyframe_points:
-                                        kp.co.y = 25.0 + (kp.co.y - 25.0) * scale_factor
-                                        kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * scale_factor
-                                        kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * scale_factor
-                                    fc.update()
+                        # Scale pointer keyframes manually only if single frame
+                        if len(frames_to_stagger) == 1:
+                            if obj.animation_data and obj.animation_data.action:
+                                for fc in obj.animation_data.action.fcurves:
+                                    if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
+                                        for kp in fc.keyframe_points:
+                                            kp.co.y = 25.0 + (kp.co.y - 25.0) * scale_factor
+                                            kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * scale_factor
+                                            kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * scale_factor
+                                        fc.update()
+                    applied_at_least_once = True
 
-                    applied += 1
+        scene.frame_set(original_frame)
 
-        context.view_layer.update()
-        self.report({'INFO'}, f"Staggered {applied} drones.")
+        if applied_at_least_once:
+            context.view_layer.update()
+            if len(frames_to_stagger) > 1:
+                self.report({'INFO'}, f"Staggered {len(drones)} drones across {len(frames_to_stagger)} keyframes.")
+            else:
+                self.report({'INFO'}, f"Staggered {len(drones)} drones.")
+        else:
+            self.report({'WARNING'}, "Stagger did not apply to any drones.")
 
         # Cleanup
         try:
@@ -1750,6 +1825,7 @@ class DRONE_OT_deconflict_reset(bpy.types.Operator):
                 if revert_deconflict_stagger(obj):
                     reset_count += 1
 
+        context.scene.frame_set(context.scene.frame_current)
         context.view_layer.update()
         self.report({'INFO'}, f"Reset stagger for {reset_count} drones.")
         return {'FINISHED'}
@@ -2529,6 +2605,270 @@ class DRONE_OT_clear_flyin(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
+#    Morph Animation
+# ------------------------------------------------------------------------
+
+class DRONE_OT_generate_morph(bpy.types.Operator):
+    """Morph from current scene layout to a new SVG"""
+    bl_idname = "drone.generate_morph"
+    bl_label = "Generate Morph"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import os
+        import math
+        import subprocess
+        import tempfile
+        import json
+        import re
+
+        scene = context.scene
+        props = scene.drone_props
+
+        svg_path = bpy.path.abspath(props.morph_svg_filepath)
+        if not os.path.isfile(svg_path):
+            self.report({'ERROR'}, f"Morph SVG not found: {svg_path}")
+            return {'CANCELLED'}
+
+        # Ensure we have camera
+        cam = scene.camera
+        if not cam:
+            self.report({'ERROR'}, "Camera required for deconflict stagger of morph target.")
+            return {'CANCELLED'}
+
+        lbs = []
+        for obj in scene.objects:
+            m = re.match(r"^lb(\d+)", obj.name)
+            if m and "servo_1" in obj:
+                d_id = int(m.group(1))
+                lbs.append((obj, d_id))
+
+        if not lbs:
+            self.report({'WARNING'}, "No existing LightBenders found in scene.")
+            return {'CANCELLED'}
+
+        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        temp_dir = tempfile.gettempdir()
+        target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
+        target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
+        p1_json = os.path.join(temp_dir, "morph_p1.json")
+        p2_json = os.path.join(temp_dir, "morph_p2.json")
+        match_out_json = os.path.join(temp_dir, "morph_match_out.json")
+
+        cmd_transform = [
+            "python3", f"'{os.path.join(addon_dir, 'transform.py')}'",
+            "-i", f"'{svg_path}'", "-o", f"'{target_graph_yaml}'",
+            "-mw", str(props.import_max_width), "-ml", str(props.import_max_length),
+            "-cy", str(props.import_cx), "-cz", str(props.import_cy)
+        ]
+        res1 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_transform)], capture_output=True, text=True)
+        if res1.returncode != 0:
+            self.report({'ERROR'}, f"Transform failed: {res1.stderr}")
+            return {'CANCELLED'}
+
+        cmd_place = [
+            "python3", f"'{os.path.join(addon_dir, 'place.py')}'",
+            "--input", f"'{target_graph_yaml}'", "--output", f"'{target_layout_yaml}'",
+            "--policy", props.import_policy, "--max_len", "0.16", "--no_viz"
+        ]
+        res2 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_place)], capture_output=True, text=True)
+        if res2.returncode != 0 or not os.path.exists(target_layout_yaml):
+            self.report({'ERROR'}, f"Place failed: {res2.stderr}")
+            return {'CANCELLED'}
+
+        def load_yaml_safe(filepath):
+            cmd = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{filepath}'"
+            return json.loads(subprocess.check_output(["/bin/zsh", "-l", "-c", cmd], text=True))
+
+        try:
+            layout_data = load_yaml_safe(target_layout_yaml)
+            target_points = layout_data.get('points', [])
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed parsing target layout: {e}")
+            return {'CANCELLED'}
+
+        p1_data = []
+        for obj, d_id in lbs:
+            d_type = 'H'
+            if 'TYPE_V' in obj.drone_props.drone_type: d_type = 'V'
+            elif 'SEMI_V' in obj.drone_props.drone_type: d_type = 'V'
+            
+            p1_data.append({
+                'id': d_id, 'name': obj.name,
+                'x': obj.location.x, 'y': obj.location.y, 'z': obj.location.z,
+                'type': d_type
+            })
+
+        def get_valid_types(l1, l2, a1, a2):
+            types = []
+            a1m, a2m = a1 % 360, a2 % 360
+            b2s = 360 if a2m == 0 else a2m
+            ok_h = ((l1 == 0) or (0 <= a1m <= 180)) and ((l2 == 0) or (180 <= b2s <= 360))
+            if ok_h: types.append('H')
+            
+            b2v = a2m if a2m > 270 else a2m + 360
+            ok_v = ((l1 == 0) or (90 <= a1m <= 270)) and ((l2 == 0) or (270 <= b2v <= 450))
+            if ok_v: types.append('V')
+
+            # Swapped
+            b1s = 360 if a1m == 0 else a1m
+            ok_hs = ((l2 == 0) or (0 <= a2m <= 180)) and ((l1 == 0) or (180 <= b1s <= 360))
+            if ok_hs and 'H' not in types: types.append('H')
+
+            b1v = a1m if a1m > 270 else a1m + 360
+            ok_vs = ((l2 == 0) or (90 <= a2m <= 270)) and ((l1 == 0) or (270 <= b1v <= 450))
+            if ok_vs and 'V' not in types: types.append('V')
+            
+            if not types: return ['H', 'V'] # fallback
+            return types
+
+        p2_data = []
+        for pt in target_points:
+            p2_data.append({
+                'x': pt['x'], 'y': pt['y'], 'z': pt['z'],
+                'length_1': pt.get('length_1', 0), 'length_2': pt.get('length_2', 0),
+                'angle_1': pt.get('angle_1', 0), 'angle_2': pt.get('angle_2', 0),
+                'yaw': pt.get('yaw', 0),
+                'max_length_limit': pt.get('max_length_limit', 0.16),
+                'types': get_valid_types(pt.get('length_1',0), pt.get('length_2',0), pt.get('angle_1',0), pt.get('angle_2',0))
+            })
+
+        with open(p1_json, 'w') as f: json.dump(p1_data, f)
+        with open(p2_json, 'w') as f: json.dump(p2_data, f)
+
+        cmd_match = ["python3", f"'{os.path.join(addon_dir, 'morph_match.py')}'", f"'{p1_json}'", f"'{p2_json}'", f"'{match_out_json}'"]
+        res_match = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_match)], capture_output=True, text=True)
+        if res_match.returncode != 0:
+            self.report({'ERROR'}, f"Match failed: {res_match.stderr}")
+            return {'CANCELLED'}
+
+        with open(match_out_json, 'r') as f:
+            assignments = json.load(f)
+
+        fps = scene.render.fps
+        f_start = 1
+        f_h1 = max(1, int(f_start + props.morph_hold_1 * fps))
+        f_end = max(1, int(f_h1 + props.morph_duration * fps))
+        scene.frame_end = int(f_end + props.morph_hold_2 * fps)
+
+        # Helper for angle mapping considering H/V constraints
+        def map_angles(d_type, a1, a2, l1, l2):
+            a1m, a2m = a1 % 360, a2 % 360
+            if d_type == 'H':
+                b2s = 360 if a2m == 0 else a2m
+                ok = ((l1 == 0) or (0 <= a1m <= 180)) and ((l2 == 0) or (180 <= b2s <= 360))
+                if ok: return (a1m, b2s, l1, l2)
+                b1s = 360 if a1m == 0 else a1m
+                ok_s = ((l2 == 0) or (0 <= a2m <= 180)) and ((l1 == 0) or (180 <= b1s <= 360))
+                if ok_s: return (a2m, b1s, l2, l1)
+            elif d_type == 'V':
+                b2v = a2m if a2m > 270 else a2m + 360
+                ok = ((l1 == 0) or (90 <= a1m <= 270)) and ((l2 == 0) or (270 <= b2v <= 450))
+                if ok: return (a1m, b2v, l1, l2)
+                b1v = a1m if a1m > 270 else a1m + 360
+                ok_s = ((l2 == 0) or (90 <= a2m <= 270)) and ((l1 == 0) or (270 <= b1v <= 450))
+                if ok_s: return (a2m, b1v, l2, l1)
+            return (a1, a2, l1, l2) # fallback
+
+        # Apply Keyframes
+        matched_ids = set()
+        for asn in assignments:
+            d_id = asn['drone_id']
+            matched_ids.add(d_id)
+            obj = next((o for o, idx in lbs if idx == d_id), None)
+            if not obj: continue
+            
+            d_type = next((d['type'] for d in p1_data if d['id'] == d_id), 'H')
+            t = asn['target']
+            
+            tz = t['z']
+            t_scale = 1.0
+                
+            ta1, ta2, tl1, tl2 = map_angles(d_type, t['angle_1'], t['angle_2'], t['length_1'], t['length_2'])
+            
+            # Start keys
+            obj.keyframe_insert(data_path="location", frame=f_start)
+            obj.keyframe_insert(data_path="location", frame=f_h1)
+            obj.keyframe_insert(data_path='rotation_euler', frame=f_start)
+            obj.keyframe_insert(data_path='rotation_euler', frame=f_h1)
+            obj.keyframe_insert(data_path='["servo_1"]', frame=f_start)
+            obj.keyframe_insert(data_path='["servo_1"]', frame=f_h1)
+            if "servo_2" in obj:
+                obj.keyframe_insert(data_path='["servo_2"]', frame=f_start)
+                obj.keyframe_insert(data_path='["servo_2"]', frame=f_h1)
+                
+            for ptr in obj.drone_props.led_pointers:
+                ptr.keyframe_insert(data_path="value", frame=f_start)
+                ptr.keyframe_insert(data_path="value", frame=f_h1)
+
+            # End keys
+            obj.location = (t['x'], t['y'], tz)
+            obj.rotation_euler.z = math.radians(t['yaw'])
+            obj["servo_1"] = ta1
+            if "servo_2" in obj: obj["servo_2"] = ta2
+            
+            ml = t['max_length_limit']
+            ac1 = round(25 * (tl1 / ml)) if ml > 0 else 0
+            ac2 = round(25 * (tl2 / ml)) if ml > 0 else 0
+            
+            # Scale active portions based on stagger's scale_factor if any
+            if len(obj.drone_props.led_pointers) >= 2:
+                p1 = obj.drone_props.led_pointers[0]
+                p2 = obj.drone_props.led_pointers[1]
+                
+                v1 = 25.0 - ac1
+                v2 = 25.0 + ac2
+                
+                v1_scaled = 25.0 + (v1 - 25.0) * t_scale
+                v2_scaled = 25.0 + (v2 - 25.0) * t_scale
+                
+                p1.value = v1_scaled
+                p2.value = v2_scaled
+
+            obj.keyframe_insert(data_path="location", frame=f_end)
+            obj.keyframe_insert(data_path='rotation_euler', frame=f_end)
+            obj.keyframe_insert(data_path='["servo_1"]', frame=f_end)
+            if "servo_2" in obj: obj.keyframe_insert(data_path='["servo_2"]', frame=f_end)
+            for ptr in obj.drone_props.led_pointers:
+                ptr.keyframe_insert(data_path="value", frame=f_end)
+
+            # Change LED colors across morph (simple: just set them to import_color if needed, or keep existing rules. 
+            # Often handled globally by the active led mode which checks t)
+            # Drones map directly, so base expression should remain. We don't overwrite the expression here unless needed.
+
+        # Retract non-matched drones
+        for obj, d_id in lbs:
+            if d_id not in matched_ids:
+                for ptr in obj.drone_props.led_pointers:
+                    ptr.keyframe_insert(data_path="value", frame=f_start)
+                    ptr.keyframe_insert(data_path="value", frame=f_h1)
+                    
+                    # Retract to 25.0 so they go dark
+                    ptr.value = 25.0
+                    ptr.keyframe_insert(data_path="value", frame=f_end)
+                    
+        self.report({'INFO'}, f"Morph Generated using {len(matched_ids)} drones.")
+        
+        # Make keyframes linear
+        for obj, _ in lbs:
+            if obj.animation_data and obj.animation_data.action:
+                for fc in obj.animation_data.action.fcurves:
+                    for kp in fc.keyframe_points:
+                        kp.interpolation = 'LINEAR'
+
+        context.view_layer.update()
+        scene.frame_set(f_start)
+
+        # Cleanup
+        for p in [p1_json, p2_json, match_out_json]:
+            try:
+                if os.path.exists(p): os.remove(p)
+            except: pass
+
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
 #    UI Panel
 # ------------------------------------------------------------------------
 
@@ -2625,6 +2965,21 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         row.prop(props, "import_color")
 
         box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
+
+        layout.separator()
+
+        # --- Morph Animation ---
+        layout.label(text="Morph Animation:", icon='MOD_ARMATURE')
+        box = layout.box()
+
+        box.prop(props, "morph_svg_filepath")
+        
+        row = box.row(align=True)
+        row.prop(props, "morph_hold_1", text="Hold 1")
+        row.prop(props, "morph_duration", text="Morph")
+        row.prop(props, "morph_hold_2", text="Hold 2")
+        
+        box.operator("drone.generate_morph", text="Generate Morph", icon='ANIM')
 
         layout.separator()
         
@@ -2779,6 +3134,7 @@ classes = (
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
     DRONE_OT_transform_and_place,
+    DRONE_OT_generate_morph,
     EXPORT_OT_drone_yaml,
     EXPORT_OT_export_and_illuminate,
     VIEW3D_PT_drone_swarm,
