@@ -14,7 +14,7 @@ import bmesh
 import random
 import re
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
-    CollectionProperty
+    CollectionProperty, FloatVectorProperty 
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
@@ -22,6 +22,15 @@ from mathutils import Vector, Matrix
 # ------------------------------------------------------------------------
 #    Properties & Data Classes
 # ------------------------------------------------------------------------
+
+class ColorItem(bpy.types.PropertyGroup):
+    color: FloatVectorProperty(
+        name="Color",
+        subtype='COLOR',
+        default=(1.0, 1.0, 1.0),
+        min=0.0, max=1.0
+    )
+
 
 class LEDPointer(bpy.types.PropertyGroup):
     """Defines a split point on the LED strip and the color following it"""
@@ -336,6 +345,24 @@ class DroneProperties(bpy.types.PropertyGroup):
     flyin_outward_duration: FloatProperty(name="Outward Duration(s)", default=2.0, min=0.1)
     flyin_hold_duration: FloatProperty(name="Hold Duration(s)", default=0.5, min=0.0)
     flyin_inward_duration: FloatProperty(name="Inward Duration(s)", default=3.0, min=0.1)
+
+    # Global LED Expressions
+    global_expr_preset: EnumProperty(
+        name="Preset",
+        description="Select a global animation preset",
+        items=[
+            ('STATIC', "Static Color", "Single static color for all LEDs"),
+            ('BLINK', "Global Blinking", "Cycles colors simultaneously"),
+            ('SPARKLE', "Random Sparkle", "Randomly sparkles with the first color"),
+            ('RAINBOW', "Rainbow Wheel", "Moving rainbow through all colors"),
+            ('CHASE', "Color Chase", "A moving block of color"),
+            ('BREATHE', "Breathe (Pulse)", "Smoothly pulses brightness"),
+        ],
+        default='BLINK'
+    )
+    global_expr_colors: CollectionProperty(type=ColorItem)
+    global_expr_active_color_index: IntProperty(default=0)
+    global_expr_speed: FloatProperty(name="Speed Multiplier", default=5.0, min=0.1)
 
 
 # ------------------------------------------------------------------------
@@ -999,6 +1026,171 @@ class UL_DrawEraseDrones(bpy.types.UIList):
             layout.label(text="<Missing Object>", icon='ERROR')
 
 
+class UL_GlobalColorList(bpy.types.UIList):
+    """List representation of global colors"""
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.prop(item, "color", text="")
+
+
+# ------------------------------------------------------------------------
+#    Global LED Expressions Feature
+# ------------------------------------------------------------------------
+
+class DRONE_OT_add_global_color(bpy.types.Operator):
+    """Add a new color to the global expression palette"""
+    bl_idname = "drone.add_global_color"
+    bl_label = "Add Color"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        props.global_expr_colors.add()
+        props.global_expr_active_color_index = len(props.global_expr_colors) - 1
+        return {'FINISHED'}
+
+
+class DRONE_OT_remove_global_color(bpy.types.Operator):
+    """Remove active color from global expression palette"""
+    bl_idname = "drone.remove_global_color"
+    bl_label = "Remove Color"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        idx = props.global_expr_active_color_index
+        if len(props.global_expr_colors) > 0:
+            props.global_expr_colors.remove(idx)
+            props.global_expr_active_color_index = max(0, idx - 1)
+        return {'FINISHED'}
+
+
+class DRONE_OT_preset_colors(bpy.types.Operator):
+    """Apply default colors for the selected preset"""
+    bl_idname = "drone.preset_colors"
+    bl_label = "Set Default Preset Colors"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+        props.global_expr_colors.clear()
+
+        preset = props.global_expr_preset
+        
+        def add_c(r, g, b):
+            c = props.global_expr_colors.add()
+            c.color = (r, g, b)
+
+        if preset == 'BLINK':
+            add_c(1.0, 0.0, 0.0)
+            add_c(0.0, 0.0, 1.0)
+        elif preset == 'SPARKLE':
+            add_c(0.8, 0.9, 1.0)
+        elif preset == 'RAINBOW':
+            add_c(1.0, 0.0, 0.0)
+            add_c(1.0, 0.5, 0.0)
+            add_c(1.0, 1.0, 0.0)
+            add_c(0.0, 1.0, 0.0)
+            add_c(0.0, 0.0, 1.0)
+            add_c(0.29, 0.0, 0.51)
+            add_c(0.56, 0.0, 1.0)
+        elif preset == 'CHASE':
+            add_c(0.0, 1.0, 0.0)
+            add_c(0.0, 0.1, 0.0)
+        elif preset == 'BREATHE':
+            add_c(1.0, 0.2, 0.5)
+        else:
+            add_c(1.0, 1.0, 1.0)
+
+        props.global_expr_active_color_index = 0
+        return {'FINISHED'}
+
+
+class DRONE_OT_apply_global_expression(bpy.types.Operator):
+    """Apply the global expression to LightBenders"""
+    bl_idname = "drone.apply_global_expression"
+    bl_label = "Apply Global Expression"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    apply_to_all: bpy.props.BoolProperty(default=False)
+
+    def execute(self, context):
+        import math
+        import re
+        scene = context.scene
+        props = scene.drone_props
+        
+        if not props.global_expr_colors:
+            self.report({'ERROR'}, "Please add at least one color to the palette.")
+            return {'CANCELLED'}
+
+        # Format colors into a valid python list string [ [r,g,b], [r,g,b] ]
+        c_list = []
+        for c in props.global_expr_colors:
+            r = int(c.color[0] * 255)
+            g = int(c.color[1] * 255)
+            b = int(c.color[2] * 255)
+            c_list.append(f"[{r}, {g}, {b}]")
+        
+        c_str = "[" + ", ".join(c_list) + "]"
+        c_len = len(c_list)
+        s = props.global_expr_speed
+        
+        preset = props.global_expr_preset
+        formula = ""
+        
+        if preset == 'STATIC':
+            formula = f"{c_str}[0]"
+        elif preset == 'BLINK':
+            formula = f"{c_str}[int(t * {s}) % {c_len}]"
+        elif preset == 'SPARKLE':
+            bg = "[0,0,0]" if c_len == 1 else f"{c_str}[1]"
+            formula = f"{c_str}[0] if (i * 123 + int(t * {s} * 10) * 456) % 100 > 60 else {bg}"
+        elif preset == 'RAINBOW':
+            formula = f"{c_str}[int((i * 0.5 + t * {s}) % {c_len})]"
+        elif preset == 'CHASE':
+            bg = "[0,0,0]" if c_len == 1 else f"{c_str}[1]"
+            formula = f"{c_str}[0] if int(i*0.5 - t*{s}) % 10 < 3 else {bg}"
+        elif preset == 'BREATHE':
+            r = int(props.global_expr_colors[0].color[0] * 255) if c_len > 0 else 255
+            g = int(props.global_expr_colors[0].color[1] * 255) if c_len > 0 else 255
+            b = int(props.global_expr_colors[0].color[2] * 255) if c_len > 0 else 255
+            m = f"(0.5 + 0.5 * math.sin(t * {s}))"
+            formula = f"[{r} * {m}, {g} * {m}, {b} * {m}]"
+
+        # Apply to drones
+        drones_to_affect = []
+        if self.apply_to_all:
+            for obj in scene.objects:
+                if re.match(r"^lb\d+", obj.name) and "servo_1" in obj:
+                    drones_to_affect.append(obj)
+        else:
+            for obj in context.selected_objects:
+                if re.match(r"^lb\d+", obj.name) and "servo_1" in obj:
+                    drones_to_affect.append(obj)
+                    
+        if not drones_to_affect:
+            self.report({'WARNING'}, "No matching drones found to apply.")
+            return {'CANCELLED'}
+
+        for lb in drones_to_affect:
+            ob_props = lb.drone_props
+            if ob_props.led_mode == 'EXPRESSION':
+                ob_props.led_formula = formula
+            else:
+                target_ptr = None
+                if ob_props.led_pointers:
+                    target_ptr = ob_props.led_pointers[0]
+                    for ptr in ob_props.led_pointers:
+                        compact_expr = ptr.color_expression.replace(" ", "")
+                        if compact_expr != "[0,0,0]":
+                            target_ptr = ptr
+                            break
+                    target_ptr.color_expression = formula
+                else:
+                    ob_props.led_base_color = formula
+                    
+        context.view_layer.update()
+        self.report({'INFO'}, f"Applied '{preset}' expression to {len(drones_to_affect)} LightBenders.")
+        return {'FINISHED'}
+
+
 def get_endpoints(lb_obj, v_min, v_max):
     """Helper to find the 3D coordinates of the active ends of a LightBender"""
     leds = []
@@ -1657,6 +1849,13 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
         original_frame = scene.frame_current
         applied_at_least_once = False
+
+        if len(frames_to_stagger) > 1:
+            for frame in frames_to_stagger:
+                scene.frame_set(frame)
+                for obj in drones:
+                    for ptr in obj.drone_props.led_pointers:
+                        ptr.keyframe_insert(data_path="value", frame=frame)
 
         for frame in frames_to_stagger:
             scene.frame_set(frame)
@@ -2943,9 +3142,21 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         else:
             layout.label(text="Select a drone to animate", icon='INFO')
 
-        layout.separator()
 
-# --- SVG to Layout ---
+class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Generative Layouts"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
+
+        # --- SVG to Layout ---
         layout.label(text="SVG Transform and Place:", icon='GRAPH')
         box = layout.box()
 
@@ -2966,7 +3177,19 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
 
-        layout.separator()
+
+class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Automated Animations"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
 
         # --- Morph Animation ---
         layout.label(text="Morph Animation:", icon='MOD_ARMATURE')
@@ -3048,7 +3271,52 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         row.operator("drone.generate_flyin", text="Generate Fly-In", icon='KEYINGSET')
         row.operator("drone.clear_flyin", text="", icon='TRASH')
 
-        layout.separator()
+
+class VIEW3D_PT_lb_global_leds(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Global LED Effects"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
+
+        # --- Global LED Expressions ---
+        layout.label(text="Global LED Expressions:", icon='SHADING_RENDERED')
+        box = layout.box()
+
+        box.prop(props, "global_expr_preset")
+
+        row = box.row()
+        row.template_list("UL_GlobalColorList", "", props, "global_expr_colors", props, "global_expr_active_color_index", rows=3)
+        col = row.column(align=True)
+        col.operator("drone.add_global_color", icon='ADD', text="")
+        col.operator("drone.remove_global_color", icon='REMOVE', text="")
+
+        box.operator("drone.preset_colors", text="Load Preset Colors", icon='COLOR')
+        box.prop(props, "global_expr_speed")
+
+        row = box.row(align=True)
+        row.operator("drone.apply_global_expression", text="Apply to Selected", icon='VIEW_PAN').apply_to_all = False
+        row.operator("drone.apply_global_expression", text="Apply to All", icon='SCENE_DATA').apply_to_all = True
+
+
+class VIEW3D_PT_lb_simulators(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Physics & Simulation"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
 
         # --- Error & Drift Simulator ---
         layout.label(text="Error & Drift Simulators:", icon='MOD_NOISE')
@@ -3087,7 +3355,19 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         row.operator("drone.deconflict_stagger", text="Stagger")
         row.operator("drone.deconflict_reset", text="Reset Stagger")
 
-        layout.separator()
+
+class VIEW3D_PT_lb_export(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Mission Export"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
 
         # --- Export Config ---
         layout.label(text="Export Config:")
@@ -3108,6 +3388,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
 classes = (
     LEDPointer,
+    ColorItem,
     DrawEraseGroupItem,
     DrawEraseGroup,
     DroneProperties,
@@ -3115,6 +3396,7 @@ classes = (
     DRONE_OT_add_pointer,
     DRONE_OT_remove_pointer,
     UL_DronePointerList,
+    UL_GlobalColorList,
     UL_DrawEraseGroups,
     UL_DrawEraseDrones,
     DRONE_OT_add_de_group,
@@ -3135,9 +3417,18 @@ classes = (
     DRONE_OT_deconflict_reset,
     DRONE_OT_transform_and_place,
     DRONE_OT_generate_morph,
+    DRONE_OT_add_global_color,
+    DRONE_OT_remove_global_color,
+    DRONE_OT_preset_colors,
+    DRONE_OT_apply_global_expression,
     EXPORT_OT_drone_yaml,
     EXPORT_OT_export_and_illuminate,
     VIEW3D_PT_drone_swarm,
+    VIEW3D_PT_lb_generative_layouts,
+    VIEW3D_PT_lb_automated_animations,
+    VIEW3D_PT_lb_global_leds,
+    VIEW3D_PT_lb_simulators,
+    VIEW3D_PT_lb_export,
 )
 
 
