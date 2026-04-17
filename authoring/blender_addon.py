@@ -1141,7 +1141,7 @@ class DRONE_OT_apply_global_expression(bpy.types.Operator):
             formula = f"{c_str}[int(t * {s}) % {c_len}]"
         elif preset == 'SPARKLE':
             bg = "[0,0,0]" if c_len == 1 else f"{c_str}[1]"
-            formula = f"{c_str}[0] if (i * 123 + int(t * {s} * 10) * 456) % 100 > 60 else {bg}"
+            formula = f"{c_str}[0] if random.random() > 0.7 else {bg}"
         elif preset == 'RAINBOW':
             formula = f"{c_str}[int((i * 0.5 + t * {s}) % {c_len})]"
         elif preset == 'CHASE':
@@ -2098,7 +2098,7 @@ def update_one_led(led, t, mode, base_expr, sorted_pointers, N):
                 break
 
     # Evaluate
-    ctx = {"i": i, "t": t, "N": N, "math": math}
+    ctx = {"i": i, "t": t, "N": N, "math": math, "random": random}
 
     try:
         raw_color = eval(active_formula, {}, ctx)
@@ -2183,6 +2183,11 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
             mission_name = scene.name.replace(' ', '_')
 
         output_lines.append(f"name: {mission_name}")
+        
+        if scene.camera:
+            cam_loc = scene.camera.matrix_world.translation
+            output_lines.append(f"camera: [{round(cam_loc.x, 4)}, {round(cam_loc.y, 4)}, {round(cam_loc.z, 4)}]")
+
         output_lines.append("drones:")
 
         for drone in drones_to_export:
