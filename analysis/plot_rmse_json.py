@@ -52,7 +52,7 @@ def plot_rmse_json(json_path, rename_map=None, xlim=None, ylim=None):
         plt.axhline(overall_comb_rmse, color='r', linestyle='--', linewidth=2, label='RMSE Illumination')
         
         # Annotate the line with the value
-        x_pos = args.annotate_x if args.annotate_x else xlim[1]
+        x_pos = args.annotate_x if args.annotate_x else timestamps[-1]
         plt.text(x_pos, overall_comb_rmse + 0.5, f'{overall_comb_rmse:.1f} mm', color='red', 
                  ha='right', va='bottom', fontsize=11, fontweight='bold')
 
