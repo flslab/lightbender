@@ -2193,14 +2193,14 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         try:
             addon_dir = os.path.dirname(os.path.realpath(__file__))
         except NameError:
-            addon_dir = "/Users/shuqinzhu/Documents/FLS_Research/lightbender/authoring"
+            addon_dir = "/authoring"
 
         input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
         output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
 
         deconflict_script = os.path.join(addon_dir, "deconflict.py")
         if not os.path.exists(deconflict_script):
-            alt_path = "/Users/shuqinzhu/Documents/FLS_Research/lightbender/authoring/deconflict.py"
+            alt_path = "/authoring/deconflict.py"
             if os.path.exists(alt_path):
                 deconflict_script = alt_path
             else:
@@ -2984,7 +2984,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         # try:
         #     addon_dir = os.path.dirname(os.path.realpath(__file__))
         # except NameError:
-        addon_dir = "/Users/shuqinzhu/Documents/FLS_Research/lightbender/authoring"
+        addon_dir = "/authoring"
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
 
@@ -3452,7 +3452,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
             self.report({'WARNING'}, "No existing LightBenders found in scene.")
             return {'CANCELLED'}
 
-        addon_dir = "/Users/shuqinzhu/Documents/FLS_Research/lightbender/authoring"
+        addon_dir = "/authoring"
         temp_dir = tempfile.gettempdir()
         target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
