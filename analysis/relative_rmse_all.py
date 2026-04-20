@@ -111,7 +111,7 @@ def set_axes_equal(ax, points):
 # ==========================================
 
 class DroneProcessor:
-    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
+    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, time_range_index=None):
         self.drone_id = drone_id
         self.yaml_config = yaml_config
         self.json_path = json_path
@@ -122,6 +122,7 @@ class DroneProcessor:
         self.max_j = max_j
         self.max_s = max_s
         self.ignore_rpy = ignore_rpy
+        self.time_range_index = time_range_index
 
         # Load Interpolators
         self._load_gt()
@@ -140,21 +141,25 @@ class DroneProcessor:
             offset = np.array(self.yaml_config['position_offset'])
             base_waypoints[:, 0:3] += offset
         base_servos = np.array(self.yaml_config.get('servos', []))  # [rod1, rod2]
+        base_pointers = np.array(self.yaml_config.get('pointers', []))  # [p0, p1]
 
         iterations = self.yaml_config.get('iterations', 1)
 
         waypoints = []
         servos = []
+        pointers = []
         times = [0.0]
 
         for it in range(iterations):
             for i in range(len(base_waypoints)):
                 wp = np.copy(base_waypoints[i])
                 sv = np.copy(base_servos[i]) if len(base_servos) > i else np.array([0.0, 0.0])
-                
+                pt = np.copy(base_pointers[i]) if len(base_pointers) > i else np.array([0.0, 0.0])
+
                 if it == 0 and i == 0:
                     waypoints.append(wp)
                     servos.append(sv)
+                    pointers.append(pt)
                 else:
                     if i == 0:
                         dt = 0.1 # 100ms gap
@@ -163,15 +168,17 @@ class DroneProcessor:
                     times.append(times[-1] + dt)
                     waypoints.append(wp)
                     servos.append(sv)
+                    pointers.append(pt)
 
         waypoints = np.array(waypoints)
         servos = np.array(servos)
+        pointers = np.array(pointers)
 
         self.gt_times = np.array(times)
         self.gt_duration = times[-1]
 
         self.gt_pos_fn = interp1d(self.gt_times, waypoints[:, 0:3], axis=0, kind='linear', fill_value="extrapolate")
-        
+
         if self.use_kinematics:
             self.gt_pos_fn = self._apply_kinematics_filter(self.gt_times, self.gt_pos_fn, self.max_v, self.max_a, self.max_j, self.max_s)
 
@@ -180,6 +187,33 @@ class DroneProcessor:
 
         # Use raw servo values in degrees
         self.gt_servo_fn = interp1d(self.gt_times, servos, axis=0, kind='linear', fill_value="extrapolate")
+
+        if len(base_pointers) > 0:
+            self.gt_pointer_fn = interp1d(self.gt_times, pointers, axis=0, kind='linear', fill_value="extrapolate")
+        else:
+            self.gt_pointer_fn = None
+        self.led_formula = self.yaml_config.get('led', {}).get('formula', None)
+
+    def get_lit_mask(self, t_rel):
+        """Returns (50,) boolean array: True for LEDs lit (non-black) at t_rel. None if unavailable."""
+        if self.led_formula is None:
+            return None
+        import math as _math, random as _random
+
+        if self.gt_pointer_fn is None:
+            pointers = []
+        else:
+            pointers = self.gt_pointer_fn(t_rel)
+        ctx = {'math': _math, 'random': _random, 'N': 50, 't': t_rel}
+        for j, v in enumerate(pointers):
+            ctx[f'p{j}'] = float(v)
+        mask = np.zeros(50, dtype=bool)
+        for idx in range(50):
+            ctx['i'] = idx
+            rgb = eval(self.led_formula, {}, ctx)
+            if any(c > 0 for c in rgb):
+                mask[idx] = True
+        return mask
 
     def _apply_kinematics_filter(self, time_vals, pos_func, max_v, max_a, max_j, max_s, dt_sim=0.01):
         sim_times = np.arange(time_vals[0], time_vals[-1] + dt_sim, dt_sim)
@@ -324,8 +358,13 @@ class DroneProcessor:
         with open(self.json_path, 'r') as f:
             data = json.load(f)
 
-        self.start_time = data['start_time']
-        self.stop_time = data['stop_time']
+        if 'start_times' in data and 'stop_times' in data:
+            pairs = list(zip(data['start_times'], data['stop_times']))
+            self.start_time = pairs[self.time_range_index][0]
+            self.stop_time = pairs[self.time_range_index][1]
+        else:
+            self.start_time = data['start_time']
+            self.stop_time = data['stop_time']
 
         vicon_times = []
         vicon_pos = []
@@ -413,7 +452,7 @@ class DroneProcessor:
 # 3. MAIN ANALYSIS LOGIC
 # ==========================================
 
-def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False):
+def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, lit_only=False):
     print(f"Loading Configuration from {yaml_file}...")
     with open(yaml_file, 'r') as f:
         yaml_data = yaml.safe_load(f)
@@ -428,7 +467,26 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         compare_drones = compare_yaml_data.get('drones', {})
         tag = compare_yaml.split("/")[-1].split(".")[0] # Override output tag
 
-    # 1. Initialize Processors (Find logs and parse)
+    # 1. Find all JSON log files and check for start_times/stop_times lists
+    time_range_index = None
+    if not compare_yaml:
+        sample_pairs = None
+        for drone_id in drones_config:
+            search_pattern = f"/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/logs/{drone_id}_{tag}*.json"
+            files = glob.glob(search_pattern) or glob.glob(f"{drone_id}_{tag}*.json")
+            if files:
+                with open(files[0], 'r') as f:
+                    d = json.load(f)
+                if 'start_times' in d and 'stop_times' in d:
+                    sample_pairs = list(zip(d['start_times'], d['stop_times']))
+                    break
+        if sample_pairs is not None:
+            print("\nMultiple time ranges found in log files:")
+            for i, (st, et) in enumerate(sample_pairs):
+                print(f"  {i}: start={st:.4f}, end={et:.4f}")
+            time_range_index = int(input("Select index: "))
+
+    # 2. Initialize Processors (Find logs and parse)
     for drone_id, config in drones_config.items():
         if compare_yaml:
             act_config = compare_drones.get(drone_id)
@@ -460,7 +518,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         print(f"Found log for {drone_id}: {json_file}")
 
         try:
-            p = DroneProcessor(drone_id, config, json_file, compare_yaml, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy)
+            p = DroneProcessor(drone_id, config, json_file, compare_yaml, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy, time_range_index=time_range_index)
             processors.append(p)
         except Exception as e:
             print(f"Error loading data for {drone_id}: {e}")
@@ -523,14 +581,24 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         for i, p in enumerate(valid_processors):
             gt_leds = gt_leds_list[i]
             act_leds = act_leds_list[i]
-            
+
             # Align LEDs by subtracting the respective swarm centroid
             gt_leds_aligned = gt_leds - C_gt
             act_leds_aligned = act_leds - C_act
 
-            diff = gt_leds_aligned - act_leds_aligned
+            if lit_only:
+                mask = p.get_lit_mask(t)
+                if mask is not None:
+                    gt_leds_f = gt_leds_aligned[mask]
+                    act_leds_f = act_leds_aligned[mask]
+                    count = int(mask.sum())
+                else:
+                    gt_leds_f, act_leds_f, count = gt_leds_aligned, act_leds_aligned, len(gt_leds_aligned)
+            else:
+                gt_leds_f, act_leds_f, count = gt_leds_aligned, act_leds_aligned, len(gt_leds_aligned)
+
+            diff = gt_leds_f - act_leds_f
             sse = np.sum(diff ** 2)
-            count = len(gt_leds)  # 50
 
             # Per drone metrics
             rmse_val = np.sqrt(sse / count) * 1000.0  # mm
@@ -538,8 +606,8 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 
             # Store aligned subsample for vis (every 10th step)
             if len(results['drones'][p.drone_id]['rmse']) % 10 == 0:
-                results['drones'][p.drone_id]['leds_gt'].append(gt_leds_aligned)
-                results['drones'][p.drone_id]['leds_act'].append(act_leds_aligned)
+                results['drones'][p.drone_id]['leds_gt'].append(gt_leds_f)
+                results['drones'][p.drone_id]['leds_act'].append(act_leds_f)
 
             # Accumulate for Combined Metric
             frame_total_sse += sse
@@ -577,43 +645,46 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
             mean_d = np.nanmean(d_rmse)
             print(f"Drone {p.drone_id}: Max RMSE {max_d:.2f} mm, Mean RMSE {mean_d:.2f} mm")
 
-        # ==========================================
-        # 5. EXPORT DATA TO JSON
-        # ==========================================
-        output_filename = f"{tag}_relative_rmse_analysis_output.json"
-        print(f"\nExporting raw data to {output_filename}...")
+    # ==========================================
+    # 5. EXPORT DATA TO JSON
+    # ==========================================
+    if args.lit_only:
+        output_filename = f"{tag}_relative_rmse_lit_only.json"
+    else:
+        output_filename = f"{tag}_relative_rmse.json"
+    print(f"\nExporting raw data to {output_filename}...")
 
-        # Structure data for export (handle numpy types)
-        export_data = {
-            "timestamps": results['timestamps'].tolist(),
-            "combined_rmse_mm": [None if np.isnan(x) else float(x) for x in results['combined_rmse']],
-            "drones": {}
+    # Structure data for export (handle numpy types)
+    export_data = {
+        "timestamps": results['timestamps'].tolist(),
+        "combined_rmse_mm": [None if np.isnan(x) else float(x) for x in results['combined_rmse']],
+        "drones": {}
+    }
+
+    for p in processors:
+        d_data = results['drones'][p.drone_id]
+
+        # Helper to clean numpy arrays in LED lists
+        def clean_leds(led_list):
+            cleaned = []
+            for item in led_list:
+                if item is None:
+                    cleaned.append(None)
+                else:
+                    # Rounding to save space, remove round() if max precision needed
+                    cleaned.append(np.round(item, 5).tolist())
+            return cleaned
+
+        export_data["drones"][p.drone_id] = {
+            "rmse_mm": [None if np.isnan(x) else float(x) for x in d_data['rmse']],
+            # These are subsampled (every 10th frame relative to timestamp index)
+            "subsampled_gt_leds": clean_leds(d_data['leds_gt']),
+            "subsampled_act_leds": clean_leds(d_data['leds_act'])
         }
 
-        for p in processors:
-            d_data = results['drones'][p.drone_id]
-
-            # Helper to clean numpy arrays in LED lists
-            def clean_leds(led_list):
-                cleaned = []
-                for item in led_list:
-                    if item is None:
-                        cleaned.append(None)
-                    else:
-                        # Rounding to save space, remove round() if max precision needed
-                        cleaned.append(np.round(item, 5).tolist())
-                return cleaned
-
-            export_data["drones"][p.drone_id] = {
-                "rmse_mm": [None if np.isnan(x) else float(x) for x in d_data['rmse']],
-                # These are subsampled (every 10th frame relative to timestamp index)
-                "subsampled_gt_leds": clean_leds(d_data['leds_gt']),
-                "subsampled_act_leds": clean_leds(d_data['leds_act'])
-            }
-
-        with open(output_filename, 'w') as f:
-            json.dump(export_data, f, indent=4)
-        print("Export complete.")
+    with open(output_filename, 'w') as f:
+        json.dump(export_data, f, indent=4)
+    print("Export complete.")
 
     # ==========================================
     # 5. VISUALIZATION
@@ -749,7 +820,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_j', type=float, default=17.0, help='Maximum jerk (m/s^3)')
     parser.add_argument('--max_s', type=float, default=550.0, help='Maximum snap (m/s^4)')
     parser.add_argument('--ignore-rpy', action='store_true', dest='ignore_rpy', help='Ignore actual roll, pitch, and yaw data')
+    parser.add_argument('--lit-only', action='store_true', dest='lit_only', help='Only include lit (non-black) LEDs in RMSE computation and visualization')
 
     args = parser.parse_args()
-    
-    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy)
+
+    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy, args.lit_only)
