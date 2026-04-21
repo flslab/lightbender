@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
-    "author": "HA",
-    "version": (1, 15),
+    "author": "Hamed Alimohammadzadeh",
+    "version": (1, 16),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create light-element drones, animate LEDs with pointers, add position errors, and export YAML",
@@ -360,6 +360,51 @@ class DroneProperties(bpy.types.PropertyGroup):
     )
     fold_hold_time: FloatProperty(name="Hold Time (s)", description="Time to hold the straight fully-lit state", default=2.0, min=0.0)
     fold_transition_time: FloatProperty(name="Transition Time (s)", description="Time to transition into the current state", default=2.0, min=0.1)
+    fold_align_enabled: BoolProperty(
+        name="Align",
+        description="In the straight state, snap all LBs to the centroid on the chosen axis",
+        default=False
+    )
+    fold_align_axis: EnumProperty(
+        name="Align Axis",
+        description="Axis on which to align all LBs to the centroid",
+        items=[('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", "")],
+        default='Z'
+    )
+    fold_distribute_enabled: BoolProperty(
+        name="Distribute",
+        description="In the straight state, evenly space all LBs along the chosen axis",
+        default=False
+    )
+    fold_distribute_axis: EnumProperty(
+        name="Distribute Axis",
+        description="Axis along which to evenly distribute LBs",
+        items=[('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", "")],
+        default='X'
+    )
+    fold_equalize_size: BoolProperty(
+        name="Equalize Size",
+        description="Scale each LB's LED pointer range by its camera distance so all rods appear the same length from the camera's point of view",
+        default=False
+    )
+    fold_overlap_resolve: BoolProperty(
+        name="Resolve Overlaps",
+        description="After positioning, detect overlaps and uniformly stretch positions along the chosen axis until the minimum spacing equals the threshold",
+        default=False
+    )
+    fold_overlap_threshold: FloatProperty(
+        name="Min Spacing",
+        description="Minimum allowed distance between any two LBs along the overlap axis",
+        default=0.5,
+        min=0.0,
+        unit='LENGTH'
+    )
+    fold_overlap_axis: EnumProperty(
+        name="Overlap Axis",
+        description="Axis along which to measure and resolve overlaps",
+        items=[('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", "")],
+        default='X'
+    )
 
     # Global LED Expressions
     global_expr_preset: EnumProperty(
@@ -1082,6 +1127,17 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
         fold_angle = props.fold_angle
         t_hold = props.fold_hold_time
         t_trans = props.fold_transition_time
+        align_enabled = props.fold_align_enabled
+        align_axis = props.fold_align_axis
+        dist_enabled = props.fold_distribute_enabled
+        dist_axis = props.fold_distribute_axis
+        equalize_size = props.fold_equalize_size
+        overlap_resolve = props.fold_overlap_resolve
+        overlap_threshold = props.fold_overlap_threshold
+        overlap_axis = props.fold_overlap_axis
+        position_override = align_enabled or dist_enabled or overlap_resolve
+
+        axis_idx = {'X': 0, 'Y': 1, 'Z': 2}
 
         f0 = 0
         f_hold = int(round(t_hold * fps))
@@ -1093,6 +1149,136 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
         if not lbs:
             self.report({'WARNING'}, "No LB drones found in the scene.")
             return {'CANCELLED'}
+
+        # --- Compute per-LB initial positions ---
+        # Start from each LB's current location, then apply align and/or distribute.
+        computed_positions = {lb.name: list(lb.location) for lb in lbs}
+        if position_override:
+            n = len(lbs)
+
+            # Align: collapse all LBs to centroid on the align axis
+            if align_enabled:
+                a_idx = axis_idx[align_axis]
+                centroid_a = sum(lb.location[a_idx] for lb in lbs) / n
+                for lb in lbs:
+                    computed_positions[lb.name][a_idx] = centroid_a
+
+            # Distribute: evenly space LBs along the distribute axis.
+            # When a camera is present, distribute so objects appear evenly spaced
+            # from the camera's perspective by solving for world positions that
+            # produce uniform screen-space intervals (Newton's method).
+            if dist_enabled and n > 1:
+                import mathutils
+                d_idx = axis_idx[dist_axis]
+                e_d = mathutils.Vector([1.0 if i == d_idx else 0.0 for i in range(3)])
+                camera = scene.camera
+
+                if camera is not None:
+                    from bpy_extras.object_utils import world_to_camera_view
+
+                    def _screen(base_pos, t=0.0):
+                        return world_to_camera_view(
+                            scene, camera, mathutils.Vector(base_pos) + t * e_d
+                        )
+
+                    # Pick the screen axis most sensitive to movement along e_d
+                    mid_base = computed_positions[lbs[len(lbs) // 2].name]
+                    sc_a = _screen(mid_base, 0.0)
+                    sc_b = _screen(mid_base, 1.0)
+                    s_axis = 0 if abs(sc_b.x - sc_a.x) >= abs(sc_b.y - sc_a.y) else 1
+
+                    # Sort by current screen position on that axis
+                    lbs_sorted = sorted(
+                        lbs, key=lambda o: _screen(computed_positions[o.name])[s_axis]
+                    )
+                    s_min = _screen(computed_positions[lbs_sorted[0].name])[s_axis]
+                    s_max = _screen(computed_positions[lbs_sorted[-1].name])[s_axis]
+
+                    targets = {
+                        lb.name: s_min + (s_max - s_min) * i / (n - 1)
+                        for i, lb in enumerate(lbs_sorted)
+                    }
+
+                    # Newton's method: find t so that _screen(base, t)[s_axis] == target
+                    num_eps = 1e-3
+                    for lb in lbs:
+                        base = computed_positions[lb.name]
+                        s_target = targets[lb.name]
+                        t = 0.0
+                        for _ in range(30):
+                            f = _screen(base, t)[s_axis] - s_target
+                            if abs(f) < 1e-7:
+                                break
+                            df = (_screen(base, t + num_eps)[s_axis] - _screen(base, t)[s_axis]) / num_eps
+                            if abs(df) < 1e-12:
+                                break
+                            t -= f / df
+                        computed_positions[lb.name][d_idx] = base[d_idx] + t
+
+                else:
+                    # No camera: uniform world-space distribution
+                    lbs_sorted = sorted(lbs, key=lambda o: computed_positions[o.name][d_idx])
+                    pos_min = computed_positions[lbs_sorted[0].name][d_idx]
+                    pos_max = computed_positions[lbs_sorted[-1].name][d_idx]
+                    span = pos_max - pos_min
+                    for i, lb in enumerate(lbs_sorted):
+                        computed_positions[lb.name][d_idx] = pos_min + span * i / (n - 1)
+
+            # Resolve overlaps: check all pairs with Euclidean distance.
+            # For each overlapping pair, compute the minimum axis-only scale
+            # factor that brings their Euclidean distance to exactly the threshold.
+            # Apply the largest required scale so every pair is resolved.
+            if overlap_resolve and n > 1:
+                import math
+                o_idx = axis_idx[overlap_axis]
+                thresh_sq = overlap_threshold ** 2
+                positions = [computed_positions[lb.name] for lb in lbs]
+
+                required_scale = 1.0
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        pi, pj = positions[i], positions[j]
+                        # Squared distance in the axes perpendicular to o_idx
+                        d_perp_sq = sum(
+                            (pi[k] - pj[k]) ** 2 for k in range(3) if k != o_idx
+                        )
+                        if d_perp_sq >= thresh_sq:
+                            # Perpendicular distance alone already clears threshold
+                            continue
+                        delta_axis = pi[o_idx] - pj[o_idx]
+                        if abs(delta_axis) < 1e-12:
+                            # Co-located on axis; axis scaling cannot resolve this
+                            continue
+                        # Solve: d_perp_sq + (s * delta_axis)^2 = thresh_sq
+                        s_needed = math.sqrt((thresh_sq - d_perp_sq) / delta_axis ** 2)
+                        if s_needed > required_scale:
+                            required_scale = s_needed
+
+                if required_scale > 1.0:
+                    centroid_o = sum(computed_positions[lb.name][o_idx] for lb in lbs) / n
+                    for lb in lbs:
+                        computed_positions[lb.name][o_idx] = (
+                            centroid_o
+                            + required_scale * (computed_positions[lb.name][o_idx] - centroid_o)
+                        )
+
+        # --- Compute per-LB straight-state pointer values ---
+        # Default: full range (0 to 50, centred at 25, half-range = 25).
+        # With equalize_size, scale each LB's half-range by its distance from the
+        # camera relative to the farthest LB so all rods appear the same length.
+        straight_pointers = {lb.name: (0.0, 50.0) for lb in lbs}
+        if equalize_size and scene.camera is not None:
+            import mathutils
+            cam_pos = scene.camera.matrix_world.translation
+            distances = {
+                lb.name: (mathutils.Vector(computed_positions[lb.name]) - cam_pos).length
+                for lb in lbs
+            }
+            d_max = max(distances.values())
+            if d_max > 0:
+                for lb in lbs:
+                    half = 25.0 * distances[lb.name] / d_max
+                    straight_pointers[lb.name] = (25.0 - half, 25.0 + half)
 
         for lb in lbs:
             dp = lb.drone_props
@@ -1114,6 +1300,9 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
             lb["fold_orig_p0"] = p0.value
             lb["fold_orig_p1"] = p1.value
 
+            if position_override:
+                lb["fold_orig_loc"] = list(lb.location)
+
             orig_s1 = lb["fold_orig_s1"]
             orig_s2 = lb.get("fold_orig_s2", None)
             orig_p0 = lb["fold_orig_p0"]
@@ -1124,8 +1313,11 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
                 lb["servo_1"] = s1_straight
             if s2_straight is not None and "servo_2" in lb:
                 lb["servo_2"] = s2_straight
-            p0.value = 0.0
-            p1.value = 50.0
+            p0.value, p1.value = straight_pointers[lb.name]
+
+            if position_override and lb.name in computed_positions:
+                cp = computed_positions[lb.name]
+                lb.location = (cp[0], cp[1], cp[2])
 
             for f in (f0, f_hold):
                 if s1_straight is not None:
@@ -1134,6 +1326,8 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
                     lb.keyframe_insert(data_path='["servo_2"]', frame=f)
                 p0.keyframe_insert(data_path="value", frame=f)
                 p1.keyframe_insert(data_path="value", frame=f)
+                if position_override:
+                    lb.keyframe_insert(data_path="location", frame=f)
 
             # --- Restore original state and keyframe at f_end ---
             lb["servo_1"] = orig_s1
@@ -1142,11 +1336,17 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
             p0.value = orig_p0
             p1.value = orig_p1
 
+            if position_override:
+                orig_loc = lb["fold_orig_loc"]
+                lb.location = (orig_loc[0], orig_loc[1], orig_loc[2])
+
             lb.keyframe_insert(data_path='["servo_1"]', frame=f_end)
             if orig_s2 is not None and "servo_2" in lb:
                 lb.keyframe_insert(data_path='["servo_2"]', frame=f_end)
             p0.keyframe_insert(data_path="value", frame=f_end)
             p1.keyframe_insert(data_path="value", frame=f_end)
+            if position_override:
+                lb.keyframe_insert(data_path="location", frame=f_end)
 
         # Set all fold-inserted keyframes to LINEAR
         for lb in lbs:
@@ -1183,6 +1383,11 @@ class DRONE_OT_clear_fold(bpy.types.Operator):
                     fc = action.fcurves.find(dp_path)
                     if fc:
                         action.fcurves.remove(fc)
+                # Remove location fcurves inserted by fold alignment
+                for axis_i in range(3):
+                    fc = action.fcurves.find('location', index=axis_i)
+                    if fc:
+                        action.fcurves.remove(fc)
 
             dp = lb.drone_props
             if "fold_orig_s1" in lb:
@@ -1198,6 +1403,10 @@ class DRONE_OT_clear_fold(bpy.types.Operator):
                 if "fold_orig_p1" in lb:
                     dp.led_pointers[1].value = lb["fold_orig_p1"]
                     del lb["fold_orig_p1"]
+            if "fold_orig_loc" in lb:
+                orig_loc = lb["fold_orig_loc"]
+                lb.location = (orig_loc[0], orig_loc[1], orig_loc[2])
+                del lb["fold_orig_loc"]
             cleared += 1
 
         context.view_layer.update()
@@ -3391,6 +3600,21 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "fold_hold_time", text="Hold")
         row.prop(props, "fold_transition_time", text="Transition")
+        row = box.row(align=True)
+        row.prop(props, "fold_align_enabled", text="Align")
+        if props.fold_align_enabled:
+            row.prop(props, "fold_align_axis", expand=True)
+        row = box.row(align=True)
+        row.prop(props, "fold_distribute_enabled", text="Distribute")
+        if props.fold_distribute_enabled:
+            row.prop(props, "fold_distribute_axis", expand=True)
+        box.prop(props, "fold_equalize_size")
+        row = box.row(align=True)
+        row.prop(props, "fold_overlap_resolve", text="Resolve Overlaps")
+        if props.fold_overlap_resolve:
+            row.prop(props, "fold_overlap_axis", expand=True)
+        if props.fold_overlap_resolve:
+            box.prop(props, "fold_overlap_threshold", text="Min Spacing")
         row = box.row(align=True)
         row.operator("drone.generate_fold", text="Generate Fold", icon='KEYINGSET')
         row.operator("drone.clear_fold", text="", icon='TRASH')
