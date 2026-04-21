@@ -1,7 +1,7 @@
-Authors: 
+# Authors: 
 Shuqin Zhu, Shahram Ghandeharizadeh
 
-## Videos
+# Videos
 * The following videos show bare-hand interactions in support of physics-based translation.
 // Todo: the 30 sec video.
 
@@ -18,7 +18,7 @@ Description:
 * Tools to identify a LightBender in a video recording, and overlay the speed dashboard next to it.
 
 
-## Implementation
+# Implementation
 The source code for interaction is available in the subfolder ```.controller/Interaction```.
 
 Further instructions to run this feature of LightBender, see ```.controller/README.md```.

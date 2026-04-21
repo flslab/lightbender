@@ -40,18 +40,12 @@ from PIL import Image, ImageDraw, ImageFont
 # VIDEO_DURATION = 19.0  # seconds of log time to render per video
 
 
-LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '../../logs/SIGGRAPH_Poster/lit'
+LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2'
 OUT_DIR        = sys.argv[2] if len(sys.argv) > 2 else LOG_DIR
 FPS            = 30
 FONT           = 20
-WAIT_OFFSET_S  = 6.60   # seconds after "Waiting For User Interaction" to use as t=0
-VIDEO_DURATION = 11.0  # seconds of log time to render per video
-
-SCALE_START_S  = 5.21  # start of speed-delta scaling window (seconds after video t=0)
-SCALE_END_S    = 8.50  # end of speed-delta scaling window (seconds after video t=0)
-SCALE_FACTOR   = 1.0   # divide speed deltas by this within the window
-
-
+WAIT_OFFSET_S  = 6.80   # seconds after "Waiting For User Interaction" to use as t=0
+VIDEO_DURATION = 11.0  # seconds of log time to render per video\
 
 DASH_MODE        = 'light'   # 'dark' | 'light'
 DASH_TRANSPARENT = True     # True → .webm with alpha channel
@@ -302,21 +296,12 @@ def process_log(args):
     times    = np.array([t for t, _ in raw])
     speeds   = np.array([s for _, s in raw])
 
-    # Scale down speed deltas within [SCALE_START_S, SCALE_END_S] by SCALE_FACTOR.
-    # Accumulate divided deltas from the first frame in the window.
-    in_window = (times >= SCALE_START_S) & (times <= SCALE_END_S)
-    idxs = np.where(in_window)[0]
-    if len(idxs) > 1:
-        for i in idxs[1:]:
-            # speeds[i] = speeds[i - 1] + (speeds[i] - speeds[i - 1]) / SCALE_FACTOR
-            speeds[i] = speeds[i] / SCALE_FACTOR
-
     n_frames = max(1, int(math.ceil(VIDEO_DURATION * FPS)))
-    bar_max  = max(float(speeds.max()) * 1.1, 200.0)  # dashboard speed axis max
+    bar_max  = 600.0  # dashboard speed axis max
 
     fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
     ax.set_xlim(0, VIDEO_DURATION)
-    ax.set_ylim(0, max(float(speeds.max()) * 1.15, 10))
+    ax.set_ylim(0, 600)
     # ax.set_yscale('symlog', linthresh=1.0)
     # ax.set_yticks([0, 1, 10, 100, 1000])
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(v)}'))

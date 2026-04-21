@@ -21,11 +21,11 @@ import cv2
 import numpy as np
 
 
-INPUT_VIDEO   = '../../logs/SIGGRAPH_Poster/lit/lit_with_lb4.mp4'
-OUTPUT_VIDEO  = '../../logs/SIGGRAPH_Poster/Emoji_Speed_Overlay.mp4'   # e.g. "tracked.mp4"
-OVERLAY_VIDEO = "../../logs/SIGGRAPH_Poster/lit/lb5_lit.mov"
+INPUT_VIDEO   = '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/record_cut.mp4'
+OUTPUT_VIDEO  = '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/tmp.mp4'   # e.g. "tracked.mp4"
+OVERLAY_VIDEO = "../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/lb2_emoji_interaction_off_2026-04-18_12-30-35_dashboard.mov"
 MODE          = "manual"   # "manual" | "auto"
-START_TIME_S  = 19.05       # Time in seconds to start reading the video
+START_TIME_S  = 0       # Time in seconds to start reading the video
 
 OVERLAY_GAP = 10   # pixels between bbox edge and overlay
 

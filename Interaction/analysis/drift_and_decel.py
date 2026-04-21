@@ -23,6 +23,58 @@ def load_records(log_path):
     return records
 
 
+def report_max_against_push(frames, disengage_events, first_push_times, stabilize_time, wait_time):
+    if not disengage_events or not first_push_times:
+        print("\nSkipping against-push report: missing push or disengage events.")
+        return
+
+    t_last_disengage = disengage_events[-1]['time']
+    t_last_push = first_push_times[-1]
+
+    # Determine push heading from net displacement during last push session
+    push_frames = [f for f in frames if t_last_push <= f['time'] <= t_last_disengage]
+    if len(push_frames) < 2:
+        print("\nSkipping against-push report: too few frames during last push.")
+        return
+
+    dx = push_frames[-1]['px'] - push_frames[0]['px']
+    dy = push_frames[-1]['py'] - push_frames[0]['py']
+    dz = push_frames[-1]['pz'] - push_frames[0]['pz']
+    mag = math.sqrt(dx**2 + dy**2 + dz**2)
+    if mag < 1e-9:
+        print("\nSkipping against-push report: push displacement too small to determine heading.")
+        return
+
+    push_dir = (dx / mag, dy / mag, dz / mag)
+
+    # Grace time: disengage to disengage + stabilize_time
+    grace_frames = [f for f in frames
+                    if t_last_disengage <= f['time'] <= t_last_disengage + stabilize_time]
+    if not grace_frames:
+        print("\nSkipping against-push report: no frames found during grace time.")
+        return
+
+    p0x, p0y, p0z = grace_frames[0]['px'], grace_frames[0]['py'], grace_frames[0]['pz']
+
+    max_against = 0.0
+    max_frame = None
+    for f in grace_frames:
+        proj = -((f['px'] - p0x) * push_dir[0]
+                 + (f['py'] - p0y) * push_dir[1]
+                 + (f['pz'] - p0z) * push_dir[2])
+        if proj > max_against:
+            max_against = proj
+            max_frame = f
+
+    print(f"\n--- Max distance against last push heading during grace time ---")
+    print(f"  Push heading (unit vec): ({push_dir[0]:.4f}, {push_dir[1]:.4f}, {push_dir[2]:.4f})")
+    print(f"  Grace time: {t_last_disengage - wait_time:.3f}s – "
+          f"{t_last_disengage + stabilize_time - wait_time:.3f}s (relative to wait)")
+    print(f"  Max distance against push: {max_against * 1000:.3f} mm")
+    if max_frame:
+        print(f"  Reached at t={max_frame['time'] - t_last_disengage:.3f}s after disengage")
+
+
 def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search_sec=2.5):
     records = load_records(log_path)
 
@@ -426,6 +478,9 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     fig6.savefig('speed_time.png', dpi=300)
     plt.show()
 
+    # --- Max distance against last push heading during grace time ---
+    report_max_against_push(frames, disengage_events, first_push_times, STABILIZE_TIME, wait_time)
+
     # --- CSV ---
     csv_path = log_path.replace('.json', '_results.csv')
     with open(csv_path, 'w', newline='') as f:
@@ -447,5 +502,5 @@ if __name__ == '__main__':
 
 
     path = sys.argv[1] if len(sys.argv) > 1 else \
-        "../../logs/lb11_translation_2026-04-16_16-02-40.json" # delta v = 0.092, grace time = 1.94
+        "../../../fls-cf-offboard-controller/logs/lb11_translation_2026-04-16_16-02-40.json" # delta v = 0.092, grace time = 1.94
     analyze(path)
