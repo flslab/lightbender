@@ -2,3 +2,4 @@
 authoring/results*
 analysis/results*
 orchestrator/swarm_manifest.yaml
+orchestrator/logs
