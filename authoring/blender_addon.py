@@ -13,11 +13,15 @@ import math
 import bmesh
 import random
 import re
+import os
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
     CollectionProperty, FloatVectorProperty 
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
+REPO_DIR = "/path/to/lightbender"
+AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
+ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
 # ------------------------------------------------------------------------
 #    Properties & Data Classes
@@ -345,6 +349,17 @@ class DroneProperties(bpy.types.PropertyGroup):
     flyin_outward_duration: FloatProperty(name="Outward Duration(s)", default=2.0, min=0.1)
     flyin_hold_duration: FloatProperty(name="Hold Duration(s)", default=0.5, min=0.0)
     flyin_inward_duration: FloatProperty(name="Inward Duration(s)", default=3.0, min=0.1)
+
+    # Fold Animation Settings
+    fold_angle: FloatProperty(
+        name="Fold Angle (deg)",
+        description="Straight-state angle for segment 1 in degrees (segment 2 = angle + 180). Adjusted per type: TYPE_V adds 180.",
+        default=90.0,
+        min=0.0,
+        max=180.0
+    )
+    fold_hold_time: FloatProperty(name="Hold Time (s)", description="Time to hold the straight fully-lit state", default=2.0, min=0.0)
+    fold_transition_time: FloatProperty(name="Transition Time (s)", description="Time to transition into the current state", default=2.0, min=0.1)
 
     # Global LED Expressions
     global_expr_preset: EnumProperty(
@@ -1030,6 +1045,164 @@ class UL_GlobalColorList(bpy.types.UIList):
     """List representation of global colors"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.prop(item, "color", text="")
+
+
+# ------------------------------------------------------------------------
+#    Fold Animation Feature
+# ------------------------------------------------------------------------
+
+def _fold_straight_angles(drone_type, fold_angle):
+    """Return (s1, s2) straight angles for the given drone type and user fold_angle."""
+    if drone_type == 'TYPE_H':
+        return fold_angle, fold_angle + 180.0
+    elif drone_type == 'TYPE_V':
+        if fold_angle > 90:
+            return fold_angle, fold_angle + 180.0
+        else:
+            return fold_angle + 180.0, fold_angle + 360.0
+    elif drone_type == 'TYPE_SEMI_H':
+        return fold_angle, None
+    elif drone_type == 'TYPE_SEMI_V':
+        return fold_angle + 180.0, None
+    else:  # TYPE_RING or unknown
+        return None, None
+
+
+class DRONE_OT_generate_fold(bpy.types.Operator):
+    """Keyframe all LBs from a straight fully-lit state into their current state"""
+    bl_idname = "drone.generate_fold"
+    bl_label = "Generate Fold"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import re
+        scene = context.scene
+        props = scene.drone_props
+        fps = scene.render.fps
+        fold_angle = props.fold_angle
+        t_hold = props.fold_hold_time
+        t_trans = props.fold_transition_time
+
+        f0 = 0
+        f_hold = int(round(t_hold * fps))
+        f_end = int(round((t_hold + t_trans) * fps))
+
+        lbs = [obj for obj in scene.objects
+               if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+
+        if not lbs:
+            self.report({'WARNING'}, "No LB drones found in the scene.")
+            return {'CANCELLED'}
+
+        for lb in lbs:
+            dp = lb.drone_props
+            d_type = dp.drone_type
+            s1_straight, s2_straight = _fold_straight_angles(d_type, fold_angle)
+
+            # Save originals
+            lb["fold_orig_s1"] = lb.get("servo_1", 0.0)
+            if "servo_2" in lb:
+                lb["fold_orig_s2"] = lb.get("servo_2", 0.0)
+
+            # Ensure POINTERS mode and at least 2 pointers
+            dp.led_mode = 'POINTERS'
+            while len(dp.led_pointers) < 2:
+                dp.led_pointers.add()
+
+            p0 = dp.led_pointers[0]
+            p1 = dp.led_pointers[1]
+            lb["fold_orig_p0"] = p0.value
+            lb["fold_orig_p1"] = p1.value
+
+            orig_s1 = lb["fold_orig_s1"]
+            orig_s2 = lb.get("fold_orig_s2", None)
+            orig_p0 = lb["fold_orig_p0"]
+            orig_p1 = lb["fold_orig_p1"]
+
+            # --- Set straight + fully-lit state and keyframe at f0 and f_hold ---
+            if s1_straight is not None:
+                lb["servo_1"] = s1_straight
+            if s2_straight is not None and "servo_2" in lb:
+                lb["servo_2"] = s2_straight
+            p0.value = 0.0
+            p1.value = 50.0
+
+            for f in (f0, f_hold):
+                if s1_straight is not None:
+                    lb.keyframe_insert(data_path='["servo_1"]', frame=f)
+                if s2_straight is not None and "servo_2" in lb:
+                    lb.keyframe_insert(data_path='["servo_2"]', frame=f)
+                p0.keyframe_insert(data_path="value", frame=f)
+                p1.keyframe_insert(data_path="value", frame=f)
+
+            # --- Restore original state and keyframe at f_end ---
+            lb["servo_1"] = orig_s1
+            if orig_s2 is not None and "servo_2" in lb:
+                lb["servo_2"] = orig_s2
+            p0.value = orig_p0
+            p1.value = orig_p1
+
+            lb.keyframe_insert(data_path='["servo_1"]', frame=f_end)
+            if orig_s2 is not None and "servo_2" in lb:
+                lb.keyframe_insert(data_path='["servo_2"]', frame=f_end)
+            p0.keyframe_insert(data_path="value", frame=f_end)
+            p1.keyframe_insert(data_path="value", frame=f_end)
+
+        # Set all fold-inserted keyframes to LINEAR
+        for lb in lbs:
+            if lb.animation_data and lb.animation_data.action:
+                for fc in lb.animation_data.action.fcurves:
+                    for kp in fc.keyframe_points:
+                        kp.interpolation = 'LINEAR'
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Fold animation generated for {len(lbs)} LBs.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_clear_fold(bpy.types.Operator):
+    """Remove generated fold keyframes and restore original servo/pointer values"""
+    bl_idname = "drone.clear_fold"
+    bl_label = "Clear Fold Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import re
+        scene = context.scene
+
+        lbs = [obj for obj in scene.objects
+               if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+
+        cleared = 0
+        for lb in lbs:
+            if lb.animation_data and lb.animation_data.action:
+                action = lb.animation_data.action
+                for dp_path in ('["servo_1"]', '["servo_2"]',
+                                'drone_props.led_pointers[0].value',
+                                'drone_props.led_pointers[1].value'):
+                    fc = action.fcurves.find(dp_path)
+                    if fc:
+                        action.fcurves.remove(fc)
+
+            dp = lb.drone_props
+            if "fold_orig_s1" in lb:
+                lb["servo_1"] = lb["fold_orig_s1"]
+                del lb["fold_orig_s1"]
+            if "fold_orig_s2" in lb and "servo_2" in lb:
+                lb["servo_2"] = lb["fold_orig_s2"]
+                del lb["fold_orig_s2"]
+            if len(dp.led_pointers) >= 2:
+                if "fold_orig_p0" in lb:
+                    dp.led_pointers[0].value = lb["fold_orig_p0"]
+                    del lb["fold_orig_p0"]
+                if "fold_orig_p1" in lb:
+                    dp.led_pointers[1].value = lb["fold_orig_p1"]
+                    del lb["fold_orig_p1"]
+            cleared += 1
+
+        context.view_layer.update()
+        self.report({'INFO'}, f"Cleared fold animation from {cleared} LBs.")
+        return {'FINISHED'}
 
 
 # ------------------------------------------------------------------------
@@ -1833,14 +2006,14 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         try:
             addon_dir = os.path.dirname(os.path.realpath(__file__))
         except NameError:
-            addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+            addon_dir = f"{AUTHORING_DIR}"
 
         input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
         output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
 
         deconflict_script = os.path.join(addon_dir, "deconflict.py")
         if not os.path.exists(deconflict_script):
-            alt_path = "/Users/hamed/Documents/Holodeck/lightbender/authoring/deconflict.py"
+            alt_path = os.path.join(AUTHORING_DIR, "deconflict.py")
             if os.path.exists(alt_path):
                 deconflict_script = alt_path
             else:
@@ -2327,8 +2500,8 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         for obj in drones_to_export:
             obj.select_set(True)
 
-        target_yaml = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/blender_mission.yaml"
-        target_script = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/orchestrator.py"
+        target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", "blender_mission.yaml")
+        target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
@@ -2383,7 +2556,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         # try:
         #     addon_dir = os.path.dirname(os.path.realpath(__file__))
         # except NameError:
-        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        addon_dir = AUTHORING_DIR
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
 
@@ -2851,7 +3024,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
             self.report({'WARNING'}, "No existing LightBenders found in scene.")
             return {'CANCELLED'}
 
-        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        addon_dir = AUTHORING_DIR
         temp_dir = tempfile.gettempdir()
         target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
@@ -3197,7 +3370,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         props = scene.drone_props
 
         # --- Morph Animation ---
-        layout.label(text="Morph Animation:", icon='MOD_ARMATURE')
+        layout.label(text="Morph:", icon='MOD_ARMATURE')
         box = layout.box()
 
         box.prop(props, "morph_svg_filepath")
@@ -3210,9 +3383,22 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         box.operator("drone.generate_morph", text="Generate Morph", icon='ANIM')
 
         layout.separator()
-        
+
+        # --- Fold Animation ---
+        layout.label(text="Fold:", icon='CON_ROTLIKE')
+        box = layout.box()
+        box.prop(props, "fold_angle")
+        row = box.row(align=True)
+        row.prop(props, "fold_hold_time", text="Hold")
+        row.prop(props, "fold_transition_time", text="Transition")
+        row = box.row(align=True)
+        row.operator("drone.generate_fold", text="Generate Fold", icon='KEYINGSET')
+        row.operator("drone.clear_fold", text="", icon='TRASH')
+
+        layout.separator()
+
         # --- Draw & Erase Sequencer ---
-        layout.label(text="Automatic Draw & Erase:", icon='GREASEPENCIL')
+        layout.label(text="Draw/Erase:", icon='GREASEPENCIL')
         box = layout.box()
 
         row = box.row()
@@ -3223,7 +3409,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
 
         if props.de_groups and props.de_active_group_index < len(props.de_groups):
             act_grp = props.de_groups[props.de_active_group_index]
-            box.label(text=f"Drones in {act_grp.name}:")
+            box.label(text=f"LightBenders in {act_grp.name}:")
 
             row = box.row()
             row.template_list("UL_DrawEraseDrones", "", act_grp, "drones", act_grp, "active_drone_index", rows=4)
@@ -3247,13 +3433,13 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         row.prop(props, "de_bg_color", text="Erase RGB")
 
         row = box.row(align=True)
-        row.operator("drone.generate_draw_erase", text="Generate Wipe Animation", icon='KEYINGSET')
+        row.operator("drone.generate_draw_erase", text="Generate Draw/Erase", icon='KEYINGSET')
         row.operator("drone.clear_draw_erase", text="", icon='TRASH')
 
         layout.separator()
 
         # --- Depth Fly-In Feature ---
-        layout.label(text="Depth Fly-In:", icon='OUTLINER_OB_CAMERA')
+        layout.label(text="Fly-In/Fly-Out:", icon='OUTLINER_OB_CAMERA')
         box = layout.box()
         
         box.prop(props, "flyin_ref_distance")
@@ -3273,7 +3459,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         box.prop(props, "flyin_inward_duration")
 
         row = box.row(align=True)
-        row.operator("drone.generate_flyin", text="Generate Fly-In", icon='KEYINGSET')
+        row.operator("drone.generate_flyin", text="Generate Fly-In/Fly-Out", icon='KEYINGSET')
         row.operator("drone.clear_flyin", text="", icon='TRASH')
 
 
@@ -3414,6 +3600,8 @@ classes = (
     DRONE_OT_generate_draw_erase,
     DRONE_OT_generate_flyin,
     DRONE_OT_clear_flyin,
+    DRONE_OT_generate_fold,
+    DRONE_OT_clear_fold,
     DRONE_OT_apply_error,
     DRONE_OT_reset_error,
     DRONE_OT_apply_drift,

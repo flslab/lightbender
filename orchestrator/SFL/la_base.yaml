@@ -1,0 +1,59 @@
+name: la_base
+camera: [2.25, 0.0, 0.94]
+drones:
+  lb7:
+    target: [-0.4794, -0.1368, 0.972, 0.0, 0.0]
+    waypoints: [[-0.4794, -0.1368, 0.972, 0.0, 0.0], [-0.4794, -0.1368, 0.972, 0.0, 4.9583]]
+    delta_t: 0.0
+    iterations: 1
+    params:
+      linear: true
+      relative: false
+    servos: [[90.0, 270.0], [90.0, 270.0]]
+    pointers: [[3.16, 46.84], [3.16, 46.84]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb3:
+    target: [0.2599, 0.0, 0.8616, 0.0, 0.0]
+    waypoints: [[0.2599, 0.0, 0.8616, 0.0, 0.0], [0.2599, 0.0, 0.8616, 0.0, 4.9583]]
+    delta_t: 0.0
+    iterations: 1
+    params:
+      linear: true
+      relative: false
+    servos: [[180.0, 360.0], [180.0, 360.0]]
+    pointers: [[10.0, 39.15], [10.0, 39.15]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb1:
+    target: [-0.2499, -0.05, 0.8956, 0.0, 0.0]
+    waypoints: [[-0.2499, -0.05, 0.8956, 0.0, 0.0], [-0.2499, -0.05, 0.8956, 0.0, 4.9583]]
+    delta_t: 0.0
+    iterations: 1
+    params:
+      linear: true
+      relative: false
+    servos: [[109.74, 289.74], [109.74, 289.74]]
+    pointers: [[2.78, 47.22], [2.78, 47.22]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb9:
+    target: [0.0, 0.041, 0.9, 0.0, 0.0]
+    waypoints: [[0.0, 0.041, 0.9, 0.0, 0.0], [0.0, 0.041, 0.9, 0.0, 4.9583]]
+    delta_t: 0.0
+    iterations: 1
+    params:
+      linear: true
+      relative: false
+    servos: [[250.26, 430.26], [250.26, 430.26]]
+    pointers: [[5.0, 45.0], [5.0, 45.0]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
