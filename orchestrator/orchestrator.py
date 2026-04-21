@@ -1,6 +1,6 @@
 import argparse
+import io
 import os
-
 import yaml
 import json
 import time
@@ -10,6 +10,7 @@ import http.server
 import socketserver
 import sys
 import signal
+import shutil
 import logging
 from datetime import datetime
 from functools import partial
@@ -19,6 +20,9 @@ from invoke.exceptions import CommandTimedOut
 # Assumed local modules based on your import list
 from logger import setup_logging
 from restart import reboot_crazyflie
+from switch_network import apply_network_mode
+
+# from Interaction.vicon_noise_tracker import run_tracker
 
 MANIFEST_FILE = 'swarm_manifest.yaml'
 DRONE_SCRIPT = 'controller.py'
@@ -34,19 +38,29 @@ class SwarmOrchestrator:
         # Configuration State
         self.manifest = self._load_manifest()
         self.ctrl_cfg = self.manifest['controller']
+        if args.http_port:
+            self.ctrl_cfg['http_port'] = args.http_port
+        if args.zmq_cmd_port:
+            self.ctrl_cfg['zmq_cmd_port'] = args.zmq_cmd_port
+        if args.zmq_ack_port:
+            self.ctrl_cfg['zmq_ack_port'] = args.zmq_ack_port
         self.drones = self.manifest.get('drones', [])
         self.camera_cfg = self.manifest.get('camera_node')
         self.radio_node = self.manifest.get('radio_node')
         self.common_cfg = self.manifest['common']
-        self.mission = self._load_mission()
+        self.missions = self._load_missions()
+        self.mission = self.missions[0] if self.missions else None
 
         # Runtime State
         self.tag = None
-        self.running = False
+        self.running = threading.Event()
         self.emergency = False
         self.pending_downloads = self._load_previous_downloads()
         self.landed_drones = set()
         self.ready_ids = set()
+
+        self.loadcell_thread = None
+        self.vicon_tracker_thread = None
 
         # Network Resources
         self.zmq_context = None
@@ -62,9 +76,19 @@ class SwarmOrchestrator:
         with open(MANIFEST_FILE) as f:
             return yaml.safe_load(f)
 
-    def _load_mission(self):
-        with open(os.path.join(self.ctrl_cfg['mission_path'], self.ctrl_cfg['mission_file'])) as f:
-            return yaml.safe_load(f)
+    def _load_missions(self):
+        missions = []
+        files = self.ctrl_cfg.get('mission_files', [])
+        if not files and 'mission_file' in self.ctrl_cfg:
+            files = [self.ctrl_cfg['mission_file']]
+        
+        self.mission_filepaths = []
+        for file in files:
+            path = os.path.join(self.ctrl_cfg['mission_path'], file)
+            self.mission_filepaths.append(path)
+            with open(path) as f:
+                missions.append(yaml.safe_load(f))
+        return missions
 
     def _load_previous_downloads(self):
         try:
@@ -107,40 +131,139 @@ class SwarmOrchestrator:
         self.logger.info(f"ZMQ Server Online at {self.ctrl_cfg['ip']}")
 
     def _get_drone_cmd(self, drone):
+        if self.args.interaction:
+            return self._get_drone_cmd_interaction(drone)
+        elif self.args.illumination:
+            return self._get_drone_cmd_illumination(drone)
+        elif self.args.morphing:
+            return self._get_drone_cmd_morphing(drone)
+        else:
+            raise Exception("mode not supported")
+
+    def _get_drone_cmd_interaction(self, drone):
         alt = self.mission['drones'][drone['id']]['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        led_count = drone.get('led_count', 50)
+        radio_arg = f"--radio {drone['uri']}" if self.args.radio else ""
+        droneless_arg = "--droneless" if self.args.droneless else ""
+        p = drone.get('init_pos', None)
+        obj_name = drone.get('label', None)
+        if p:
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
+        elif obj_name:
+            mocap_args = f"--obj-name {obj_name} --vicon-mode rigidbody "
+
+        extra_markers = self.manifest.get('apparatus', None)
+        extra_marker_args = ""
+        if extra_markers:
+            for m in extra_markers:
+                extra_marker_args += f"--extra-marker {m['id']} "
+                init_pos = m.get("init_pos")
+                if init_pos is not None:
+                    extra_marker_args += f"{' '.join(str(c) for c in m['init_pos'])} "
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && "
+            f"source {self.common_cfg['venv_path']}/bin/activate && "
+            "git pull && "
+            f"nohup python3 {DRONE_SCRIPT} "
+            f"--orchestrated --interaction --tag {self.tag} ",
+            f"--intractable-illumination" if getattr(self.args, 'intractable_illumination', False) else "",
+            f"--ground-test " if self.args.ground else "",
+            f"{radio_arg} "
+            f"{extra_marker_args} "
+            f"--vicon {mocap_args} "
+            f"--drone-id {drone['id']} ",
+            f"--led --led-count {led_count} " if led_count > 0 and not self.args.radio else " ",
+            f"--servo --servo-type {drone.get('type', 'H')} --servo-count {servo_count} " if servo_count > 0 and not self.args.radio else " ",
+            f"--takeoff-altitude {alt} "
+            "--smooth-controller-rate 100 "
+            "--log "
+            f"{droneless_arg} "
+            "--cf-log-period 10 "
+            # "--skip-takeoff --skip-landing "
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+
+        # If a reference object is configured, also launch the noise tracker on the drone.
+        ref_obj = self.common_cfg.get('reference_object')
+        if ref_obj:
+            vicon_log = f"{self.common_cfg['work_dir']}/logs/vicon_{self.tag}.json"
+            cmd.append(
+                f"cd {self.common_cfg['work_dir']} && "
+                f"source {self.common_cfg['venv_path']}/bin/activate && "
+                f"nohup python3 Interaction/vicon_noise_tracker.py "
+                f"--subject {ref_obj} --duration 10 "
+                f"--out {vicon_log} "
+                f"> vicon_noise.log 2>&1 < /dev/null &"
+            )
+
+        return f" ".join(cmd)
+
+    def _get_drone_cmd_illumination(self, drone):
+        alt = self.mission['drones'][drone['id']]['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        servo_offsets = drone.get('servo_offsets', [0.0] * servo_count)
+        led_count = drone.get('led_count', 50)
         if hasattr(drone, "obj_name"):
             mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
             p = drone['init_pos']
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
-        if self.args.ground:
-            return (
-                f"cd {self.common_cfg['work_dir']} && "
-                f"source {self.common_cfg['venv_path']}/bin/activate && "
-                "git pull && "
-                f"nohup python3 {DRONE_SCRIPT} "
-                f"--orchestrated --tag {self.tag} --ground-test "
-                f"--drone-id {drone['id']} "
-                f"--led --servo --servo-type {drone['type']} "
-                f"--takeoff-altitude {alt} "
-                f"--smooth-controller-rate 50 "
-                f"> drone_{drone['id']}.log 2>&1 < /dev/null &"
-            )
+            
+        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
+        
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && ",
+            f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            "git pull && ",
+            f"nohup python3 {DRONE_SCRIPT} ",
+            f"--illumination --orchestrated --tag {self.tag} ",
+            "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
+            f"{viewpoint_arg}",
+            f"{anchor_arg}",
+            f"--drone-id {drone['id']} ",
+            f"--led --led-brightness 0.5 --led-count {led_count} " if led_count > 0 else " ",
+            f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
+            f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
+            f"--takeoff-altitude {alt} ",
+            "--smooth-controller-rate 50 ",
+            "--log ",
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+        return " ".join(cmd)
+
+    def _get_drone_cmd_morphing(self, drone):
+        alt = self.mission['drones'][drone['id']]['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        led_count = drone.get('led_count', 50)
+        if hasattr(drone, "obj_name"):
+            mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
-            return (
-                f"cd {self.common_cfg['work_dir']} && "
-                f"source {self.common_cfg['venv_path']}/bin/activate && "
-                "git pull && "
-                f"nohup python3 {DRONE_SCRIPT} "
-                f"--orchestrated --tag {self.tag} "
-                f"--vicon {mocap_args} "
-                f"--drone-id {drone['id']} "
-                f"--led --servo --servo-type {drone['type']} "
-                f"--takeoff-altitude {alt} "
-                "--smooth-controller-rate 50 "
-                "--log "
-                f"> drone_{drone['id']}.log 2>&1 < /dev/null &"
-            )
+            p = drone['init_pos']
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
+            
+        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
+        
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && ",
+            f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            "git pull && ",
+            f"nohup python3 {DRONE_SCRIPT} ",
+            f"--illumination --morphing --orchestrated --tag {self.tag} ",
+            "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
+            f"{viewpoint_arg}",
+            f"{anchor_arg}",
+            f"--drone-id {drone['id']} ",
+            f"--led --led-count {led_count} " if led_count > 0 else " ",
+            f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
+            f"--takeoff-altitude {alt} ",
+            "--smooth-controller-rate 50 ",
+            "--log ",
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+        return " ".join(cmd)
 
     def _get_camera_cmd(self):
         camera_params = [
@@ -150,7 +273,7 @@ class SwarmOrchestrator:
             "--awb", "indoor",
         ]
         if self.args.dark:
-            camera_params += ["--gain", "2.0"]
+            camera_params += ["--gain", "1.2"]
         else:
             camera_params += ["--gain", "0.8"]
 
@@ -166,8 +289,9 @@ class SwarmOrchestrator:
 
         try:
             conn = Connection(host=device_cfg['ip'], user=device_cfg['user'], connect_timeout=5)
-            # Push manifest
-            conn.put(MANIFEST_FILE, remote=f"{self.common_cfg['work_dir']}/swarm_manifest.yaml")
+            # Push manifest from in-memory state (reflects any arg overrides) without touching local file
+            manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
+            conn.put(manifest_buf, remote=f"{self.common_cfg['work_dir']}/swarm_manifest.yaml")
             # Run command (detach)
             conn.run(cmd, timeout=2, pty=False)
             return True
@@ -195,6 +319,29 @@ class SwarmOrchestrator:
         except Exception as e:
             self.logger.error(f"Failed to download {description}: {e}")
             return False
+
+    def _apply_network_mode(self):
+        """
+        If the manifest specifies a non-wifi network mode, SSH into every drone
+        to schedule the interface switch, print operator instructions, wait for
+        the operator to reconnect, then update self.manifest / self.drones /
+        self.ctrl_cfg so that all subsequent SSH and ZMQ connections use the
+        correct (adhoc / bluetooth) IPs.
+        """
+        mode = self.manifest.get("network", {}).get("mode", "wifi")
+        if mode == "wifi":
+            return   # nothing to do
+
+        self.logger.info(f"Network mode: {mode} — initiating switch...")
+        updated = apply_network_mode(self.manifest, mode)
+
+        # Propagate updated IPs into live state
+        self.manifest   = updated
+        self.ctrl_cfg   = updated["controller"]
+        self.drones     = updated.get("drones", [])
+        self.camera_cfg = updated.get("camera_node")
+        self.radio_node = updated.get("radio_node")
+        self.logger.info(f"Network switch complete. Controller IP: {self.ctrl_cfg['ip']}")
 
     def shutdown_nodes(self):
         """Sends sudo shutdown command to all drones."""
@@ -224,50 +371,33 @@ class SwarmOrchestrator:
         """
         uris = [d['uri'] for d in self.drones]
 
+        if self.args.radio or self.args.droneless:
+            return
+
         if remote:
             if not self.radio_node:
                 print("[Orchestrator] Cannot perform remote reboot: No 'radio_node' in manifest.")
                 return
 
             print(f"[Orchestrator] Sending REMOTE REBOOT request to Radio Node ({len(uris)} drones)...")
-            msg = {
-                "cmd": "REBOOT",
-                "uris": uris
-            }
-
-            # --- Retry Logic ---
-            retries = 3
-            timeout_ms = 3000
-            ack_received = False
-
-            # Use a poller to listen for the specific ACK
-            poller = zmq.Poller()
-            poller.register(self.pull_socket, zmq.POLLIN)
-
-            for attempt in range(1, retries + 1):
-                self.logger.info(f"Attempt {attempt}/{retries}: Sending REBOOT command...")
-                self.pub_socket.send_json(msg)
-
-                # Wait for ACK
-                events = dict(poller.poll(timeout_ms))
-                if self.pull_socket in events:
-                    try:
-                        reply = self.pull_socket.recv_json(flags=zmq.NOBLOCK)
-                        # Check if this is the ACK we want
-                        if reply.get('id') == 'RADIO' and reply.get('status') == 'REBOOT_STARTED':
-                            self.logger.info("Radio Node confirmed receipt. Reboot sequence initiated.")
-                            ack_received = True
-                            break
-                        else:
-                            self.logger.info(f"(Ignored message while waiting for ACK: {reply})")
-                    except zmq.Again:
-                        pass
-
-                if not ack_received:
-                    self.logger.info("Timeout waiting for Radio Node confirmation.")
-
-            if not ack_received:
-                self.logger.info("Radio Node did not respond after multiple attempts. Reboot failed.")
+            
+            env = self.common_cfg['venv_path']
+            work_dir = self.common_cfg['work_dir']
+            uris_str = " ".join(uris)
+            
+            user = self.radio_node.get('user', 'fls')
+            ip = self.radio_node['ip']
+            
+            cmd = f"source {env}/bin/activate && cd {work_dir} && python3 restart.py {uris_str}"
+            self.logger.info(f"Executing: ssh {user}@{ip} \"{cmd}\"")
+            
+            try:
+                conn = Connection(host=ip, user=user, connect_timeout=5)
+                # Run the restart command via SSH
+                conn.run(cmd, pty=False)
+                self.logger.info("Remote reboot issued successfully.")
+            except Exception as e:
+                self.logger.error(f"Failed to issue remote reboot: {e}")
                 return
         else:
             for drone in self.drones:
@@ -287,39 +417,67 @@ class SwarmOrchestrator:
         self.logger.info(f"Mission Tag: {self.tag}")
 
         self.setup_network()
-        self.running = True
+        self.running.set()
 
         try:
+            # Switch drones to adhoc/bluetooth if configured, update IPs
+            self._apply_network_mode()
+
             # Process Pending Downloads from previous runs
             self._process_pending_downloads()
 
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
-            self.reboot_flight_controllers(remote=bool(self.radio_node))
+            if not self.args.record:
+                if not self.args.skip_dispatcher:
+                    from dispatcher import run_dispatch
+                    is_mock = self.args.ground or self.args.droneless
+                    self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
+                    self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
+                    self.manifest['drones'] = self.drones
 
-            for drone in self.drones:
-                cmd = self._get_drone_cmd(drone)
-                if self._boot_remote_node(drone, cmd, "Drone"):
-                    self.pending_downloads.append({'drone': drone, 'tag': self.tag})
+                self.reboot_flight_controllers(remote=bool(self.radio_node))
 
+                for drone in self.drones:
+                    cmd = self._get_drone_cmd(drone)
+                    if self._boot_remote_node(drone, cmd, "Drone"):
+                        entry = {'drone': drone, 'tag': self.tag}
+                        if self.args.interaction and self.common_cfg.get('reference_object'):
+                            entry['vicon_log'] = True  # also download vicon_{tag}.json
+                        self.pending_downloads.append(entry)
+
+            if self.args.loadcell:
+                from Interaction.loadcell_worker import loadcell_worker
+                self.loadcell_thread = threading.Thread(
+                    target=loadcell_worker,
+                    args=(self.logger, self.running, self.tag)  #
+                )
             if self.camera_cfg:
-                if not self.args.ground:
+                if not self.args.ground and not self.args.skip_record:
                     self._boot_remote_node(self.camera_cfg, self._get_camera_cmd(), "Camera")
             else:
                 self.logger.warning("No camera_node found. Skipping.")
 
+            if self.loadcell_thread:
+                self.loadcell_thread.start()
+
             self._wait_for_ready()
 
-            input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
+            if not self.args.skip_confirm:
+                input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
 
             if self.manifest['mission']['require_handshake']:
-                self.ready_ids = set()
-                self._wait_for_ready()
-                input(">>> All Green. Press ENTER to proceed (Ctrl+C to Abort)...")
-                self.logger.info("Broadcasting START...")
-                self.pub_socket.send_json({"cmd": "START"})
+                for i, mission in enumerate(self.missions):
+                    self.ready_ids = set()
+                    self._wait_for_ready()
+                    if not self.args.skip_confirm:
+                        input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
+                    if i == 0:
+                        time.sleep(5)
+                    self.logger.info(f"Broadcasting START for Mission {i+1}...")
+                    self.pub_socket.send_json({"cmd": "START"})
 
             self._monitor_flight()
 
@@ -339,10 +497,22 @@ class SwarmOrchestrator:
         self.logger.info(f"Processing {len(self.pending_downloads)} pending downloads...")
         remaining = []
         for item in self.pending_downloads:
-            remote = f"{self.common_cfg['work_dir']}/logs/{item['tag']}.json"
-            local = f"./logs/{item['drone']['id']}_{item['tag']}.json"
+            drone = item['drone']
+            tag = item['tag']
+            work = self.common_cfg['work_dir']
 
-            success = self._download_file(item['drone'], remote, local, "Log")
+            # Main controller log
+            remote = f"{work}/logs/{tag}.json"
+            local = f"./logs/{drone['id']}_{tag}.json"
+            success = self._download_file(drone, remote, local, "Log")
+
+            # Vicon noise log (only if tracker was launched)
+            if item.get('vicon_log'):
+                vr = f"{work}/logs/vicon_{tag}.json"
+                vl = f"./logs/vicon_{tag}.json"
+                v_ok = self._download_file(drone, vr, vl, "Vicon Noise Log")
+                success = success and v_ok
+
             if not success:
                 remaining.append(item)
 
@@ -352,7 +522,7 @@ class SwarmOrchestrator:
         self.logger.info("Waiting for swarm readiness...")
         total_drones = len(self.drones)
 
-        while len(self.ready_ids) < total_drones and self.running:
+        while len(self.ready_ids) < total_drones and self.running.is_set():
             try:
                 msg = self.pull_socket.recv_json()
                 sender_id = msg.get('id')
@@ -360,6 +530,8 @@ class SwarmOrchestrator:
 
                 if sender_id == 'CAM' and status == 'READY':
                     self.logger.info("Camera Node Ready.")
+                    if self.args.record:
+                        return
                 elif "lb" in sender_id:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
@@ -370,7 +542,10 @@ class SwarmOrchestrator:
     def _monitor_flight(self):
         launched_drones = len(self.ready_ids)
 
-        while len(self.landed_drones) < launched_drones and self.running:
+        if self.args.record:
+            while self.running.is_set():
+                time.sleep(1)
+        while len(self.landed_drones) < launched_drones and self.running.is_set():
             try:
                 msg = self.pull_socket.recv_json()
                 if msg.get('status') == 'LANDED':
@@ -388,7 +563,7 @@ class SwarmOrchestrator:
 
     def emergency_stop(self):
         """Broadcasts emergency command and waits for landing confirmations."""
-        self.running = False  # Stop inner loops
+        self.running.clear()  # Stop inner loops
         self.emergency = True
         self.logger.info("!!! TRIGGERING EMERGENCY LANDING !!!")
 
@@ -400,10 +575,10 @@ class SwarmOrchestrator:
 
     def cleanup(self):
         self.logger.info("Running cleanup sequence...")
-        self.running = False
+        self.running.clear()
 
         # Stop Camera
-        if self.camera_cfg and self.pub_socket and not self.args.ground:
+        if self.camera_cfg and self.pub_socket and not self.args.ground and not self.args.skip_record:
             self.logger.info("Stopping Camera...")
             self.pub_socket.send_json({"cmd": "STOP_CAMERA"})
             time.sleep(2)
@@ -415,6 +590,21 @@ class SwarmOrchestrator:
 
         # Retry Pending Downloads (Logs)
         self._process_pending_downloads()
+
+        # Copy mission files to logs
+        if hasattr(self, 'mission_filepaths') and self.tag:
+            self.logger.info("Copying mission files to logs...")
+            os.makedirs("./logs", exist_ok=True)
+            for path in self.mission_filepaths:
+                try:
+                    basename = os.path.basename(path)
+                    name_part, ext = os.path.splitext(basename)
+                    new_filename = f"{name_part}_{self.tag}{ext}"
+                    dest_path = os.path.join("./logs", new_filename)
+                    shutil.copy(path, dest_path)
+                    self.logger.info(f"Copied {basename} to {dest_path}")
+                except Exception as e:
+                    self.logger.error(f"Failed to copy mission file {path}: {e}")
 
         # Save unfinished state
         if self.pending_downloads:
@@ -435,10 +625,26 @@ class SwarmOrchestrator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
+    parser.add_argument("--interaction", action="store_true", help="interaction application")
+    parser.add_argument("--intractable-illumination", action="store_true",
+                        help="interaction application with illumination")
+    parser.add_argument("--morphing", action="store_true", help="illumination application with morphing emulator")
     parser.add_argument("--off", action="store_true", help="shutdown the raspberry pis")
     parser.add_argument("--kill", action="store_true", help="stop the controller")
     parser.add_argument("--ground", action="store_true", help="ground test")
     parser.add_argument("--dark", action="store_true", help="recording in darkness")
+    parser.add_argument("--record", action="store_true", help="run the camera only to record")
+    parser.add_argument("--skip-record", action="store_true", help="run without the camera")
+    parser.add_argument("--radio", action="store_true", help="run mission with CrazyRadio")
+    parser.add_argument("--loadcell", action="store_true", help="run with loadcell")
+    parser.add_argument("--skip-confirm", action="store_true", help="run without pressing enter")
+    parser.add_argument("--skip-dispatcher", action="store_true", help="skip the dispatcher logic and UI")
+    parser.add_argument("--http-port", type=int, default=None, help="override manifest http_port")
+    parser.add_argument("--zmq-cmd-port", type=int, default=None, help="override manifest zmq_cmd_port")
+    parser.add_argument("--zmq-ack-port", type=int, default=None, help="override manifest zmq_ack_port")
+    parser.add_argument("--droneless", action="store_true", help="Run without FC conneced")
+
     args = parser.parse_args()
 
     orchestrator = SwarmOrchestrator(args)

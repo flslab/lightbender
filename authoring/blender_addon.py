@@ -3366,7 +3366,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         props = scene.drone_props
 
         # --- Morph Animation ---
-        layout.label(text="Morph Animation:", icon='MOD_ARMATURE')
+        layout.label(text="Morph:", icon='MOD_ARMATURE')
         box = layout.box()
 
         box.prop(props, "morph_svg_filepath")
@@ -3381,7 +3381,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         layout.separator()
 
         # --- Fold Animation ---
-        layout.label(text="Fold Animation:", icon='CON_ROTLIKE')
+        layout.label(text="Fold:", icon='CON_ROTLIKE')
         box = layout.box()
         box.prop(props, "fold_angle")
         row = box.row(align=True)
@@ -3394,7 +3394,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         layout.separator()
 
         # --- Draw & Erase Sequencer ---
-        layout.label(text="Automatic Draw & Erase:", icon='GREASEPENCIL')
+        layout.label(text="Draw/Erase:", icon='GREASEPENCIL')
         box = layout.box()
 
         row = box.row()
@@ -3405,7 +3405,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
 
         if props.de_groups and props.de_active_group_index < len(props.de_groups):
             act_grp = props.de_groups[props.de_active_group_index]
-            box.label(text=f"Drones in {act_grp.name}:")
+            box.label(text=f"LightBenders in {act_grp.name}:")
 
             row = box.row()
             row.template_list("UL_DrawEraseDrones", "", act_grp, "drones", act_grp, "active_drone_index", rows=4)
@@ -3429,13 +3429,13 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         row.prop(props, "de_bg_color", text="Erase RGB")
 
         row = box.row(align=True)
-        row.operator("drone.generate_draw_erase", text="Generate Wipe Animation", icon='KEYINGSET')
+        row.operator("drone.generate_draw_erase", text="Generate Draw/Erase", icon='KEYINGSET')
         row.operator("drone.clear_draw_erase", text="", icon='TRASH')
 
         layout.separator()
 
         # --- Depth Fly-In Feature ---
-        layout.label(text="Depth Fly-In:", icon='OUTLINER_OB_CAMERA')
+        layout.label(text="Fly-In/Fly-Out:", icon='OUTLINER_OB_CAMERA')
         box = layout.box()
         
         box.prop(props, "flyin_ref_distance")
@@ -3455,7 +3455,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         box.prop(props, "flyin_inward_duration")
 
         row = box.row(align=True)
-        row.operator("drone.generate_flyin", text="Generate Fly-In", icon='KEYINGSET')
+        row.operator("drone.generate_flyin", text="Generate Fly-In/Fly-Out", icon='KEYINGSET')
         row.operator("drone.clear_flyin", text="", icon='TRASH')
 
 
