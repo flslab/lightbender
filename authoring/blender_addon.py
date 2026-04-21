@@ -19,7 +19,7 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = ""
+REPO_DIR = "/Users/hamed/Documents/Holodeck/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
@@ -2500,7 +2500,7 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         for obj in drones_to_export:
             obj.select_set(True)
 
-        target_yaml = os.path.join(ORCHESTRATOR_DIR, "mission", "blender_mission.yaml")
+        target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", "blender_mission.yaml")
         target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
 
         # Ensure directory exists
