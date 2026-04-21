@@ -13,11 +13,15 @@ import math
 import bmesh
 import random
 import re
+import os
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
     CollectionProperty, FloatVectorProperty 
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
+REPO_DIR = ""
+AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
+ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
 # ------------------------------------------------------------------------
 #    Properties & Data Classes
@@ -2002,14 +2006,14 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         try:
             addon_dir = os.path.dirname(os.path.realpath(__file__))
         except NameError:
-            addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+            addon_dir = f"{AUTHORING_DIR}"
 
         input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
         output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
 
         deconflict_script = os.path.join(addon_dir, "deconflict.py")
         if not os.path.exists(deconflict_script):
-            alt_path = "/Users/hamed/Documents/Holodeck/lightbender/authoring/deconflict.py"
+            alt_path = os.path.join(AUTHORING_DIR, "deconflict.py")
             if os.path.exists(alt_path):
                 deconflict_script = alt_path
             else:
@@ -2496,8 +2500,8 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         for obj in drones_to_export:
             obj.select_set(True)
 
-        target_yaml = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/blender_mission.yaml"
-        target_script = "/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/orchestrator.py"
+        target_yaml = os.path.join(ORCHESTRATOR_DIR, "mission", "blender_mission.yaml")
+        target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
@@ -2552,7 +2556,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         # try:
         #     addon_dir = os.path.dirname(os.path.realpath(__file__))
         # except NameError:
-        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        addon_dir = AUTHORING_DIR
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
 
@@ -3020,7 +3024,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
             self.report({'WARNING'}, "No existing LightBenders found in scene.")
             return {'CANCELLED'}
 
-        addon_dir = "/Users/hamed/Documents/Holodeck/lightbender/authoring"
+        addon_dir = AUTHORING_DIR
         temp_dir = tempfile.gettempdir()
         target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
