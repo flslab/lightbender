@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 16),
+    "version": (1, 17),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create light-element drones, animate LEDs with pointers, add position errors, and export YAML",
@@ -416,13 +416,21 @@ class DroneProperties(bpy.types.PropertyGroup):
             ('SPARKLE', "Random Sparkle", "Randomly sparkles with the first color"),
             ('RAINBOW', "Rainbow Wheel", "Moving rainbow through all colors"),
             ('CHASE', "Color Chase", "A moving block of color"),
-            ('BREATHE', "Breathe (Pulse)", "Smoothly pulses brightness"),
+            ('PULSE', "Pulse", "Smoothly pulses brightness"),
+            ('COLOR_CYCLE', "Color Cycle", "Smoothly cycles between two colors using sin/cos blend"),
         ],
         default='BLINK'
     )
     global_expr_colors: CollectionProperty(type=ColorItem)
     global_expr_active_color_index: IntProperty(default=0)
     global_expr_speed: FloatProperty(name="Speed Multiplier", default=5.0, min=0.1)
+    global_expr_sparkle_threshold: FloatProperty(
+        name="Sparkle Threshold",
+        description="Probability threshold above which a LED shows the sparkle color (0 = always sparkle, 1 = never)",
+        default=0.7,
+        min=0.0,
+        max=1.0
+    )
 
 
 # ------------------------------------------------------------------------
@@ -1475,8 +1483,11 @@ class DRONE_OT_preset_colors(bpy.types.Operator):
         elif preset == 'CHASE':
             add_c(0.0, 1.0, 0.0)
             add_c(0.0, 0.1, 0.0)
-        elif preset == 'BREATHE':
+        elif preset == 'PULSE':
             add_c(1.0, 0.2, 0.5)
+        elif preset == 'COLOR_CYCLE':
+            add_c(1.0, 0.0, 0.0)
+            add_c(0.0, 0.0, 1.0)
         else:
             add_c(1.0, 1.0, 1.0)
 
@@ -1523,18 +1534,31 @@ class DRONE_OT_apply_global_expression(bpy.types.Operator):
             formula = f"{c_str}[int(t * {s}) % {c_len}]"
         elif preset == 'SPARKLE':
             bg = "[0,0,0]" if c_len == 1 else f"{c_str}[1]"
-            formula = f"{c_str}[0] if random.random() > 0.7 else {bg}"
+            thr = props.global_expr_sparkle_threshold
+            formula = f"{c_str}[0] if random.random() < {thr} else {bg}"
         elif preset == 'RAINBOW':
             formula = f"{c_str}[int((i * 0.5 + t * {s}) % {c_len})]"
         elif preset == 'CHASE':
             bg = "[0,0,0]" if c_len == 1 else f"{c_str}[1]"
             formula = f"{c_str}[0] if int(i*0.5 - t*{s}) % 10 < 3 else {bg}"
-        elif preset == 'BREATHE':
+        elif preset == 'PULSE':
             r = int(props.global_expr_colors[0].color[0] * 255) if c_len > 0 else 255
             g = int(props.global_expr_colors[0].color[1] * 255) if c_len > 0 else 255
             b = int(props.global_expr_colors[0].color[2] * 255) if c_len > 0 else 255
             m = f"(0.5 + 0.5 * math.sin(t * {s}))"
             formula = f"[{r} * {m}, {g} * {m}, {b} * {m}]"
+        elif preset == 'COLOR_CYCLE':
+            c1 = props.global_expr_colors[0].color if c_len > 0 else (1.0, 0.0, 0.0)
+            c2 = props.global_expr_colors[1].color if c_len > 1 else (0.0, 0.0, 1.0)
+            r1, g1, b1 = int(c1[0]*255), int(c1[1]*255), int(c1[2]*255)
+            r2, g2, b2 = int(c2[0]*255), int(c2[1]*255), int(c2[2]*255)
+            w1 = f"(0.5+0.5*math.sin({s}*t))"
+            w2 = f"(0.5+0.5*math.cos({s}*t))"
+            formula = (
+                f"[int({w1}*{r1}+{w2}*{r2}),"
+                f"int({w1}*{g1}+{w2}*{g2}),"
+                f"int({w1}*{b1}+{w2}*{b2})]"
+            )
 
         # Apply to drones
         drones_to_affect = []
@@ -3714,6 +3738,8 @@ class VIEW3D_PT_lb_global_leds(bpy.types.Panel):
 
         box.operator("drone.preset_colors", text="Load Preset Colors", icon='COLOR')
         box.prop(props, "global_expr_speed")
+        if props.global_expr_preset == 'SPARKLE':
+            box.prop(props, "global_expr_sparkle_threshold")
 
         row = box.row(align=True)
         row.operator("drone.apply_global_expression", text="Apply to Selected", icon='VIEW_PAN').apply_to_all = False
