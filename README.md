@@ -8,8 +8,8 @@ Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu)
 ## Features
 
 * Illuminations using a swarm of LightBenders.
-* Authoring tool in the form of a Blender add-on, see the instructions in the [Source Code](authoring/) directory.
-* Bare-hand interaction with LightBenders, see the instructions in the Interaction directory.
+* Authoring tool in the form of a Blender add-on, see the instructions in the [authoring](authoring/) directory.
+* Bare-hand interaction with LightBenders, see the instructions in the [Interaction](Interaction/) directory.
 
 ## Illumination
 
