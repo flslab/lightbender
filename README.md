@@ -1,5 +1,9 @@
 # LightBender
-A LightBender is an FLS with an actuated rod as its lighting primitive. 
+A LightBender is a form of FLS with an actuated rod as its lighting primitive.
+A swarm of LightBenders illuminate graphics and animations visible to the naked eye.
+When equipped with a cage, a LightBender facilitates safe, bare-hand interaction. 
+
+Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu), and Shahram Ghandeharizadeh (shahram@usc.edu)
 
 ## Illumination
 
