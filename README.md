@@ -31,4 +31,4 @@ The effects are highlighted by the following video clips:
 ## Interaction
 A cage provides safe bare-hand interactions with a LightBender, preventing their hand and fingers from coming in contact with a LightBender's blades.  The provided software runs on the Raspberry Pi of a LightBender.  It enables the LightBender to monitor its own velocity to detect user's ineraction and disengagement.  This decentralized implementation enables multiple users to interact with different LightBenders simultaneously.  The following video shows Shahram and Shuqin interacting with a happy emoji.
 
-- [Interaction with emoji](https://youtu.be/jwrJeGCwS_M) 
+- [Interaction with emoji](https://youtu.be/_huysBvEuR4) 
