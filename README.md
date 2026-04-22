@@ -1,4 +1,5 @@
 # LightBender
+A LightBender is an FLS with an actuated rod as its lighting primitive. 
 
 ## Illumination
 
