@@ -5,6 +5,12 @@ When equipped with a cage, a LightBender facilitates safe, bare-hand interaction
 
 Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu), and Shahram Ghandeharizadeh (shahram@usc.edu)
 
+## Features
+
+* Illuminations using a swarm of LightBenders.
+* Authoring tool in the form of a Blender add-on.
+* Bare-hand interaction with LightBenders.
+
 ## Illumination
 
 ### LightBender Visual Effects
