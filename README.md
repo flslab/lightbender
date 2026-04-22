@@ -19,7 +19,7 @@ An artist may manipulate per-LED color and brightness, rod segment angles, and 3
 
 We support 7 visual effects today: Pulse, Color Cycle, Sparkle, Color Chase, Draw/Erase, Fold, and Fly-out/in.
 These may be applied to arbitrary words and line drawings using the Blender add-on provided in the local [authoring](authoring/) directory.
-Fold is a novel effect that utilizes the actuated rods of a swarm of LightBender to transition lines to drawings and words.
+Fold is a novel effect that utilizes the actuated rods of a swarm of LightBenders to transition lines to drawings and words.
 The effects are highlighted by the following video clips:
 
 - [Visual effects with ACM, LA, and NSF.](https://youtu.be/jwrJeGCwS_M)  
