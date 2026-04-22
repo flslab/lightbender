@@ -1,0 +1,90 @@
+name: la_interact
+camera: [2.25, 0.0, 0.94]
+drones:
+  lb7:
+    target: [-0.4794, -0.1368, 1.272, 0.0, 0.0]
+    waypoints: []
+    delta_t: 60.0
+    iterations: 1
+    interaction: single
+    params:
+      linear: true
+      relative: false
+    servos: [[90.0, 270.0]]
+    pointers: [[3.16, 46.84]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb2:
+    target: [0.2599, 0.0, 1.1616, 0.0, 0.0]
+    waypoints: []
+    delta_t: 60.0
+    iterations: 1
+    interaction: single
+    params:
+      linear: true
+      relative: false
+    servos: [[180.0, 360.0]]
+    pointers: [[10.0, 39.15]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb1:
+    target: [-0.2499, -0.35, 1.1956, 0.0, 0.0]
+    waypoints: []
+    delta_t: 60.0
+    iterations: 1
+    interaction: single
+    params:
+      linear: true
+      relative: false
+    servos: [[109.74, 289.74]]
+    pointers: [[2.78, 47.22]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+  lb9:
+    target: [0.0, 0.341, 1.2, 0.0, 0.0]
+    waypoints: []
+    delta_t: 60.0
+    iterations: 1
+    interaction: single
+    params:
+      linear: true
+      relative: false
+    servos: [[250.26, 430.26]]
+    pointers: [[5.0, 45.0]]
+    led:
+      mode: "expression"
+      rate: 50
+      formula: "([0, 0, 0]) if i < p0 else ([[215, 36, 255]][int(t * 5.0) % 1]) if i < p1 else ([0, 0, 0])"
+
+
+Interaction:
+  action: translation
+  config:
+    delta_v: 0.13
+    z: -1
+    friction_coefficient: 0
+    base_attitude: -1
+    duration: 60
+    v_scalar: [ 10, 10, 3 ]
+    grace_time: 2
+
+avoidance:
+  eta: 0.5          # repulsive APF gain η
+  zeta: 0.1         # attractive APF gain ζ (0 = no pull back to goal)
+  d_detect: 0.47    # detection radius (m) — repulsion activates within this distance
+  v_max: 2.0        # maximum APF-commanded speed (m/s)
+  ctrl_rate: 100     # avoidance loop rate (Hz)
+
+boundary_limits:
+  x_min: -7.0
+  x_max: 5.0
+  y_min: -4.0
+  y_max: 4.0
+  z_min: 0.2
+  z_max: 2

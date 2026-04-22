@@ -1,6 +1,6 @@
 name: emoji_interaction_off
 drones:
-  lb5:
+  lb10:
     target: [-0.25, 1, 1.15, 0.0]
     waypoints: []
     delta_t: 60
@@ -54,14 +54,6 @@ Interaction:
     duration: 60
     v_scalar: [10, 10, 3]
     grace_time: 2
-
-avoidance:
-  eta: 0.5          # repulsive APF gain η
-  zeta: 0.1         # attractive APF gain ζ (0 = no pull back to goal)
-  d_detect: 0.47    # detection radius (m) — repulsion activates within this distance
-  v_max: 2.0        # maximum APF-commanded speed (m/s)
-  ctrl_rate: 100     # avoidance loop rate (Hz)
-
 boundary_limits:
   x_min: -7.0
   x_max: 5.0

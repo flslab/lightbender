@@ -21,9 +21,9 @@ import cv2
 import numpy as np
 
 
-INPUT_VIDEO   = '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/record_cut.mp4'
-OUTPUT_VIDEO  = '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/tmp.mp4'   # e.g. "tracked.mp4"
-OVERLAY_VIDEO = "../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2/lb2_emoji_interaction_off_2026-04-18_12-30-35_dashboard.mov"
+INPUT_VIDEO   = '../../orchestrator/logs/lit_3/tmp_lb4.mp4'
+OUTPUT_VIDEO  = '../../orchestrator/logs/lit_3/final.mp4'   # e.g. "tracked.mp4"
+OVERLAY_VIDEO = "../../orchestrator/logs/lit_3/lb5_emoji_interaction_off_2026-04-21_09-34-57_dashboard.mov"
 MODE          = "manual"   # "manual" | "auto"
 START_TIME_S  = 0       # Time in seconds to start reading the video
 

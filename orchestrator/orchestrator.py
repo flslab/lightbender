@@ -465,6 +465,7 @@ class SwarmOrchestrator:
 
             if not self.args.skip_confirm:
                 input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
+                # time.sleep(10)
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
 

@@ -1,6 +1,6 @@
 name: blender_mission
 drones:
-  lb11:
+  lb2:
     target: [0.0, 0.0, 1.0, 0.0]
     waypoints: []
     delta_t: 60.0
@@ -26,10 +26,3 @@ Interaction:
     v_scalar: [10, 10, 3]
     blender_port: 5580
     grace_time: 2.0
-
-avoidance:
-  eta: 0.5
-  zeta: 0.1
-  d_detect: 0.47
-  v_max: 2.0
-  ctrl_rate: 100

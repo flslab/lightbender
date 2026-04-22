@@ -40,7 +40,7 @@ from PIL import Image, ImageDraw, ImageFont
 # VIDEO_DURATION = 19.0  # seconds of log time to render per video
 
 
-LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '../../../fls-cf-offboard-controller/logs/SIGGRAPH_Poster/lit_2'
+LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '../../orchestrator/logs/lit_3'
 OUT_DIR        = sys.argv[2] if len(sys.argv) > 2 else LOG_DIR
 FPS            = 30
 FONT           = 20
