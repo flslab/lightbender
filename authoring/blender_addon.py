@@ -9,19 +9,404 @@ bl_info = {
 }
 
 import bpy
+import json
 import math
 import bmesh
 import random
 import re
 import os
+import socket
+import subprocess
+import time
 from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty, IntProperty, PointerProperty, \
     CollectionProperty, FloatVectorProperty 
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/path/to/lightbender"
+REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
+
+# ---------------------------------------------------------------------------
+#    Illuminate / Interaction Session State
+# ---------------------------------------------------------------------------
+
+_ILLUMINATE_TERMINAL_TAB = {"tab_ref": None}
+
+STATIC_INTERACTION_SESSION = {
+    "server_socket": None,
+    "sockets": {},
+    "buffers": {},
+    "timer_registered": False,
+    "recording": False,
+    "record_deadline": 0.0,
+    "record_updated": set(),
+    "record_received_any": False,
+    "record_failed_sends": [],
+}
+
+def get_default_interaction_yaml_path(mission_name):
+    return os.path.join(ORCHESTRATOR_DIR, "SFL", f"{mission_name}.yaml")
+
+
+def get_default_orchestrator_path():
+    return os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
+
+
+def get_controller_python():
+    controller_root = REPO_DIR
+    candidates = [
+        os.path.join(controller_root, "venv", "bin", "python"),
+        os.path.join(controller_root, ".venv", "bin", "python"),
+        os.path.join(controller_root, "venv", "Scripts", "python.exe"),
+        os.path.join(controller_root, ".venv", "Scripts", "python.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return "python3"
+
+
+def build_led_formula(props):
+    if props.led_mode == 'EXPRESSION':
+        return props.led_formula
+    raw_ptrs = []
+    for idx, ptr in enumerate(props.led_pointers):
+        raw_ptrs.append({'id': f"p{idx}", 'v': ptr.value, 'c': ptr.color_expression})
+    raw_ptrs.sort(key=lambda x: x['v'])
+    if not raw_ptrs:
+        return props.led_base_color
+    current_str = f"({raw_ptrs[-1]['c']})"
+    for j in range(len(raw_ptrs) - 2, -1, -1):
+        p_curr = raw_ptrs[j]
+        p_next = raw_ptrs[j + 1]
+        current_str = f"({p_curr['c']}) if i < {p_next['id']} else {current_str}"
+    p0 = raw_ptrs[0]
+    return f"({props.led_base_color}) if i < {p0['id']} else {current_str}"
+
+
+def build_interaction_yaml_text(scene, drones_to_export, include_blender_port=False):
+    props = scene.drone_props
+    mission_name = props.export_mission_name.strip() or scene.name.replace(' ', '_')
+    fps = scene.render.fps
+    duration = round((scene.frame_end - scene.frame_start) / fps, 4)
+    delta_v = round(props.interaction_sd / 1000.0, 4)
+
+    output_lines = [f"name: {mission_name}", "drones:"]
+    original_frame = scene.frame_current
+    scene.frame_set(original_frame)
+
+    for drone in drones_to_export:
+        loc = drone.matrix_world.translation
+        x, y, z = round(loc.x, 4), round(loc.y, 4), round(loc.z, 4)
+        yaw = round(drone.matrix_world.to_euler('XYZ').z, 4)
+        s1 = round(drone.get("servo_1", 0.0), 2)
+        s2 = round(drone.get("servo_2", 0.0), 2)
+        safe_formula = build_led_formula(drone.drone_props).replace('"', '\\"')
+
+        output_lines.append(f"  {drone.name}:")
+        output_lines.append(f"    target: [{x}, {y}, {z}, {yaw}]")
+        output_lines.append("    waypoints: []")
+        output_lines.append(f"    delta_t: {duration}")
+        output_lines.append("    iterations: 1")
+        output_lines.append("    interaction: single")
+        output_lines.append("    params:")
+        output_lines.append("      linear: true")
+        output_lines.append("      relative: false")
+        output_lines.append(f"    servos: [[{s1}, {s2}]]")
+        output_lines.append("    led:")
+        output_lines.append('      mode: "expression"')
+        output_lines.append("      rate: 0.5")
+        output_lines.append(f'      formula: "{safe_formula}"')
+
+    output_lines.extend([
+        "",
+        "Interaction:",
+        "  action: translation",
+        "  config:",
+        f"    delta_v: {delta_v}",
+        "    z: -1",
+        "    friction_coefficient: 0",
+        "    base_attitude: -1",
+        f"    duration: {duration}",
+        "    v_scalar: [10, 10, 3]",
+        f"    blender_port: {props.interaction_tcp_port if include_blender_port else 'null'}",
+        f"    grace_time: {round(props.interaction_grace_time, 4)}",
+    ])
+    return "\n".join(output_lines)
+
+
+def parse_interaction_ips(raw_ips):
+    return [ip for ip in re.split(r"[\s,;]+", raw_ips.strip()) if ip]
+
+
+def get_lb_scene_objects(scene):
+    return [obj for obj in scene.objects if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj]
+
+
+def show_popup(context, title, lines, icon='INFO'):
+    def draw(self, _context):
+        for line in lines:
+            self.layout.label(text=line)
+    context.window_manager.popup_menu(draw, title=title, icon=icon)
+
+
+def read_manifest_ips(id_filter=None):
+    """Read drone IP addresses from swarm_manifest.yaml next to the orchestrator.
+    
+    Args:
+        id_filter: optional set/list of drone IDs (e.g. {'lb1','lb2'}) to include.
+                   If None, all drones are returned.
+    Returns:
+        list of IP strings for matching drones.
+    """
+    entries = []  # list of (id, ip) tuples
+    manifest_path = os.path.join(os.path.dirname(get_default_orchestrator_path()), "swarm_manifest.yaml")
+    if not os.path.isfile(manifest_path):
+        return []
+    try:
+        with open(manifest_path, 'r') as f:
+            in_drones = False
+            current_id = None
+            current_ip = None
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith('#'):
+                    continue
+                if stripped == 'drones:':
+                    in_drones = True
+                    continue
+                if in_drones:
+                    # Detect end of drones section
+                    if stripped and not stripped.startswith('-') and not stripped.startswith('id:') and not stripped.startswith('ip:') and ':' in stripped and not stripped.startswith('#'):
+                        key = stripped.split(':')[0].strip()
+                        if key not in ('id', 'ip', 'user', 'init_pos', 'type', 'uri', 'servo_offsets', 'label', 'obj_name', 'adhoc_ip'):
+                            # Save last entry before leaving
+                            if current_id and current_ip:
+                                entries.append((current_id, current_ip))
+                            in_drones = False
+                            continue
+                    # New drone entry
+                    if stripped.startswith('- id:'):
+                        # Save previous entry
+                        if current_id and current_ip:
+                            entries.append((current_id, current_ip))
+                        current_id = stripped.split(':', 1)[1].strip().strip('"').strip("'")
+                        current_ip = None
+                    elif stripped.startswith('id:'):
+                        current_id = stripped.split(':', 1)[1].strip().strip('"').strip("'")
+                    elif stripped.startswith('ip:') or stripped.startswith('ip :'):
+                        current_ip = stripped.split(':', 1)[1].strip().strip('"').strip("'")
+            # Don't forget the last entry
+            if in_drones and current_id and current_ip:
+                entries.append((current_id, current_ip))
+    except Exception:
+        pass
+
+    if id_filter is not None:
+        id_set = set(id_filter)
+        return [ip for drone_id, ip in entries if drone_id in id_set]
+    return [ip for _, ip in entries]
+
+
+def launch_orchestrator(target_script, flags, dark_room=False):
+    python_exec = get_controller_python()
+    cmd_str = f"'{python_exec}' '{target_script}' {' '.join(flags)} --skip-confirm"
+    if dark_room:
+        cmd_str += " --dark"
+
+    apple_script = f'''
+    tell application "Terminal"
+        set newTab to do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
+        activate
+    end tell
+    '''
+    subprocess.Popen(["osascript", "-e", apple_script])
+
+
+def flush_static_interaction_messages():
+    for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
+        STATIC_INTERACTION_SESSION["buffers"][key] = ""
+        while True:
+            try:
+                data = sock_obj.recv(4096)
+                if not data:
+                    break
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+
+
+def close_static_interaction_session():
+    server_socket = STATIC_INTERACTION_SESSION.get("server_socket")
+    if server_socket:
+        try:
+            server_socket.close()
+        except OSError:
+            pass
+    STATIC_INTERACTION_SESSION["server_socket"] = None
+    for sock_obj in STATIC_INTERACTION_SESSION["sockets"].values():
+        try:
+            sock_obj.close()
+        except OSError:
+            pass
+    STATIC_INTERACTION_SESSION["sockets"].clear()
+    STATIC_INTERACTION_SESSION["buffers"].clear()
+    STATIC_INTERACTION_SESSION["recording"] = False
+    STATIC_INTERACTION_SESSION["record_deadline"] = 0.0
+    STATIC_INTERACTION_SESSION["record_updated"] = set()
+    STATIC_INTERACTION_SESSION["record_received_any"] = False
+    STATIC_INTERACTION_SESSION["record_failed_sends"] = []
+
+
+def update_interaction_editor_state():
+    scene = getattr(bpy.context, "scene", None)
+    if not scene or not hasattr(scene, "drone_props"):
+        return
+    props = scene.drone_props
+    props.interaction_connected_count = len(STATIC_INTERACTION_SESSION["sockets"])
+    props.interaction_recording_active = STATIC_INTERACTION_SESSION["recording"]
+
+
+def finalize_record_interaction_positions():
+    scene = getattr(bpy.context, "scene", None)
+    if not scene or not hasattr(scene, "drone_props"):
+        STATIC_INTERACTION_SESSION["recording"] = False
+        return
+
+    updated = set(STATIC_INTERACTION_SESSION["record_updated"])
+    received_any = STATIC_INTERACTION_SESSION["record_received_any"]
+    failed_sends = list(STATIC_INTERACTION_SESSION["record_failed_sends"])
+    STATIC_INTERACTION_SESSION["recording"] = False
+    STATIC_INTERACTION_SESSION["record_deadline"] = 0.0
+    STATIC_INTERACTION_SESSION["record_updated"] = set()
+    STATIC_INTERACTION_SESSION["record_received_any"] = False
+    STATIC_INTERACTION_SESSION["record_failed_sends"] = []
+
+    bpy.context.view_layer.update()
+    update_interaction_editor_state()
+
+    if failed_sends:
+        show_popup(
+            bpy.context,
+            "Request Errors",
+            [f"Could not request position from {addr}" for addr in failed_sends],
+            icon='ERROR'
+        )
+
+    all_lbs = {obj.name for obj in get_lb_scene_objects(scene)}
+    missing = sorted(all_lbs - updated)
+
+    if not received_any:
+        show_popup(bpy.context, "Record Position", ["No new position responses received within 100 ms."], icon='INFO')
+    else:
+        lines = [f"Updated {len(updated)} LightBenders from TCP responses."]
+        if missing:
+            lines.extend([f"No update for {name}" for name in missing[:12]])
+        show_popup(bpy.context, "Record Position Finished", lines, icon='INFO')
+
+
+def resolve_lb_by_message_id(scene, raw_id):
+    if raw_id is None:
+        return None
+    raw_str = str(raw_id)
+    exact = scene.objects.get(raw_str)
+    if exact and "servo_1" in exact:
+        return exact
+    if raw_str.isdigit():
+        return scene.objects.get(f"lb{raw_str}")
+    match = re.search(r"(\d+)", raw_str)
+    if match:
+        return scene.objects.get(f"lb{match.group(1)}")
+    return None
+
+
+def process_static_interaction_socket(key, sock_obj):
+    try:
+        data = sock_obj.recv(4096)
+    except BlockingIOError:
+        return
+    except OSError:
+        data = b""
+    if not data:
+        try:
+            sock_obj.close()
+        except OSError:
+            pass
+        STATIC_INTERACTION_SESSION["sockets"].pop(key, None)
+        STATIC_INTERACTION_SESSION["buffers"].pop(key, None)
+        return
+
+    buffer_text = STATIC_INTERACTION_SESSION["buffers"].get(key, "") + data.decode('utf-8', errors='ignore')
+    lines = buffer_text.splitlines(keepends=False)
+    if buffer_text and not buffer_text.endswith("\n"):
+        STATIC_INTERACTION_SESSION["buffers"][key] = lines.pop() if lines else buffer_text
+    else:
+        STATIC_INTERACTION_SESSION["buffers"][key] = ""
+
+    if not STATIC_INTERACTION_SESSION["recording"]:
+        return
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        scene = getattr(bpy.context, "scene", None)
+        if not scene:
+            continue
+        STATIC_INTERACTION_SESSION["record_received_any"] = True
+        obj = resolve_lb_by_message_id(scene, msg.get("id") or msg.get("drone_id"))
+        position = msg.get("position")
+        if position is None and all(k in msg for k in ("x", "y", "z")):
+            position = [msg["x"], msg["y"], msg["z"]]
+        if obj and isinstance(position, (list, tuple)) and len(position) >= 3:
+            obj.location = (float(position[0]), float(position[1]), float(position[2]))
+            STATIC_INTERACTION_SESSION["record_updated"].add(obj.name)
+
+
+def static_interaction_timer():
+    server_socket = STATIC_INTERACTION_SESSION.get("server_socket")
+    if server_socket is None:
+        STATIC_INTERACTION_SESSION["timer_registered"] = False
+        update_interaction_editor_state()
+        return None
+
+    scene = getattr(bpy.context, "scene", None)
+    props = getattr(scene, "drone_props", None) if scene else None
+    allowed_ips = set(parse_interaction_ips(props.interaction_lightbender_ips)) if props else set()
+
+    while True:
+        try:
+            client_sock, addr = server_socket.accept()
+        except BlockingIOError:
+            break
+        except OSError:
+            break
+        client_ip = addr[0]
+        if allowed_ips and client_ip not in allowed_ips:
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            continue
+        client_sock.setblocking(False)
+        key = f"{client_ip}:{addr[1]}"
+        STATIC_INTERACTION_SESSION["sockets"][key] = client_sock
+        STATIC_INTERACTION_SESSION["buffers"][key] = ""
+
+    for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
+        process_static_interaction_socket(key, sock_obj)
+
+    if STATIC_INTERACTION_SESSION["recording"] and time.monotonic() >= STATIC_INTERACTION_SESSION["record_deadline"]:
+        finalize_record_interaction_positions()
+
+    update_interaction_editor_state()
+    return 0.1
 
 # ------------------------------------------------------------------------
 #    Properties & Data Classes
@@ -230,11 +615,86 @@ class DroneProperties(bpy.types.PropertyGroup):
         default=False
     )
 
+    export_mode: EnumProperty(
+        name="Mode",
+        description="Select export/illuminate mode",
+        items=[
+            ('ILLUMINATION', "Illumination", "Standard illumination mode"),
+            ('INTERACTION', "Interaction", "Interactive editing mode with TCP control"),
+        ],
+        default='ILLUMINATION'
+    )
+
     export_rate: FloatProperty(
         name="Export Rate (Hz)",
         description="Frequency of waypoints in the output file (1/delta_t)",
         default=2.0,
         min=0.1
+    )
+
+    interaction_sd: FloatProperty(
+        name="S_D (mm/s)",
+        description="Interaction speed threshold exported in m/s",
+        default=100.0,
+        min=0.0
+    )
+
+    interaction_duration: FloatProperty(
+        name="Interaction Duration (s)",
+        description="Max interaction duration under edit mode in seconds",
+        default=300.0,
+        min=0.0
+    )
+
+    interaction_grace_time: FloatProperty(
+        name="Grace Time (s)",
+        description="Interaction grace time in seconds",
+        default=2.0,
+        min=0.0
+    )
+
+    interaction_lightbender_ips: StringProperty(
+        name="LightBender IPs",
+        description="Comma or space separated LightBender IPs for the static interaction editor",
+        default=""
+    )
+
+    interaction_tcp_port: IntProperty(
+        name="TCP Port",
+        description="TCP port used by the static interaction editor",
+        default=5560,
+        min=1,
+        max=65535
+    )
+
+    interaction_editor_active: BoolProperty(
+        name="Interaction Editor Active",
+        default=False,
+        options={'HIDDEN'}
+    )
+
+    interaction_connected_count: IntProperty(
+        name="Interaction Connected Count",
+        default=0,
+        options={'HIDDEN'}
+    )
+
+    interaction_recording_active: BoolProperty(
+        name="Interaction Recording Active",
+        default=False,
+        options={'HIDDEN'}
+    )
+
+    illuminate_running: BoolProperty(
+        name="Illuminate Running",
+        default=False,
+        options={'HIDDEN'}
+    )
+
+    edit_active: BoolProperty(
+        name="Edit Active",
+        default=False,
+        options={'HIDDEN'}
     )
 
     # SVG to Layout Settings
@@ -2473,15 +2933,11 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
 
 
 class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
-    """Export Drone Animation to YAML and Run Orchestrator"""
+    """Export Drone Animation to YAML and Run Orchestrator (Illumination mode)"""
     bl_idname = "drone.export_and_illuminate"
-    bl_label = "Export and Illuminate"
+    bl_label = "Illuminate"
 
     def execute(self, context):
-        import os
-        import subprocess
-        import re
-
         scene = context.scene
         props = scene.drone_props
 
@@ -2511,25 +2967,250 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
             self.report({'ERROR'}, "Failed to generate YAML")
             return {'CANCELLED'}
 
-        cmd_str = f"python3 '{target_script}' --illumination --skip-confirm"
+        python_exec = get_controller_python()
+        cmd_str = f"'{python_exec}' '{target_script}' --illumination --skip-confirm"
         if props.export_dark_room:
             cmd_str += " --dark"
 
-        # Open Mac Terminal to run the orchestrator so the user can monitor progress
+        # Open Mac Terminal – capture the tab reference for stop button
         apple_script = f'''
         tell application "Terminal"
-            do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
+            set newTab to do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
             activate
+            return id of window 1
         end tell
         '''
 
         try:
-            subprocess.Popen(["osascript", "-e", apple_script])
+            result = subprocess.run(["osascript", "-e", apple_script], capture_output=True, text=True)
+            _ILLUMINATE_TERMINAL_TAB["tab_ref"] = result.stdout.strip()
+            props.illuminate_running = True
             self.report({'INFO'}, "Exported and started orchestrator")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to run orchestrator: {e}")
             return {'CANCELLED'}
 
+        return {'FINISHED'}
+
+
+class DRONE_OT_stop_illuminate(bpy.types.Operator):
+    """Send stop command to the orchestrator via TCP"""
+    bl_idname = "drone.stop_illuminate"
+    bl_label = "Stop Illumination"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(('127.0.0.1', 5599))
+            s.sendall(b'Blender commanded stop\n')
+            s.close()
+            self.report({'INFO'}, "Sent stop signal to orchestrator")
+        except Exception as e:
+            self.report({'WARNING'}, f"Could not reach orchestrator: {e}")
+
+        props.illuminate_running = False
+        _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
+        return {'FINISHED'}
+
+
+class EXPORT_OT_interaction_yaml(bpy.types.Operator):
+    """Export static interaction mission to YAML"""
+    bl_idname = "drone.export_interaction_yaml"
+    bl_label = "Export Interaction YAML"
+
+    filepath: StringProperty(subtype="FILE_PATH")
+
+    def invoke(self, context, event):
+        props = context.scene.drone_props
+        self.filepath = get_default_interaction_yaml_path(props.export_mission_name.strip() or "blender_mission")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        drones_to_export = [obj for obj in context.selected_objects if "servo_1" in obj and "servo_2" in obj]
+
+        if not drones_to_export:
+            self.report({'ERROR'}, "No Drones selected")
+            return {'CANCELLED'}
+
+        try:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                f.write(build_interaction_yaml_text(scene, drones_to_export, include_blender_port=False))
+            self.report({'INFO'}, f"Exported interaction YAML to {self.filepath}")
+        except Exception as e:
+            self.report({'ERROR'}, f"File Write Error: {str(e)}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class EXPORT_OT_export_and_interact(bpy.types.Operator):
+    """Export interaction YAML and run orchestrator in interaction mode"""
+    bl_idname = "drone.export_and_interact"
+    bl_label = "Illuminate (Interaction)"
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+        drones_to_export = get_lb_scene_objects(scene)
+
+        if not drones_to_export:
+            self.report({'ERROR'}, "No lb# drones found in scene")
+            return {'CANCELLED'}
+
+        target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", (props.export_mission_name.strip() or "blender_mission") + ".yaml")
+        target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
+
+        try:
+            os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
+            with open(target_yaml, 'w', encoding='utf-8') as f:
+                f.write(build_interaction_yaml_text(scene, drones_to_export, include_blender_port=True))
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to generate interaction YAML: {e}")
+            return {'CANCELLED'}
+
+        try:
+            launch_orchestrator(
+                target_script,
+                ["--interaction", "--intractable-illumination"],
+                dark_room=props.export_dark_room
+            )
+            props.illuminate_running = True
+            self.report({'INFO'}, "Exported interaction YAML and started orchestrator")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to run orchestrator: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class DRONE_OT_start_edit(bpy.types.Operator):
+    """Start TCP listener and send render start messages to LightBenders from swarm manifest"""
+    bl_idname = "drone.start_edit"
+    bl_label = "Edit"
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+
+        # Close any previous session
+        close_static_interaction_session()
+
+        # Open TCP listener
+        try:
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind(("", props.interaction_tcp_port))
+            server_socket.listen()
+            server_socket.setblocking(False)
+        except OSError as e:
+            self.report({'ERROR'}, f"Failed to open listening socket on port {props.interaction_tcp_port}: {e}")
+            return {'CANCELLED'}
+
+        STATIC_INTERACTION_SESSION["server_socket"] = server_socket
+        props.interaction_editor_active = True
+        props.interaction_connected_count = 0
+        props.interaction_recording_active = False
+
+        if not STATIC_INTERACTION_SESSION["timer_registered"]:
+            bpy.app.timers.register(static_interaction_timer, first_interval=0.1)
+            STATIC_INTERACTION_SESSION["timer_registered"] = True
+
+        # Read IPs from swarm_manifest.yaml, filtered to only scene lb# objects
+        scene_lb_ids = {obj.name for obj in get_lb_scene_objects(scene)}
+        ips = read_manifest_ips(id_filter=scene_lb_ids)
+        duration = props.interaction_duration
+        render_msg = json.dumps({"cmd": "start_edit", "duration": duration}) + "\n"
+
+        failed_sends = []
+        for ip in ips:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2.0)
+                s.connect((ip, props.interaction_tcp_port))
+                s.sendall(render_msg.encode('utf-8'))
+                s.close()
+            except Exception:
+                failed_sends.append(ip)
+
+        if failed_sends:
+            self.report({'WARNING'}, f"Could not send render start to: {', '.join(failed_sends)}")
+
+        props.edit_active = True
+        self.report({'INFO'}, f"Edit started. TCP listening on port {props.interaction_tcp_port}.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_stop_edit(bpy.types.Operator):
+    """Record positions from TCP responses and stop edit mode"""
+    bl_idname = "drone.stop_edit"
+    bl_label = "Finish Edit"
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+
+        if not props.interaction_editor_active:
+            self.report({'ERROR'}, "Edit session is not active.")
+            return {'CANCELLED'}
+
+        if props.interaction_recording_active:
+            self.report({'WARNING'}, "Already waiting for position responses.")
+            return {'CANCELLED'}
+
+        # Request positions (same as record_interaction_positions)
+        if STATIC_INTERACTION_SESSION["sockets"]:
+            flush_static_interaction_messages()
+            request_payload = json.dumps({"cmd": "request_position"}) + "\n"
+            failed_sends = []
+            for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
+                try:
+                    sock_obj.sendall(request_payload.encode('utf-8'))
+                except (BlockingIOError, BrokenPipeError, OSError):
+                    failed_sends.append(key)
+
+            STATIC_INTERACTION_SESSION["recording"] = True
+            STATIC_INTERACTION_SESSION["record_deadline"] = time.monotonic() + 0.1
+            STATIC_INTERACTION_SESSION["record_updated"] = set()
+            STATIC_INTERACTION_SESSION["record_received_any"] = False
+            STATIC_INTERACTION_SESSION["record_failed_sends"] = failed_sends
+            props.interaction_recording_active = True
+
+        # End the edit session
+        props.edit_active = False
+        self.report({'INFO'}, "Edit stopped. Positions recorded.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
+    """Stop illumination in interaction mode via TCP command"""
+    bl_idname = "drone.stop_illuminate_interaction"
+    bl_label = "Stop Illumination"
+
+    def execute(self, context):
+        props = context.scene.drone_props
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(('127.0.0.1', 5599))
+            s.sendall(b'Blender commanded stop\n')
+            s.close()
+            self.report({'INFO'}, "Sent stop signal to orchestrator")
+        except Exception as e:
+            self.report({'WARNING'}, f"Could not reach orchestrator: {e}")
+
+        # Clean up interaction session
+        close_static_interaction_session()
+        props.illuminate_running = False
+        props.interaction_editor_active = False
+        props.interaction_connected_count = 0
+        props.edit_active = False
+        _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
         return {'FINISHED'}
 
 
@@ -3564,13 +4245,76 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
         layout.label(text="Export Config:")
         layout.prop(props, "export_mission_name")
         layout.prop(props, "export_dark_room")
-        layout.prop(props, "export_at_keyframes")
 
-        if not props.export_at_keyframes:
-            layout.prop(props, "export_rate")
+        # --- Mode Radio Buttons ---
+        layout.label(text="Mode")
+        row = layout.row(align=True)
+        row.prop_enum(props, "export_mode", 'ILLUMINATION')
+        row.prop_enum(props, "export_mode", 'INTERACTION')
 
-        layout.operator("drone.export_yaml", text="Export to YAML", icon='EXPORT')
-        layout.operator("drone.export_and_illuminate", text="Export and Illuminate", icon='PLAY')
+        if props.export_mode == 'ILLUMINATION':
+            # --- Illumination Mode ---
+            layout.prop(props, "export_at_keyframes")
+            if not props.export_at_keyframes:
+                layout.prop(props, "export_rate")
+
+            layout.operator("drone.export_yaml", text="Export YAML", icon='EXPORT')
+
+            row = layout.row(align=True)
+            # Illuminate button
+            illuminate_row = row.row(align=True)
+            illuminate_row.enabled = not props.illuminate_running
+            illuminate_row.operator("drone.export_and_illuminate", text="Illuminate", icon='PLAY')
+            # Stop Illumination button
+            stop_row = row.row(align=True)
+            stop_row.enabled = props.illuminate_running
+            stop_row.operator("drone.stop_illuminate", text="Stop Illumination", icon='SNAP_FACE')
+
+        else:
+            # --- Interaction Mode (inline, always visible) ---
+            layout.separator()
+            layout.label(text="Interaction Config", icon='SETTINGS')
+
+            # S_D and Grace Time – disabled when illuminate is running
+            config_col = layout.column()
+            config_col.enabled = not props.illuminate_running
+            config_col.prop(props, "interaction_sd")
+            config_col.prop(props, "interaction_grace_time")
+            layout.prop(props, "interaction_duration")
+
+            layout.separator()
+
+            # Export YAML
+            layout.operator("drone.export_interaction_yaml", text="Export YAML", icon='EXPORT')
+
+            # Illuminate + Stop Illumination row
+            row = layout.row(align=True)
+            illuminate_row = row.row(align=True)
+            illuminate_row.enabled = not props.illuminate_running
+            illuminate_row.operator("drone.export_and_interact", text="Illuminate", icon='PLAY')
+            stop_row = row.row(align=True)
+            stop_row.enabled = props.illuminate_running and not props.edit_active
+            stop_row.operator("drone.stop_illuminate_interaction", text="Stop Illumination", icon='SNAP_FACE')
+
+            layout.separator()
+
+            # Edit + Stop Edit row
+            row = layout.row(align=True)
+            edit_row = row.row(align=True)
+            # Edit available only when illuminate is running AND not already editing
+            # AND we have TCP connections (interaction_connected_count > 0)
+            edit_row.enabled = props.illuminate_running and not props.edit_active and props.interaction_connected_count > 0
+            edit_row.operator("drone.start_edit", text="Edit", icon='GREASEPENCIL')
+            stop_edit_row = row.row(align=True)
+            stop_edit_row.enabled = props.edit_active
+            stop_edit_row.operator("drone.stop_edit", text="Finish Edit", icon='CHECKMARK')
+
+            # Status info
+            if props.illuminate_running and not props.interaction_editor_active and not props.edit_active:
+                if props.interaction_connected_count > 0:
+                    layout.label(text=f"{props.interaction_connected_count} connection(s)", icon='LINKED')
+                else:
+                    layout.label(text="Waiting for LB connections...", icon='TIME')
 
 
 # ------------------------------------------------------------------------
@@ -3616,6 +4360,12 @@ classes = (
     DRONE_OT_apply_global_expression,
     EXPORT_OT_drone_yaml,
     EXPORT_OT_export_and_illuminate,
+    DRONE_OT_stop_illuminate,
+    EXPORT_OT_interaction_yaml,
+    EXPORT_OT_export_and_interact,
+    DRONE_OT_start_edit,
+    DRONE_OT_stop_edit,
+    DRONE_OT_stop_illuminate_interaction,
     VIEW3D_PT_drone_swarm,
     VIEW3D_PT_lb_generative_layouts,
     VIEW3D_PT_lb_automated_animations,
@@ -3637,6 +4387,8 @@ def register():
 
 
 def unregister():
+    close_static_interaction_session()
+
     if update_leds_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(update_leds_handler)
 

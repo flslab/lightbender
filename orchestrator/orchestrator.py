@@ -11,6 +11,7 @@ import socketserver
 import sys
 import signal
 import shutil
+import socket
 import logging
 from datetime import datetime
 from functools import partial
@@ -71,6 +72,9 @@ class SwarmOrchestrator:
         # Bind signal handlers for graceful exit
         # signal.signal(signal.SIGINT, self._signal_handler)
         # signal.signal(signal.SIGTERM, self._signal_handler)
+
+        self._blender_stop_port = 5599
+        self._blender_stop_server = None
 
     def _load_manifest(self):
         with open(MANIFEST_FILE) as f:
@@ -417,6 +421,7 @@ class SwarmOrchestrator:
         self.logger.info(f"Mission Tag: {self.tag}")
 
         self.setup_network()
+        self._start_blender_stop_listener()
         self.running.set()
 
         try:
@@ -429,6 +434,12 @@ class SwarmOrchestrator:
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
             if not self.args.record:
+                # Filter drones to only those referenced in the mission file
+                if self.mission and 'drones' in self.mission:
+                    mission_ids = set(self.mission['drones'].keys())
+                    self.drones = [d for d in self.drones if d['id'] in mission_ids]
+                    self.logger.info(f"Filtered to {len(self.drones)} mission drones: {[d['id'] for d in self.drones]}")
+
                 if not self.args.skip_dispatcher:
                     from dispatcher import run_dispatch
                     is_mock = self.args.ground or self.args.droneless
@@ -484,6 +495,9 @@ class SwarmOrchestrator:
 
         except KeyboardInterrupt:
             self.logger.info("Keyboard Interrupt detected in main loop.")
+            self.emergency_stop()
+        except _BlenderStopException:
+            self.logger.info("Blender commanded stop.")
             self.emergency_stop()
         except Exception as e:
             self.logger.exception(f"Unexpected error: {e}")
@@ -622,6 +636,52 @@ class SwarmOrchestrator:
         #     self.zmq_context.term()
 
         self.logger.info("Orchestrator cleanup complete.")
+
+    def _start_blender_stop_listener(self):
+        """Starts a background TCP listener on port 5599 that triggers emergency stop
+        when it receives 'Blender commanded stop' from the Blender addon."""
+        def _listen():
+            try:
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind(('127.0.0.1', self._blender_stop_port))
+                srv.listen(1)
+                srv.settimeout(1.0)
+                self._blender_stop_server = srv
+                self.logger.info(f"Blender stop listener on port {self._blender_stop_port}")
+
+                while self.running.is_set():
+                    try:
+                        client, addr = srv.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    try:
+                        data = client.recv(1024).decode('utf-8', errors='ignore').strip()
+                        client.close()
+                    except Exception:
+                        data = ""
+                    if 'Blender commanded stop' in data:
+                        self.logger.info("Blender commanded stop.")
+                        self.emergency_stop()
+                        break
+            except OSError as e:
+                self.logger.warning(f"Could not start Blender stop listener: {e}")
+            finally:
+                if self._blender_stop_server:
+                    try:
+                        self._blender_stop_server.close()
+                    except OSError:
+                        pass
+                    self._blender_stop_server = None
+
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
+
+
+class _BlenderStopException(Exception):
+    pass
 
 
 if __name__ == "__main__":

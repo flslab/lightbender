@@ -1471,3 +1471,24 @@ KeyError: 'lb5'
 2026-04-21 13:57:44,867 [INFO] __main__: Copying mission files to logs...
 2026-04-21 13:57:44,868 [INFO] __main__: Copied la_interact.yaml to ./logs/la_interact_la_interact_2026-04-21_13-54-39.yaml
 2026-04-21 13:57:45,278 [INFO] __main__: Orchestrator cleanup complete.
+2026-04-22 15:59:26,925 [INFO] __main__: Mission Tag: la_interact_2026-04-22_15-59-26
+2026-04-22 15:59:26,925 [INFO] __main__: HTTP Config Server running on port 8000 serving ../Interaction/SFL
+2026-04-22 15:59:26,926 [INFO] __main__: ZMQ Server Online at 192.168.1.233
+2026-04-22 15:59:26,926 [INFO] __main__: Blender stop listener on port 5599
+2026-04-22 15:59:28,399 [INFO] __main__: Blender commanded stop.
+2026-04-22 15:59:28,399 [INFO] __main__: !!! TRIGGERING EMERGENCY LANDING !!!
+2026-04-22 15:59:28,931 [INFO] __main__: Filtered to 4 mission drones: ['lb2', 'lb1', 'lb7', 'lb9']
+2026-04-22 15:59:28,978 [INFO] __main__: Starting Dispatcher logic to match Vicon coordinates...
+2026-04-22 15:59:28,978 [INFO] dispatcher: Connecting to Vicon scanner at 192.168.1.39 required 4 markers...
+2026-04-22 15:59:28,978 [ERROR] dispatcher: pyvicon_datastream is not installed. Install it with: pip install pyvicon-datastream-sdk
+2026-04-22 15:59:28,978 [ERROR] dispatcher: Falling back to MOCK scanner due to Vicon failure.
+2026-04-22 15:59:29,008 [INFO] dispatcher.vicon_scanner: [MockVicon] Returning 4 positions from manifest init_pos (noise_std=8 mm, no Vicon connection).
+2026-04-22 15:59:29,008 [INFO] dispatcher: Opening Dispatcher UI for confirmation...
+2026-04-22 15:59:29,176 [WARNING] dispatcher: Dispatcher UI aborted or skipped. No Vicon coordinates will be updated.
+2026-04-22 15:59:29,177 [INFO] __main__: Executing: ssh fls@192.168.1.90 "source /home/fls/env/bin/activate && cd /home/fls/fls-cf-offboard-controller && python3 restart.py radio://0/100/2M/E7E7E7E702 radio://0/100/2M/E7E7E7E701 radio://0/100/2M/E7E7E7E707 radio://0/100/2M/E7E7E7E709"
+2026-04-22 15:59:32,844 [INFO] __main__: Remote reboot issued successfully.
+2026-04-22 15:59:37,850 [INFO] __main__: Booting Drone lb2 at 192.168.1.232...
+2026-04-22 15:59:40,197 [INFO] __main__: Keyboard Interrupt detected in main loop.
+2026-04-22 15:59:40,198 [INFO] __main__: !!! TRIGGERING EMERGENCY LANDING !!!
+2026-04-22 15:59:41,202 [INFO] __main__: Running cleanup sequence...
+2026-04-22 15:59:41,203 [INFO] __main__: Stopping Camera...
