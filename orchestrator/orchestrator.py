@@ -688,7 +688,9 @@ class SwarmOrchestrator:
             if os.path.isdir(target_dir) and os.listdir(target_dir):
                 self.logger.info(f"Triggering upload for {target_dir}...")
                 import subprocess
-                exp_type = "interaction" if getattr(self.args, 'interaction', False) else ("illumination" if getattr(self.args, 'illumination', False) else "unknown")
+                exp_type = "illumination"
+                if args.interaction or args.intractable_illumination:
+                    exp_type = "interaction"
                 cmd = ["fls-upload", "--experiment", target_dir, "--type", exp_type, "--datetime", self.date_tag]
                 try:
                     subprocess.Popen(cmd)
