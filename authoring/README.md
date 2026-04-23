@@ -1,6 +1,8 @@
 # LightBender Authoring
 
-This directory contains the tools for designing, animating, and visualizing LightBender drone swarms. The primary authoring interface is a Blender add-on that lets you place LightBenders in 3D space, animate LEDs and servos, and export directly to  SFL (mission YAML) for physical illumination using LightBenders and the orchestrator.
+This directory contains the tools for designing, animating, and visualizing LightBender drone swarms. The primary authoring interface is a Blender add-on that enables an artist to place LightBenders in 3D space, animate LEDs and servos, and export an SFL (mission YAML) file for physical illumination using LightBenders and the orchestrator.
+
+Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu), and Shahram Ghandeharizadeh (shahram@usc.edu)
 
 ---
 
@@ -8,7 +10,7 @@ This directory contains the tools for designing, animating, and visualizing Ligh
 
 We support bare-hand interactions with LightBenders to edit graphics.  Multiple users may adjust the position of LightBenders simultaneously.  The Blender data is updated automatically to reflect the new position of the LightBenders in real-time.
 
-- [NSF Illumination.](https://youtu.be/_I6qcD0NoYM)
+- [Blender add-on in edit mode with bare-hand interactions.](https://youtu.be/_I6qcD0NoYM)
 
 ## LightBender Visual Effects
 
