@@ -23,7 +23,8 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/path/to/lightbender"
+REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
+# REPO_DIR = "/path/to/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
@@ -345,7 +346,10 @@ def process_static_interaction_socket(key, sock_obj):
     else:
         STATIC_INTERACTION_SESSION["buffers"][key] = ""
 
-    if not STATIC_INTERACTION_SESSION["recording"]:
+    # Process position messages during edit mode OR during recording (Finish Edit)
+    scene = getattr(bpy.context, "scene", None)
+    is_editing = scene and hasattr(scene, "drone_props") and scene.drone_props.edit_active
+    if not STATIC_INTERACTION_SESSION["recording"] and not is_editing:
         return
 
     for line in lines:
@@ -360,7 +364,7 @@ def process_static_interaction_socket(key, sock_obj):
         if not scene:
             continue
         STATIC_INTERACTION_SESSION["record_received_any"] = True
-        obj = resolve_lb_by_message_id(scene, msg.get("id") or msg.get("drone_id"))
+        obj = resolve_lb_by_message_id(scene, msg.get("id"))
         position = msg.get("position")
         if position is None and all(k in msg for k in ("x", "y", "z")):
             position = [msg["x"], msg["y"], msg["z"]]
@@ -380,24 +384,30 @@ def static_interaction_timer():
     props = getattr(scene, "drone_props", None) if scene else None
     allowed_ips = set(parse_interaction_ips(props.interaction_lightbender_ips)) if props else set()
 
-    while True:
-        try:
-            client_sock, addr = server_socket.accept()
-        except BlockingIOError:
-            break
-        except OSError:
-            break
-        client_ip = addr[0]
-        if allowed_ips and client_ip not in allowed_ips:
+    # Count expected LightBenders in the scene
+    expected_count = len(get_lb_scene_objects(scene)) if scene else 0
+    current_count = len(STATIC_INTERACTION_SESSION["sockets"])
+
+    # Only accept new connections if we haven't reached the expected count
+    if current_count < expected_count:
+        while True:
             try:
-                client_sock.close()
+                client_sock, addr = server_socket.accept()
+            except BlockingIOError:
+                break
             except OSError:
-                pass
-            continue
-        client_sock.setblocking(False)
-        key = f"{client_ip}:{addr[1]}"
-        STATIC_INTERACTION_SESSION["sockets"][key] = client_sock
-        STATIC_INTERACTION_SESSION["buffers"][key] = ""
+                break
+            client_ip = addr[0]
+            if allowed_ips and client_ip not in allowed_ips:
+                try:
+                    client_sock.close()
+                except OSError:
+                    pass
+                continue
+            client_sock.setblocking(False)
+            key = f"{client_ip}:{addr[1]}"
+            STATIC_INTERACTION_SESSION["sockets"][key] = client_sock
+            STATIC_INTERACTION_SESSION["buffers"][key] = ""
 
     for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
         process_static_interaction_socket(key, sock_obj)
@@ -3392,7 +3402,7 @@ class DRONE_OT_stop_edit(bpy.types.Operator):
             self.report({'WARNING'}, "Already waiting for position responses.")
             return {'CANCELLED'}
 
-        # Request positions (same as record_interaction_positions)
+        # Finished Editing, send messages to the LightBenders and listen to the last position update.
         if STATIC_INTERACTION_SESSION["sockets"]:
             flush_static_interaction_messages()
             request_payload = json.dumps({"cmd": "request_position"}) + "\n"
