@@ -417,6 +417,7 @@ class SwarmOrchestrator:
             return
 
         date_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.date_tag = date_tag
         self.tag = f"{self.mission['name']}_{date_tag}"
         self.logger.info(f"Mission Tag: {self.tag}")
 
@@ -449,13 +450,25 @@ class SwarmOrchestrator:
 
                 self.reboot_flight_controllers(remote=bool(self.radio_node))
 
-                for drone in self.drones:
+                def boot_drone(drone):
                     cmd = self._get_drone_cmd(drone)
                     if self._boot_remote_node(drone, cmd, "Drone"):
                         entry = {'drone': drone, 'tag': self.tag}
                         if self.args.interaction and self.common_cfg.get('reference_object'):
                             entry['vicon_log'] = True  # also download vicon_{tag}.json
-                        self.pending_downloads.append(entry)
+                        return entry
+                    return None
+
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(boot_drone, d) for d in self.drones]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            entry = future.result()
+                            if entry:
+                                self.pending_downloads.append(entry)
+                        except Exception as e:
+                            self.logger.error(f"Error booting drone: {e}")
 
             if self.args.loadcell:
                 from Interaction.loadcell_worker import loadcell_worker
@@ -509,27 +522,43 @@ class SwarmOrchestrator:
         if not self.pending_downloads:
             return
 
-        self.logger.info(f"Processing {len(self.pending_downloads)} pending downloads...")
-        remaining = []
-        for item in self.pending_downloads:
+        self.logger.info(f"Processing {len(self.pending_downloads)} pending downloads (concurrently)...")
+
+        def process_item(item):
             drone = item['drone']
             tag = item['tag']
             work = self.common_cfg['work_dir']
 
+            local_dir = f"./logs/{tag}"
+            os.makedirs(local_dir, exist_ok=True)
+
             # Main controller log
             remote = f"{work}/logs/{tag}.json"
-            local = f"./logs/{drone['id']}_{tag}.json"
+            local = f"{local_dir}/{drone['id']}_{tag}.json"
             success = self._download_file(drone, remote, local, "Log")
 
             # Vicon noise log (only if tracker was launched)
             if item.get('vicon_log'):
                 vr = f"{work}/logs/vicon_{tag}.json"
-                vl = f"./logs/vicon_{tag}.json"
+                vl = f"{local_dir}/vicon_{tag}.json"
                 v_ok = self._download_file(drone, vr, vl, "Vicon Noise Log")
                 success = success and v_ok
 
-            if not success:
-                remaining.append(item)
+            return success
+
+        remaining = []
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_item = {executor.submit(process_item, item): item for item in self.pending_downloads}
+            for future in concurrent.futures.as_completed(future_to_item):
+                item = future_to_item[future]
+                try:
+                    success = future.result()
+                    if not success:
+                        remaining.append(item)
+                except Exception as e:
+                    self.logger.error(f"Error processing pending download for Drone {item['drone'].get('id', 'Unknown')}: {e}")
+                    remaining.append(item)
 
         self.pending_downloads = remaining
 
@@ -578,7 +607,6 @@ class SwarmOrchestrator:
 
     def emergency_stop(self):
         """Broadcasts emergency command and waits for landing confirmations."""
-        self.running.clear()  # Stop inner loops
         self.emergency = True
         self.logger.info("!!! TRIGGERING EMERGENCY LANDING !!!")
 
@@ -586,7 +614,21 @@ class SwarmOrchestrator:
             self.pub_socket.send_json({"cmd": "EMERGENCY"})
 
         time.sleep(1)
-        self._monitor_flight()
+        self.logger.info("Waiting for drones to land... (Press Ctrl+C to force exit)")
+        launched_drones = len(self.ready_ids)
+        try:
+            # Loop indefinitely until bypass
+            while len(self.landed_drones) < launched_drones:
+                try:
+                    msg = self.pull_socket.recv_json()
+                    if msg.get('status') == 'LANDED':
+                        self._handle_landed_msg(msg)
+                except zmq.Again:
+                    continue
+        except KeyboardInterrupt:
+            self.logger.warning("Emergency landing wait forcibly aborted by user.")
+
+        self.running.clear()  # Stop inner loops now
 
     def cleanup(self):
         self.logger.info("Running cleanup sequence...")
@@ -600,7 +642,9 @@ class SwarmOrchestrator:
 
             # Download Video
             remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
-            local = f"./logs/{self.tag}.mp4"
+            local_dir = f"./logs/{self.tag}"
+            os.makedirs(local_dir, exist_ok=True)
+            local = f"{local_dir}/{self.tag}.mp4"
             self._download_file(self.camera_cfg, remote, local, "Mission Video")
 
         # Retry Pending Downloads (Logs)
@@ -609,13 +653,14 @@ class SwarmOrchestrator:
         # Copy mission files to logs
         if hasattr(self, 'mission_filepaths') and self.tag:
             self.logger.info("Copying mission files to logs...")
-            os.makedirs("./logs", exist_ok=True)
+            local_dir = f"./logs/{self.tag}"
+            os.makedirs(local_dir, exist_ok=True)
             for path in self.mission_filepaths:
                 try:
                     basename = os.path.basename(path)
                     name_part, ext = os.path.splitext(basename)
                     new_filename = f"{name_part}_{self.tag}{ext}"
-                    dest_path = os.path.join("./logs", new_filename)
+                    dest_path = os.path.join(local_dir, new_filename)
                     shutil.copy(path, dest_path)
                     self.logger.info(f"Copied {basename} to {dest_path}")
                 except Exception as e:
@@ -636,6 +681,20 @@ class SwarmOrchestrator:
         #     self.zmq_context.term()
 
         self.logger.info("Orchestrator cleanup complete.")
+
+        # Trigger Upload
+        if hasattr(self, 'tag') and getattr(self, 'date_tag', None) and self.tag:
+            target_dir = f"./logs/{self.tag}"
+            if os.path.isdir(target_dir) and os.listdir(target_dir):
+                self.logger.info(f"Triggering upload for {target_dir}...")
+                import subprocess
+                exp_type = "interaction" if getattr(self.args, 'interaction', False) else ("illumination" if getattr(self.args, 'illumination', False) else "unknown")
+                cmd = ["fls-upload", "--experiment", target_dir, "--type", exp_type, "--datetime", self.date_tag]
+                try:
+                    subprocess.Popen(cmd)
+                    self.logger.info(f"Upload triggered successfully: {' '.join(cmd)}")
+                except Exception as e:
+                    self.logger.error(f"Failed to trigger upload command: {e}")
 
     def _start_blender_stop_listener(self):
         """Starts a background TCP listener on port 5599 that triggers emergency stop
