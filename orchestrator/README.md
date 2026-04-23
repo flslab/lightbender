@@ -35,6 +35,7 @@ Before running an experiment, you need to configure the uploader credentials:
 2. Edit `uploader/.env` and fill in:
    - `GOOGLE_CLIENT_SECRET`: Path to your downloaded OAuth client secret JSON file.
    - `GDRIVE_FOLDER_ID`: The ID of the shared Google Drive folder where data should be uploaded to.
+   If you need to generate a new OAuth client secret JSON file, follow the instructions here: https://developers.google.com/workspace/guides/create-credentials
 
 ## Usage
 
