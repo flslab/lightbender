@@ -4,6 +4,12 @@ This directory contains the tools for designing, animating, and visualizing Ligh
 
 ---
 
+## Edit Mode Using Bare-Hand Interactions
+
+We support bare-hand interactions with LightBenders to edit graphics.  Multiple users may adjust the position of LightBenders simultaneously.  The Blender data is updated automatically to reflect the new position of the LightBenders in real-time.
+
+- [NSF Illumination.](https://youtu.be/_I6qcD0NoYM)
+
 ## LightBender Visual Effects
 
 LightBender visual effects for different illuminations:
