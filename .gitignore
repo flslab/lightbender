@@ -2,6 +2,7 @@ authoring/results*
 analysis/results*
 orchestrator/swarm_manifest.yaml
 orchestrator/logs
+orchestrator/uploader/token.json
 *.log
 
 # Byte-compiled / optimized / DLL files
