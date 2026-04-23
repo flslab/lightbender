@@ -23,8 +23,7 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
-# REPO_DIR = "/path/to/lightbender"
+REPO_DIR = "/path/to/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
@@ -126,7 +125,7 @@ def build_interaction_yaml_text(scene, drones_to_export, include_blender_port=Fa
         "  action: translation",
         "  config:",
         f"    delta_v: {delta_v}",
-        "    z: -1",
+        "    z: null",
         "    friction_coefficient: 0",
         "    base_attitude: -1",
         f"    duration: {duration}",
