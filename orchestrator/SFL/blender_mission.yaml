@@ -1,7 +1,7 @@
 name: blender_mission
 drones:
   lb4:
-    target: [0.04, 0.343, 1.15, 0.0]
+    target: [-0.149, 0.541, 1.15, 0.0]
     waypoints: []
     delta_t: 59.9583
     iterations: 1
@@ -10,34 +10,6 @@ drones:
       linear: true
       relative: false
     servos: [[160.0, 200.0]]
-    led:
-      mode: "expression"
-      rate: 0.5
-      formula: "[255, 157, 0]"
-  lb5:
-    target: [-0.264, 0.122, 1.15, 0.0]
-    waypoints: []
-    delta_t: 59.9583
-    iterations: 1
-    interaction: single
-    params:
-      linear: true
-      relative: false
-    servos: [[20.0, 340.0]]
-    led:
-      mode: "expression"
-      rate: 0.5
-      formula: "[255, 157, 0]"
-  lb2:
-    target: [0.706, -0.164, 0.9, 0.0]
-    waypoints: []
-    delta_t: 59.9583
-    iterations: 1
-    interaction: single
-    params:
-      linear: true
-      relative: false
-    servos: [[205.0, 335.0]]
     led:
       mode: "expression"
       rate: 0.5

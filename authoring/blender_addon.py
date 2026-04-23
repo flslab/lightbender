@@ -412,6 +412,13 @@ def static_interaction_timer():
     for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
         process_static_interaction_socket(key, sock_obj)
 
+    # Force viewport redraw so obj.location changes are visible immediately
+    if (props and props.edit_active) or STATIC_INTERACTION_SESSION["recording"]:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
     if STATIC_INTERACTION_SESSION["recording"] and time.monotonic() >= STATIC_INTERACTION_SESSION["record_deadline"]:
         finalize_record_interaction_positions()
 
@@ -3405,7 +3412,7 @@ class DRONE_OT_stop_edit(bpy.types.Operator):
         # Finished Editing, send messages to the LightBenders and listen to the last position update.
         if STATIC_INTERACTION_SESSION["sockets"]:
             flush_static_interaction_messages()
-            request_payload = json.dumps({"cmd": "request_position"}) + "\n"
+            request_payload = json.dumps({"cmd": "finish_edit"}) + "\n"
             failed_sends = []
             for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
                 try:
