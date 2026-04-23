@@ -3,8 +3,13 @@ controller:
   zmq_cmd_port: 5556
   zmq_ack_port: 5557
   http_port: 8000
-  mission_path: "mission"
-  mission_file: mission.yaml
+  mission_path: "SFL"
+  mission_files:
+    - la_flyin.yaml
+    - la_draw.yaml
+    - la_pulse.yaml
+    - la_color_chase.yaml
+    - la_sparkle.yaml
   downloads_file: downloads.json
 
 common:
@@ -15,15 +20,59 @@ drones:
   - id: "lb1"
     ip: lightbendercf01
     user: fls
-    obj_name: lightbender01
-    type: a
+    init_pos: [ 0.25, -0.25, 0.2 ]
+    type: V
+    servo_offsets: [0, -1]
     uri: radio://0/100/2M/E7E7E7E701
   - id: "lb2"
     ip: lightbendercf02
     user: fls
-    init_pos: [ 0.0, -0.5, 0.2 ]
-    type: b
+    init_pos: [ -0.5, 0.0, 0.2 ]
+    type: V
+    servo_offsets: [2, -3]
     uri: radio://0/100/2M/E7E7E7E702
+  - id: "lb3"
+    ip: lightbendercf03
+    user: fls
+    init_pos: [ 0.25, 0.25, 0.2 ]
+    type: V
+    servo_offsets: [2, -5]
+    uri: radio://0/100/2M/E7E7E7E703
+  - id: "lb4"
+    ip: lightbendercf04
+    user: fls
+    init_pos: [ -0.25, -0.25, 0.2 ]
+    type: H
+    servo_offsets: [0, 0]
+    uri: radio://0/100/2M/E7E7E7E704
+  - id: "lb5"
+    ip: lightbendercf05
+    user: fls
+    init_pos: [ 0.0, 0.0, 0.2 ]
+    type: H
+    servo_offsets: [0, 0]
+    uri: radio://0/100/2M/E7E7E7E705
+  - id: "lb7"
+    ip: lightbendercf07
+    user: fls
+    init_pos: [ 0.0, -0.5, 0.2 ]
+    type: H
+    servo_offsets: [3, 0]
+    uri: radio://0/100/2M/E7E7E7E707
+  - id: "lb9"
+    ip: lightbendercf09
+    user: fls
+    init_pos: [ 0.5, 0.5, 0.2 ]
+    type: V
+    servo_offsets: [-1, 0]
+    uri: radio://0/100/2M/E7E7E7E709
+  - id: "lb8"
+    ip: lightbendercf08
+    user: fls
+    init_pos: [ 0.0, 0.0, 0.2 ]
+    servo_count: 0
+    led_count: 108
+    uri: radio://0/100/2M/E7E7E7E708
 
 mission:
   delta_t: 0.0
@@ -34,5 +83,5 @@ camera_node:
   user: fls
 
 radio_node:
-  ip: 192.168.1.233
+  ip: 192.168.1.90
   user: fls
