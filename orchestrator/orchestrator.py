@@ -17,6 +17,7 @@ from datetime import datetime
 from functools import partial
 from fabric import Connection
 from invoke.exceptions import CommandTimedOut
+import concurrent.futures
 
 # Assumed local modules based on your import list
 from logger import setup_logging
@@ -55,6 +56,7 @@ class SwarmOrchestrator:
         # Runtime State
         self.tag = None
         self.running = threading.Event()
+        self.took_off = False
         self.emergency = False
         self.pending_downloads = self._load_previous_downloads()
         self.landed_drones = set()
@@ -459,7 +461,6 @@ class SwarmOrchestrator:
                         return entry
                     return None
 
-                import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(boot_drone, d) for d in self.drones]
                     for future in concurrent.futures.as_completed(futures):
@@ -492,6 +493,7 @@ class SwarmOrchestrator:
                 # time.sleep(10)
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
+            self.took_off = True
 
             if self.manifest['mission']['require_handshake']:
                 for i, mission in enumerate(self.missions):
@@ -547,7 +549,6 @@ class SwarmOrchestrator:
             return success
 
         remaining = []
-        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_item = {executor.submit(process_item, item): item for item in self.pending_downloads}
             for future in concurrent.futures.as_completed(future_to_item):
@@ -641,36 +642,38 @@ class SwarmOrchestrator:
             time.sleep(2)
 
             # Download Video
-            remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
-            local_dir = f"./logs/{self.tag}"
-            os.makedirs(local_dir, exist_ok=True)
-            local = f"{local_dir}/{self.tag}.mp4"
-            self._download_file(self.camera_cfg, remote, local, "Mission Video")
+            if self.took_off:
+                remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
+                local_dir = f"./logs/{self.tag}"
+                os.makedirs(local_dir, exist_ok=True)
+                local = f"{local_dir}/{self.tag}.mp4"
+                self._download_file(self.camera_cfg, remote, local, "Mission Video")
 
         # Retry Pending Downloads (Logs)
-        self._process_pending_downloads()
+        if self.took_off:
+            self._process_pending_downloads()
 
-        # Copy mission files to logs
-        if hasattr(self, 'mission_filepaths') and self.tag:
-            self.logger.info("Copying mission files to logs...")
-            local_dir = f"./logs/{self.tag}"
-            os.makedirs(local_dir, exist_ok=True)
-            for path in self.mission_filepaths:
-                try:
-                    basename = os.path.basename(path)
-                    name_part, ext = os.path.splitext(basename)
-                    new_filename = f"{name_part}_{self.tag}{ext}"
-                    dest_path = os.path.join(local_dir, new_filename)
-                    shutil.copy(path, dest_path)
-                    self.logger.info(f"Copied {basename} to {dest_path}")
-                except Exception as e:
-                    self.logger.error(f"Failed to copy mission file {path}: {e}")
+            # Copy mission files to logs
+            if hasattr(self, 'mission_filepaths') and self.tag:
+                self.logger.info("Copying mission files to logs...")
+                local_dir = f"./logs/{self.tag}"
+                os.makedirs(local_dir, exist_ok=True)
+                for path in self.mission_filepaths:
+                    try:
+                        basename = os.path.basename(path)
+                        name_part, ext = os.path.splitext(basename)
+                        new_filename = f"{name_part}_{self.tag}{ext}"
+                        dest_path = os.path.join(local_dir, new_filename)
+                        shutil.copy(path, dest_path)
+                        self.logger.info(f"Copied {basename} to {dest_path}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to copy mission file {path}: {e}")
 
-        # Save unfinished state
-        if self.pending_downloads:
-            self.logger.warning(f"Saving {len(self.pending_downloads)} unfinished downloads to file.")
-            with open(self.ctrl_cfg['downloads_file'], 'w') as f:
-                json.dump(self.pending_downloads, f)
+            # Save unfinished state
+            if self.pending_downloads:
+                self.logger.warning(f"Saving {len(self.pending_downloads)} unfinished downloads to file.")
+                with open(self.ctrl_cfg['downloads_file'], 'w') as f:
+                    json.dump(self.pending_downloads, f)
 
         # Close Sockets
         if self.http_server:
