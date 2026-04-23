@@ -10,8 +10,10 @@ import argparse
 from uploader.storage import DriveStorage
 from uploader.upload import _generate_metadata, _drive_prefix
 
+_drive_folder_cache = {}
+
 def file_exists_in_drive(storage: DriveStorage, drive_path: str) -> bool:
-    """Check if a file exists in Google Drive at the given path."""
+    """Check if a file exists in Google Drive at the given path, using a folder cache."""
     parts = Path(drive_path).parts
     folder_parts, filename = parts[:-1], parts[-1]
     
@@ -20,10 +22,41 @@ def file_exists_in_drive(storage: DriveStorage, drive_path: str) -> bool:
         # Use private method to quickly traverse/create folders if missing
         parent_id = storage._get_or_create_folder(part, parent_id)
         
-    escaped_name = filename.replace("'", "\\'")
-    query = f"name='{escaped_name}' and '{parent_id}' in parents and trashed=false"
-    results = storage._service.files().list(q=query, fields="files(id)").execute()
-    return len(results.get("files", [])) > 0
+    if parent_id not in _drive_folder_cache:
+        # Fetch all files in this folder once and cache their names
+        query = f"'{parent_id}' in parents and trashed=false"
+        existing_names = set()
+        page_token = None
+        while True:
+            results = storage._service.files().list(
+                q=query, 
+                fields="nextPageToken, files(name)",
+                pageToken=page_token
+            ).execute()
+            
+            for f in results.get("files", []):
+                existing_names.add(f.get("name"))
+                
+            page_token = results.get("nextPageToken")
+            if not page_token:
+                break
+                
+        _drive_folder_cache[parent_id] = existing_names
+        
+    return filename in _drive_folder_cache[parent_id]
+
+def add_to_drive_cache(storage: DriveStorage, drive_path: str):
+    """Mark a file as successfully uploaded in the cache."""
+    parts = Path(drive_path).parts
+    folder_parts, filename = parts[:-1], parts[-1]
+    
+    parent_id = storage._root_folder_id
+    for part in folder_parts:
+        parent_id = storage._get_or_create_folder(part, parent_id)
+        
+    if parent_id in _drive_folder_cache:
+        _drive_folder_cache[parent_id].add(filename)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Group log files and upload missing ones to Drive.")
@@ -96,6 +129,7 @@ def main():
                     tmp.flush()
                     tmp_name = tmp.name
                 storage.upload_file(Path(tmp_name), metadata_drive_path)
+                add_to_drive_cache(storage, metadata_drive_path)
                 os.remove(tmp_name)
             else:
                 print("  Already exists: metadata.json")
@@ -109,6 +143,7 @@ def main():
                 if not file_exists_in_drive(storage, drive_path):
                     print(f"  Uploading missing {relative}...")
                     storage.upload_file(file_path, drive_path)
+                    add_to_drive_cache(storage, drive_path)
                 else:
                     print(f"  Already exists: {relative}")
 
