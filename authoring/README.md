@@ -8,7 +8,7 @@ Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu)
 
 ## Edit Mode Using Bare-Hand Interactions
 
-We support bare-hand interactions with LightBenders to edit graphics.  Multiple users may adjust the position of LightBenders simultaneously.  The Blender data is updated automatically to reflect the new position of the LightBenders in real-time.
+We support bare-hand interactions with LightBenders to edit graphics.  Multiple users may adjust the position of LightBenders using their bare hand simultaneously.  The Blender data is updated automatically to reflect the new position of the LightBenders in real-time.
 
 - [Blender add-on in edit mode with bare-hand interactions.](https://youtu.be/_I6qcD0NoYM)
 
