@@ -1,6 +1,6 @@
 name: emoji_interaction_off
 drones:
-  lb10:
+  lb5:
     target: [-0.25, 1, 1.15, 0.0]
     waypoints: []
     delta_t: 60

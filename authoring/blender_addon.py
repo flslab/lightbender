@@ -23,7 +23,7 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
+REPO_DIR = "/path/to/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
@@ -3313,27 +3313,12 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
                 dark_room=props.export_dark_room
             )
             props.illuminate_running = True
-            self.report({'INFO'}, "Exported interaction YAML and started orchestrator")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to run orchestrator: {e}")
             return {'CANCELLED'}
 
-        return {'FINISHED'}
-
-
-class DRONE_OT_start_edit(bpy.types.Operator):
-    """Start TCP listener and send render start messages to LightBenders from swarm manifest"""
-    bl_idname = "drone.start_edit"
-    bl_label = "Edit"
-
-    def execute(self, context):
-        scene = context.scene
-        props = scene.drone_props
-
-        # Close any previous session
+        # Open TCP listener so LightBenders can connect before Edit is pressed
         close_static_interaction_session()
-
-        # Open TCP listener
         try:
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -3341,8 +3326,8 @@ class DRONE_OT_start_edit(bpy.types.Operator):
             server_socket.listen()
             server_socket.setblocking(False)
         except OSError as e:
-            self.report({'ERROR'}, f"Failed to open listening socket on port {props.interaction_tcp_port}: {e}")
-            return {'CANCELLED'}
+            self.report({'WARNING'}, f"TCP listener failed on port {props.interaction_tcp_port}: {e}")
+            return {'FINISHED'}
 
         STATIC_INTERACTION_SESSION["server_socket"] = server_socket
         props.interaction_editor_active = True
@@ -3353,28 +3338,40 @@ class DRONE_OT_start_edit(bpy.types.Operator):
             bpy.app.timers.register(static_interaction_timer, first_interval=0.1)
             STATIC_INTERACTION_SESSION["timer_registered"] = True
 
-        # Read IPs from swarm_manifest.yaml, filtered to only scene lb# objects
-        scene_lb_ids = {obj.name for obj in get_lb_scene_objects(scene)}
-        ips = read_manifest_ips(id_filter=scene_lb_ids)
+        self.report({'INFO'}, f"Exported interaction YAML, started orchestrator, listening on port {props.interaction_tcp_port}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_start_edit(bpy.types.Operator):
+    """Send start_edit messages to LightBenders from swarm manifest"""
+    bl_idname = "drone.start_edit"
+    bl_label = "Edit"
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+
+        if not STATIC_INTERACTION_SESSION["sockets"]:
+            self.report({'WARNING'}, "No LightBender connections available.")
+            return {'CANCELLED'}
+
+        # Send start_edit over existing inbound connections
         duration = props.interaction_duration
-        render_msg = json.dumps({"cmd": "start_edit", "duration": duration}) + "\n"
+        edit_msg = json.dumps({"cmd": "start_edit", "duration": duration}) + "\n"
 
         failed_sends = []
-        for ip in ips:
+        for key, sock_obj in list(STATIC_INTERACTION_SESSION["sockets"].items()):
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2.0)
-                s.connect((ip, props.interaction_tcp_port))
-                s.sendall(render_msg.encode('utf-8'))
-                s.close()
-            except Exception:
-                failed_sends.append(ip)
+                sock_obj.sendall(edit_msg.encode('utf-8'))
+            except (BlockingIOError, BrokenPipeError, OSError):
+                failed_sends.append(key)
 
         if failed_sends:
-            self.report({'WARNING'}, f"Could not send render start to: {', '.join(failed_sends)}")
+            self.report({'WARNING'}, f"Could not send start_edit to: {', '.join(failed_sends)}")
 
         props.edit_active = True
-        self.report({'INFO'}, f"Edit started. TCP listening on port {props.interaction_tcp_port}.")
+        sent_count = len(STATIC_INTERACTION_SESSION["sockets"]) - len(failed_sends)
+        self.report({'INFO'}, f"Edit started. Sent start_edit to {sent_count} connection(s).")
         return {'FINISHED'}
 
 
