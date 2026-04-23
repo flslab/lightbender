@@ -33,3 +33,5 @@ A cage provides safe bare-hand interactions with a LightBender, preventing users
 
 - [Interaction with happy emoji.](https://youtu.be/_huysBvEuR4)
 - [Vertical interaction with a LightBender.](https://youtu.be/ilh584zCPyQ)
+
+Bare-hand interactions have diverse applications ranging from health-care to education and entertainment.  Our Blender add-on enables one or more users to adjust the position of LightBenders in an illumination using their bare-hands.  For a video demonstration, see [authoring](authoring/) directory.
