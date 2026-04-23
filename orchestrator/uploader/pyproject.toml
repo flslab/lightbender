@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fls"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+    "google-auth-oauthlib>=1.1",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+fls-upload = "fls.upload:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fls"]

@@ -4,4 +4,8 @@ fabric
 cflib
 numpy
 scikit-learn
-pyvicon-datastream-sdk
+pyvicon-datastream
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1
+python-dotenv>=1.0

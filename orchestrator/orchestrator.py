@@ -694,7 +694,7 @@ class SwarmOrchestrator:
                 exp_type = "illumination"
                 if args.interaction or args.intractable_illumination:
                     exp_type = "interaction"
-                cmd = ["fls-upload", "--experiment", target_dir, "--type", exp_type, "--datetime", self.date_tag]
+                cmd = [sys.executable, "-m", "uploader.upload", "--experiment", target_dir, "--type", exp_type, "--datetime", self.date_tag]
                 try:
                     subprocess.Popen(cmd)
                     self.logger.info(f"Upload triggered successfully: {' '.join(cmd)}")
