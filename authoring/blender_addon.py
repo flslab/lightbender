@@ -23,7 +23,8 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/path/to/lightbender"
+REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
+# REPO_DIR = "/path/to/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
@@ -43,6 +44,18 @@ STATIC_INTERACTION_SESSION = {
     "record_updated": set(),
     "record_received_any": False,
     "record_failed_sends": [],
+}
+
+SWARM_MONITOR_SESSION = {
+    "server_socket": None,
+    "client_socket": None,
+    "buffer": "",
+    "timer_registered": False,
+    "drones": {},       # {id: {status, init_pos, battery, ip}}
+    "drone_order": [],  # ordered list of ids
+    "logs_fetched": False,
+    "all_stopped": False,
+    "connect_deadline": None,  # monotonic time; None once connected or not waiting
 }
 
 def get_default_interaction_yaml_path(mission_name):
@@ -125,7 +138,7 @@ def build_interaction_yaml_text(scene, drones_to_export, include_blender_port=Fa
         "  action: translation",
         "  config:",
         f"    delta_v: {delta_v}",
-        "    z: null",
+        "    z: -1",
         "    friction_coefficient: 0",
         "    base_attitude: -1",
         f"    duration: {duration}",
@@ -211,7 +224,7 @@ def read_manifest_ips(id_filter=None):
 
 def launch_orchestrator(target_script, flags, dark_room=False):
     python_exec = get_controller_python()
-    cmd_str = f"'{python_exec}' '{target_script}' {' '.join(flags)} --skip-confirm"
+    cmd_str = f"'{python_exec}' '{target_script}' {' '.join(flags)}"
     if dark_room:
         cmd_str += " --dark"
 
@@ -298,13 +311,13 @@ def finalize_record_interaction_positions():
     all_lbs = {obj.name for obj in get_lb_scene_objects(scene)}
     missing = sorted(all_lbs - updated)
 
-    if not received_any:
-        show_popup(bpy.context, "Record Position", ["No new position responses received within 100 ms."], icon='INFO')
-    else:
-        lines = [f"Updated {len(updated)} LightBenders from TCP responses."]
-        if missing:
-            lines.extend([f"No update for {name}" for name in missing[:12]])
-        show_popup(bpy.context, "Record Position Finished", lines, icon='INFO')
+    # if not received_any:
+    #     show_popup(bpy.context, "Record Position", ["No new position responses received within 100 ms."], icon='INFO')
+    # else:
+    #     lines = [f"Updated {len(updated)} LightBenders from TCP responses."]
+    #     if missing:
+    #         lines.extend([f"No update for {name}" for name in missing[:12]])
+    #     show_popup(bpy.context, "Record Position Finished", lines, icon='INFO')
 
 
 def resolve_lb_by_message_id(scene, raw_id):
@@ -424,9 +437,275 @@ def static_interaction_timer():
     update_interaction_editor_state()
     return 0.1
 
+
+# ---------------------------------------------------------------------------
+#    Swarm Monitor Session Helpers
+# ---------------------------------------------------------------------------
+
+def close_swarm_monitor_session():
+    """Close the swarm monitor TCP server and client sockets."""
+    for key in ("server_socket", "client_socket"):
+        sock = SWARM_MONITOR_SESSION.get(key)
+        if sock:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    SWARM_MONITOR_SESSION["server_socket"] = None
+    SWARM_MONITOR_SESSION["client_socket"] = None
+    SWARM_MONITOR_SESSION["buffer"] = ""
+    SWARM_MONITOR_SESSION["drones"] = {}
+    SWARM_MONITOR_SESSION["drone_order"] = []
+    SWARM_MONITOR_SESSION["logs_fetched"] = False
+    SWARM_MONITOR_SESSION["all_stopped"] = False
+    SWARM_MONITOR_SESSION["connect_deadline"] = None
+
+
+def _swarm_auto_stop(reason=""):
+    """Called when the orchestrator does not connect within the timeout window."""
+    close_swarm_monitor_session()
+    scene = getattr(bpy.context, "scene", None)
+    if scene and hasattr(scene, "drone_props"):
+        props = scene.drone_props
+        props.illuminate_running = False
+        props.swarm_connected = False
+        props.swarm_stopping = False
+        props.swarm_logs_fetched = True
+        props.swarm_drones.clear()
+    print(f"[LB] Auto-stop: {reason}")
+
+
+def _swarm_terminate_cleanup():
+    """Called when all_stopped is received or the monitor connection drops while stopping."""
+    close_swarm_monitor_session()
+    scene = getattr(bpy.context, "scene", None)
+    if scene and hasattr(scene, "drone_props"):
+        props = scene.drone_props
+        props.illuminate_running = False
+        props.swarm_connected = False
+        props.swarm_stopping = False
+        props.swarm_logs_fetched = True
+
+
+def open_swarm_monitor_socket(port=5598):
+    """Open a TCP server socket for the orchestrator to connect to."""
+    close_swarm_monitor_session()
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("", port))
+        srv.listen(1)
+        srv.setblocking(False)
+        SWARM_MONITOR_SESSION["server_socket"] = srv
+        SWARM_MONITOR_SESSION["connect_deadline"] = time.monotonic() + 2.0
+    except OSError as e:
+        print(f"[LB] Swarm monitor socket failed on port {port}: {e}")
+        return False
+
+    if not SWARM_MONITOR_SESSION["timer_registered"]:
+        bpy.app.timers.register(swarm_monitor_timer, first_interval=0.2)
+        SWARM_MONITOR_SESSION["timer_registered"] = True
+    return True
+
+
+def swarm_monitor_send(msg_dict):
+    """Send a JSON message to the connected orchestrator."""
+    sock = SWARM_MONITOR_SESSION.get("client_socket")
+    if sock is None:
+        return
+    try:
+        payload = json.dumps(msg_dict) + "\n"
+        sock.sendall(payload.encode('utf-8'))
+    except (BrokenPipeError, OSError):
+        pass
+
+
+def _process_swarm_monitor_msg(msg):
+    """Handle a single JSON message from the orchestrator."""
+    cmd = msg.get("cmd")
+    if cmd == "swarm_info":
+        # Store battery threshold if provided
+        threshold = msg.get("battery_threshold")
+        if threshold is not None:
+            scene = getattr(bpy.context, "scene", None)
+            if scene and hasattr(scene, "drone_props"):
+                scene.drone_props.swarm_battery_threshold = float(threshold)
+        # Initial drone list from orchestrator
+        SWARM_MONITOR_SESSION["drones"] = {}
+        SWARM_MONITOR_SESSION["drone_order"] = []
+        for d in msg.get("drones", []):
+            did = d["id"]
+            SWARM_MONITOR_SESSION["drones"][did] = {
+                "status": d.get("status", "idle"),
+                "init_pos": d.get("init_pos", [0, 0, 0]),
+                "battery": None,
+                "ip": d.get("ip", ""),
+            }
+            SWARM_MONITOR_SESSION["drone_order"].append(did)
+        _sync_swarm_collection()
+    elif cmd == "drone_status":
+        did = msg.get("id")
+        if did and did in SWARM_MONITOR_SESSION["drones"]:
+            SWARM_MONITOR_SESSION["drones"][did]["status"] = msg.get("status", "idle")
+            if msg.get("battery") is not None:
+                SWARM_MONITOR_SESSION["drones"][did]["battery"] = msg["battery"]
+            _sync_swarm_collection()
+    elif cmd == "battery_update":
+        did = msg.get("id")
+        if did and did in SWARM_MONITOR_SESSION["drones"]:
+            SWARM_MONITOR_SESSION["drones"][did]["battery"] = msg.get("battery")
+            _sync_swarm_collection()
+    elif cmd == "logs_fetched":
+        SWARM_MONITOR_SESSION["logs_fetched"] = True
+        scene = getattr(bpy.context, "scene", None)
+        if scene and hasattr(scene, "drone_props"):
+            scene.drone_props.swarm_logs_fetched = True
+    elif cmd == "all_stopped":
+        SWARM_MONITOR_SESSION["all_stopped"] = True
+        _swarm_terminate_cleanup()
+
+
+def _sync_swarm_collection():
+    """Sync the SWARM_MONITOR_SESSION drones dict → scene.drone_props.swarm_drones collection."""
+    scene = getattr(bpy.context, "scene", None)
+    if not scene or not hasattr(scene, "drone_props"):
+        return
+    props = scene.drone_props
+    coll = props.swarm_drones
+    data = SWARM_MONITOR_SESSION["drones"]
+    order = SWARM_MONITOR_SESSION["drone_order"]
+
+    # Rebuild collection to match order
+    while len(coll) > 0:
+        coll.remove(0)
+    for did in order:
+        info = data.get(did)
+        if not info:
+            continue
+        item = coll.add()
+        item.drone_id = did
+        item.status = info["status"]
+        item.status_color = _STATUS_COLORS.get(info["status"], (0.9, 0.2, 0.2))
+        pos = info.get("init_pos", [0, 0, 0])
+        item.init_x = float(pos[0]) if len(pos) > 0 else 0.0
+        item.init_y = float(pos[1]) if len(pos) > 1 else 0.0
+        item.init_z = float(pos[2]) if len(pos) > 2 else 0.0
+        batt = info.get("battery")
+        item.battery = float(batt) if batt is not None and batt != 'N/A' else -1.0
+        item.ip = info.get("ip", "")
+
+    # Update aggregate counts
+    props.swarm_logs_fetched = SWARM_MONITOR_SESSION["logs_fetched"]
+
+
+def swarm_monitor_timer():
+    """Blender timer: accept orchestrator connection and process messages."""
+    srv = SWARM_MONITOR_SESSION.get("server_socket")
+    if srv is None:
+        SWARM_MONITOR_SESSION["timer_registered"] = False
+        return None  # unregister
+
+    # Accept orchestrator connection (single client)
+    if SWARM_MONITOR_SESSION["client_socket"] is None:
+        # Check connection timeout
+        deadline = SWARM_MONITOR_SESSION.get("connect_deadline")
+        if deadline is not None and time.monotonic() > deadline:
+            SWARM_MONITOR_SESSION["connect_deadline"] = None
+            _swarm_auto_stop("Orchestrator did not connect within 2 seconds.")
+            return None
+
+        try:
+            client, addr = srv.accept()
+            client.setblocking(False)
+            SWARM_MONITOR_SESSION["client_socket"] = client
+            SWARM_MONITOR_SESSION["buffer"] = ""
+            SWARM_MONITOR_SESSION["connect_deadline"] = None
+            # Mark orchestrator as connected
+            scene = getattr(bpy.context, "scene", None)
+            if scene and hasattr(scene, "drone_props"):
+                scene.drone_props.swarm_connected = True
+        except BlockingIOError:
+            pass
+        except OSError:
+            pass
+
+    # Read from client
+    client = SWARM_MONITOR_SESSION.get("client_socket")
+    if client:
+        try:
+            data = client.recv(8192)
+            if not data:
+                # Orchestrator disconnected
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                SWARM_MONITOR_SESSION["client_socket"] = None
+                SWARM_MONITOR_SESSION["buffer"] = ""
+                # If stop was in progress, treat disconnect as termination
+                scene = getattr(bpy.context, "scene", None)
+                if scene and hasattr(scene, "drone_props") and scene.drone_props.swarm_stopping:
+                    _swarm_terminate_cleanup()
+            else:
+                buf = SWARM_MONITOR_SESSION["buffer"] + data.decode('utf-8', errors='ignore')
+                lines = buf.split("\n")
+                # Last element is incomplete line (or empty if ends with \n)
+                SWARM_MONITOR_SESSION["buffer"] = lines.pop()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    _process_swarm_monitor_msg(msg)
+        except BlockingIOError:
+            pass
+        except OSError:
+            try:
+                client.close()
+            except OSError:
+                pass
+            SWARM_MONITOR_SESSION["client_socket"] = None
+            SWARM_MONITOR_SESSION["buffer"] = ""
+
+    # Tag viewport for redraw
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+    return 0.2
+
 # ------------------------------------------------------------------------
 #    Properties & Data Classes
 # ------------------------------------------------------------------------
+
+_STATUS_COLORS = {
+    "idle":    (0.35, 0.35, 0.35),
+    "booting": (1.0,  0.75, 0.0),
+    "ready":   (0.18, 0.75, 0.18),
+    "landed":  (0.2,  0.5,  1.0),
+}
+
+
+class SwarmDroneItem(bpy.types.PropertyGroup):
+    drone_id: StringProperty(name="ID", default="")
+    status: StringProperty(name="Status", default="idle")
+    init_x: FloatProperty(name="X", default=0.0)
+    init_y: FloatProperty(name="Y", default=0.0)
+    init_z: FloatProperty(name="Z", default=0.0)
+    battery: FloatProperty(name="Battery", default=-1.0)
+    ip: StringProperty(name="IP", default="")
+    status_color: FloatVectorProperty(
+        name="Color", subtype='COLOR',
+        default=(0.35, 0.35, 0.35), min=0.0, max=1.0
+    )
+
 
 class ColorItem(bpy.types.PropertyGroup):
     color: FloatVectorProperty(
@@ -906,6 +1185,44 @@ class DroneProperties(bpy.types.PropertyGroup):
         default=0.7,
         min=0.0,
         max=1.0
+    )
+
+    # Swarm Monitor
+    swarm_drones: CollectionProperty(type=SwarmDroneItem)
+    swarm_active_drone_index: IntProperty(default=0)
+    swarm_logs_fetched: BoolProperty(name="Logs Fetched", default=True)
+    swarm_connected: BoolProperty(name="Orchestrator Connected", default=False)
+    swarm_stopping: BoolProperty(name="Stopping", default=False)
+    swarm_view_mode: EnumProperty(
+        name="View Mode",
+        items=[('LIST', "List", ""), ('GRID', "Grid", "")],
+        default='LIST',
+    )
+    swarm_filter_status: EnumProperty(
+        name="Status",
+        items=[
+            ('ALL',     "All",     "Show all statuses"),
+            ('idle',    "Idle",    ""),
+            ('booting', "Booting", ""),
+            ('ready',   "Ready",   ""),
+            ('landed',  "Landed",  ""),
+        ],
+        default='ALL',
+    )
+    swarm_filter_voltage: EnumProperty(
+        name="Voltage",
+        items=[
+            ('ALL',        "All",        "Show all voltage levels"),
+            ('CHARGED',    "Charged",    "Battery at or above threshold"),
+            ('DISCHARGED', "Discharged", "Battery below threshold"),
+        ],
+        default='ALL',
+    )
+    swarm_battery_threshold: FloatProperty(
+        name="Battery Threshold (V)",
+        description="Voltage threshold separating charged from discharged",
+        default=3.9,
+        min=0.0,
     )
 
 
@@ -1574,6 +1891,46 @@ class UL_GlobalColorList(bpy.types.UIList):
     """List representation of global colors"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.prop(item, "color", text="")
+
+
+class UL_SwarmDroneList(bpy.types.UIList):
+    """List of drones in the swarm monitor panel"""
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        # Non-editable color swatch as status indicator
+        swatch = row.column()
+        swatch.enabled = False
+        swatch.scale_x = 0.18
+        swatch.prop(item, "status_color", text="")
+        # Clickable drone ID label
+        op = row.operator("drone.select_lb_in_scene", text=item.drone_id, emboss=False)
+        op.drone_id = item.drone_id
+        batt_str = f"{item.battery:.2f}V" if item.battery >= 0 else "—"
+        row.label(text=f"{item.status}  {batt_str}")
+
+    def filter_items(self, context, data, propname):
+        props = context.scene.drone_props
+        items = getattr(data, propname)
+        threshold = props.swarm_battery_threshold
+
+        flt_flags = []
+        for item in items:
+            show = True
+
+            if props.swarm_filter_status != 'ALL':
+                if item.status != props.swarm_filter_status:
+                    show = False
+
+            if show and props.swarm_filter_voltage != 'ALL' and item.battery >= 0:
+                is_charged = item.battery >= threshold
+                if props.swarm_filter_voltage == 'CHARGED' and not is_charged:
+                    show = False
+                elif props.swarm_filter_voltage == 'DISCHARGED' and is_charged:
+                    show = False
+
+            flt_flags.append(self.bitflag_filter_item if show else 0)
+
+        return flt_flags, []
 
 
 # ------------------------------------------------------------------------
@@ -3217,9 +3574,16 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
             return {'CANCELLED'}
 
         python_exec = get_controller_python()
-        cmd_str = f"'{python_exec}' '{target_script}' --illumination --skip-confirm"
+        cmd_str = f"'{python_exec}' '{target_script}' --illumination"
         if props.export_dark_room:
             cmd_str += " --dark"
+
+        # Open swarm monitor socket before launching so orchestrator can connect
+        open_swarm_monitor_socket()
+        props.swarm_logs_fetched = False
+        props.swarm_connected = False
+        props.swarm_stopping = False
+        props.swarm_drones.clear()
 
         # Open Mac Terminal – capture the tab reference for stop button
         apple_script = f'''
@@ -3250,6 +3614,8 @@ class DRONE_OT_stop_illuminate(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.drone_props
 
+        # Send stop via both channels
+        swarm_monitor_send({"cmd": "stop"})
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2.0)
@@ -3258,9 +3624,10 @@ class DRONE_OT_stop_illuminate(bpy.types.Operator):
             s.close()
             self.report({'INFO'}, "Sent stop signal to orchestrator")
         except Exception as e:
-            self.report({'WARNING'}, f"Could not reach orchestrator: {e}")
+            self.report({'WARNING'}, f"Could not reach orchestrator stop port: {e}")
 
-        props.illuminate_running = False
+        # Wait for all_stopped from orchestrator before resetting state
+        props.swarm_stopping = True
         _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
         return {'FINISHED'}
 
@@ -3321,6 +3688,13 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to generate interaction YAML: {e}")
             return {'CANCELLED'}
+
+        # Open swarm monitor socket before launching so orchestrator can connect
+        open_swarm_monitor_socket()
+        props.swarm_logs_fetched = False
+        props.swarm_connected = False
+        props.swarm_stopping = False
+        props.swarm_drones.clear()
 
         try:
             launch_orchestrator(
@@ -3440,6 +3814,10 @@ class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.drone_props
 
+        # Try the monitor socket first (available from launch start)
+        swarm_monitor_send({"cmd": "stop"})
+
+        # Also try the legacy stop listener port
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2.0)
@@ -3448,15 +3826,44 @@ class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
             s.close()
             self.report({'INFO'}, "Sent stop signal to orchestrator")
         except Exception as e:
-            self.report({'WARNING'}, f"Could not reach orchestrator: {e}")
+            self.report({'WARNING'}, f"Could not reach orchestrator stop port: {e}")
 
-        # Clean up interaction session
+        # Close interaction TCP session immediately; wait for all_stopped for monitor
         close_static_interaction_session()
-        props.illuminate_running = False
         props.interaction_editor_active = False
         props.interaction_connected_count = 0
         props.edit_active = False
+        props.swarm_stopping = True
         _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
+        return {'FINISHED'}
+
+
+class DRONE_OT_confirm_launch(bpy.types.Operator):
+    """Send confirm_launch to the orchestrator once all drones are ready"""
+    bl_idname = "drone.confirm_launch"
+    bl_label = "Confirm Launch"
+
+    def execute(self, context):
+        swarm_monitor_send({"cmd": "confirm_launch"})
+        self.report({'INFO'}, "Launch confirmed.")
+        return {'FINISHED'}
+
+
+class DRONE_OT_select_lb_in_scene(bpy.types.Operator):
+    """Select the LightBender with this ID in the scene"""
+    bl_idname = "drone.select_lb_in_scene"
+    bl_label = "Select in Scene"
+
+    drone_id: StringProperty(name="Drone ID", default="")
+
+    def execute(self, context):
+        obj = context.scene.objects.get(self.drone_id)
+        if obj is None:
+            self.report({'WARNING'}, f"Object '{self.drone_id}' not found in scene.")
+            return {'CANCELLED'}
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
         return {'FINISHED'}
 
 
@@ -4497,7 +4904,6 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
     bl_category = "LightBender"
     bl_label = "Mission Export"
     bl_parent_id = "VIEW3D_PT_drone_swarm"
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -4523,15 +4929,22 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
 
             layout.operator("drone.export_yaml", text="Export YAML", icon='EXPORT')
 
-            row = layout.row(align=True)
-            # Illuminate button
-            illuminate_row = row.row(align=True)
-            illuminate_row.enabled = not props.illuminate_running
+            illuminate_row = layout.row()
+            illuminate_row.enabled = not props.illuminate_running and props.swarm_logs_fetched
+            illuminate_row.scale_y = 1.2
             illuminate_row.operator("drone.export_and_illuminate", text="Illuminate", icon='PLAY')
-            # Stop Illumination button
-            stop_row = row.row(align=True)
-            stop_row.enabled = props.illuminate_running
-            stop_row.operator("drone.stop_illuminate", text="Stop Illumination", icon='SNAP_FACE')
+
+            all_ready = bool(props.swarm_drones) and all(d.status == "ready" for d in props.swarm_drones)
+            row = layout.row(align=True)
+            confirm_col = row.row(align=True)
+            confirm_col.enabled = all_ready and props.illuminate_running
+            confirm_col.operator("drone.confirm_launch", text="Confirm Launch", icon='PLAY')
+            stop_col = row.row(align=True)
+            stop_col.enabled = props.illuminate_running and props.swarm_connected and not props.swarm_stopping
+            stop_col.operator("drone.stop_illuminate", text="Stop", icon='SNAP_FACE')
+
+            if props.swarm_stopping:
+                layout.label(text="Stopping — waiting for drones to land…", icon='INFO')
 
         else:
             # --- Interaction Mode (inline, always visible) ---
@@ -4550,14 +4963,22 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             # Export YAML
             layout.operator("drone.export_interaction_yaml", text="Export YAML", icon='EXPORT')
 
-            # Illuminate + Stop Illumination row
-            row = layout.row(align=True)
-            illuminate_row = row.row(align=True)
-            illuminate_row.enabled = not props.illuminate_running
+            illuminate_row = layout.row()
+            illuminate_row.enabled = not props.illuminate_running and props.swarm_logs_fetched
+            illuminate_row.scale_y = 1.2
             illuminate_row.operator("drone.export_and_interact", text="Illuminate", icon='PLAY')
-            stop_row = row.row(align=True)
-            stop_row.enabled = props.illuminate_running and not props.edit_active
-            stop_row.operator("drone.stop_illuminate_interaction", text="Stop Illumination", icon='SNAP_FACE')
+
+            all_ready = bool(props.swarm_drones) and all(d.status == "ready" for d in props.swarm_drones)
+            row = layout.row(align=True)
+            confirm_col = row.row(align=True)
+            confirm_col.enabled = all_ready and props.illuminate_running
+            confirm_col.operator("drone.confirm_launch", text="Confirm Launch", icon='PLAY')
+            stop_col = row.row(align=True)
+            stop_col.enabled = props.illuminate_running and props.swarm_connected and not props.swarm_stopping and not props.edit_active
+            stop_col.operator("drone.stop_illuminate_interaction", text="Stop", icon='SNAP_FACE')
+
+            if props.swarm_stopping:
+                layout.label(text="Stopping — waiting for drones to land…", icon='INFO')
 
             layout.separator()
 
@@ -4580,6 +5001,85 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
                     layout.label(text="Waiting for LB connections...", icon='TIME')
 
 
+class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "LightBender Status"
+    bl_parent_id = "VIEW3D_PT_lb_export"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.drone_props
+
+        drones = props.swarm_drones
+
+        # View mode toggle
+        row = layout.row(align=True)
+        row.prop_enum(props, "swarm_view_mode", 'LIST')
+        row.prop_enum(props, "swarm_view_mode", 'GRID')
+
+        if props.swarm_view_mode == 'LIST':
+            # Filter controls
+            row = layout.row(align=True)
+            row.prop(props, "swarm_filter_status", text="")
+            row.prop(props, "swarm_filter_voltage", text="")
+            if props.swarm_filter_voltage != 'ALL':
+                row.prop(props, "swarm_battery_threshold", text="V")
+
+            # Sync active index from viewport selection
+            active_obj = context.active_object
+            if active_obj and drones:
+                for i, item in enumerate(drones):
+                    if item.drone_id == active_obj.name:
+                        if props.swarm_active_drone_index != i:
+                            props.swarm_active_drone_index = i
+                        break
+
+            layout.template_list(
+                "UL_SwarmDroneList", "",
+                props, "swarm_drones",
+                props, "swarm_active_drone_index",
+                rows=max(len(drones), 3)
+            )
+
+        else:
+            # Status → solid color strip icon (SEQUENCE_COLOR = flat, no gradient)
+            # 01=red, 04=yellow, 05=green, 07=blue, 09=gray
+            status_dot = {
+                "idle":    'SEQUENCE_COLOR_09',
+                "booting": 'SEQUENCE_COLOR_04',
+                "ready":   'SEQUENCE_COLOR_05',
+                "landed":  'SEQUENCE_COLOR_07',
+            }
+            if not drones:
+                box = layout.box()
+                box.label(text="No LightBenders loaded", icon='INFO')
+                return
+
+            sorted_drones = sorted(drones, key=lambda d: d.drone_id)
+            grid = layout.grid_flow(
+                row_major=True, columns=0,
+                even_columns=True, even_rows=True, align=True
+            )
+            for d in sorted_drones:
+                icon = status_dot.get(d.status, 'SEQUENCE_COLOR_01')
+                # Strip the "lb" prefix so the label is just the number
+                short_id = d.drone_id[2:] if d.drone_id.startswith("lb") else d.drone_id
+                op = grid.operator(
+                    "drone.select_lb_in_scene",
+                    text=short_id,
+                    icon=icon,
+                )
+                op.drone_id = d.drone_id
+
+        if props.illuminate_running and drones:
+            ready_count = sum(1 for d in drones if d.status == "ready")
+            if ready_count < len(drones):
+                layout.label(text=f"Waiting: {ready_count}/{len(drones)} ready", icon='TIME')
+
+
 # ------------------------------------------------------------------------
 #    Registration
 # ------------------------------------------------------------------------
@@ -4587,6 +5087,7 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
 classes = (
     LEDPointer,
     ColorItem,
+    SwarmDroneItem,
     DrawEraseGroupItem,
     DrawEraseGroup,
     DroneProperties,
@@ -4595,6 +5096,7 @@ classes = (
     DRONE_OT_remove_pointer,
     UL_DronePointerList,
     UL_GlobalColorList,
+    UL_SwarmDroneList,
     UL_DrawEraseGroups,
     UL_DrawEraseDrones,
     DRONE_OT_add_de_group,
@@ -4629,12 +5131,15 @@ classes = (
     DRONE_OT_start_edit,
     DRONE_OT_stop_edit,
     DRONE_OT_stop_illuminate_interaction,
+    DRONE_OT_confirm_launch,
+    DRONE_OT_select_lb_in_scene,
     VIEW3D_PT_drone_swarm,
     VIEW3D_PT_lb_generative_layouts,
     VIEW3D_PT_lb_automated_animations,
     VIEW3D_PT_lb_global_leds,
     VIEW3D_PT_lb_simulators,
     VIEW3D_PT_lb_export,
+    VIEW3D_PT_lb_swarm_monitor,
 )
 
 

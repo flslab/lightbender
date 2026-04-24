@@ -78,6 +78,12 @@ class SwarmOrchestrator:
         self._blender_stop_port = 5599
         self._blender_stop_server = None
 
+        # Blender monitor socket (pushes status to Blender addon)
+        self._blender_monitor_port = 5598
+        self._blender_monitor_sock = None
+        self._blender_monitor_lock = threading.Lock()
+        self._confirm_launch_event = threading.Event()
+
     def _load_manifest(self):
         with open(MANIFEST_FILE) as f:
             return yaml.safe_load(f)
@@ -410,6 +416,87 @@ class SwarmOrchestrator:
                 reboot_crazyflie(drone['uri'])
         time.sleep(5)  # Wait for reboot
 
+    def _compute_init_positions(self):
+        """Replace each drone's init_pos with target XY from mission + default_height Z from manifest."""
+        if not self.mission or 'drones' not in self.mission:
+            return
+        default_height = self.manifest.get('common', {}).get('default_height',
+                         self.manifest.get('mission', {}).get('default_height', 0.24))
+        for drone in self.drones:
+            drone_mission = self.mission['drones'].get(drone['id'])
+            if drone_mission and 'target' in drone_mission:
+                target = drone_mission['target']
+                drone['init_pos'] = [target[0], target[1], default_height]
+                self.logger.info(
+                    f"Drone {drone['id']} init_pos set to target XY + default_height: {drone['init_pos']}")
+
+    def _connect_to_blender_monitor(self):
+        """Try to connect to Blender's monitor socket on localhost."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(('127.0.0.1', self._blender_monitor_port))
+            sock.setblocking(True)
+            self._blender_monitor_sock = sock
+            self.logger.info(f"Connected to Blender monitor on port {self._blender_monitor_port}")
+
+            # Start a reader thread for messages from Blender (e.g. confirm_launch)
+            reader = threading.Thread(target=self._blender_monitor_reader, daemon=True)
+            reader.start()
+        except Exception as e:
+            self.logger.warning(f"Could not connect to Blender monitor: {e}")
+            self._blender_monitor_sock = None
+
+    def _blender_monitor_reader(self):
+        """Read commands from Blender over the monitor socket."""
+        sock = self._blender_monitor_sock
+        if not sock:
+            return
+        buf = ""
+        while self.running.is_set():
+            try:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                buf += data.decode('utf-8', errors='ignore')
+                while '\n' in buf:
+                    line, buf = buf.split('\n', 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get('cmd') == 'confirm_launch':
+                        self.logger.info("Received confirm_launch from Blender.")
+                        self._confirm_launch_event.set()
+                    elif msg.get('cmd') == 'stop':
+                        self.logger.info("Received stop from Blender monitor.")
+                        self.emergency_stop()
+                        break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def _blender_notify(self, msg_dict):
+        """Send a JSON message to Blender over the monitor socket."""
+        with self._blender_monitor_lock:
+            sock = self._blender_monitor_sock
+            if sock is None:
+                return
+            try:
+                payload = json.dumps(msg_dict) + '\n'
+                sock.sendall(payload.encode('utf-8'))
+            except (BrokenPipeError, OSError) as e:
+                self.logger.warning(f"Blender monitor send failed: {e}")
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                self._blender_monitor_sock = None
+
     def run(self):
         if self.args.off:
             self.shutdown_nodes()
@@ -424,18 +511,25 @@ class SwarmOrchestrator:
         self.logger.info(f"Mission Tag: {self.tag}")
 
         self.setup_network()
+        self.running.set()               # set BEFORE starting listeners
         self._start_blender_stop_listener()
-        self.running.set()
 
         try:
             # Switch drones to adhoc/bluetooth if configured, update IPs
             self._apply_network_mode()
+            if not self.running.is_set():
+                return
 
             # Process Pending Downloads from previous runs
             self._process_pending_downloads()
+            if not self.running.is_set():
+                return
 
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
+            if not self.running.is_set():
+                return
+
             if not self.args.record:
                 # Filter drones to only those referenced in the mission file
                 if self.mission and 'drones' in self.mission:
@@ -443,16 +537,41 @@ class SwarmOrchestrator:
                     self.drones = [d for d in self.drones if d['id'] in mission_ids]
                     self.logger.info(f"Filtered to {len(self.drones)} mission drones: {[d['id'] for d in self.drones]}")
 
+                # Compute init_pos from mission target + default_height
+                self._compute_init_positions()
+
+                # Connect to Blender monitor and push initial swarm info
+                self._connect_to_blender_monitor()
+                battery_threshold = self.manifest.get('mission', {}).get('battery_threshold', 3.9)
+                self._blender_notify({
+                    "cmd": "swarm_info",
+                    "battery_threshold": battery_threshold,
+                    "drones": [
+                        {
+                            "id": d['id'],
+                            "ip": d.get('ip', ''),
+                            "init_pos": d.get('init_pos', [0, 0, 0]),
+                            "status": "idle"
+                        }
+                        for d in self.drones
+                    ]
+                })
+
                 if not self.args.skip_dispatcher:
                     from dispatcher import run_dispatch
                     is_mock = self.args.ground or self.args.droneless
                     self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
                     self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
                     self.manifest['drones'] = self.drones
+                    if not self.running.is_set():
+                        return
 
                 self.reboot_flight_controllers(remote=bool(self.radio_node))
+                if not self.running.is_set():
+                    return
 
                 def boot_drone(drone):
+                    self._blender_notify({"cmd": "drone_status", "id": drone['id'], "status": "booting"})
                     cmd = self._get_drone_cmd(drone)
                     if self._boot_remote_node(drone, cmd, "Drone"):
                         entry = {'drone': drone, 'tag': self.tag}
@@ -489,7 +608,15 @@ class SwarmOrchestrator:
             self._wait_for_ready()
 
             if not self.args.skip_confirm:
-                input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
+                if self._blender_monitor_sock:
+                    self.logger.info(">>> All Green. Waiting for Blender confirm_launch...")
+                    # Wait for Blender to send confirm_launch (check every second)
+                    while not self._confirm_launch_event.is_set() and self.running.is_set():
+                        self._confirm_launch_event.wait(timeout=1.0)
+                    if not self.running.is_set():
+                        raise KeyboardInterrupt("Stopped while waiting for confirm_launch")
+                else:
+                    input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
                 # time.sleep(10)
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
@@ -500,7 +627,13 @@ class SwarmOrchestrator:
                     self.ready_ids = set()
                     self._wait_for_ready()
                     if not self.args.skip_confirm:
-                        input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
+                        if self._blender_monitor_sock:
+                            self._confirm_launch_event.clear()
+                            self.logger.info(f">>> Mission {i+1}/{len(self.missions)}: Waiting for Blender confirm...")
+                            while not self._confirm_launch_event.is_set() and self.running.is_set():
+                                self._confirm_launch_event.wait(timeout=1.0)
+                        else:
+                            input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
                     if i == 0:
                         time.sleep(5)
                     self.logger.info(f"Broadcasting START for Mission {i+1}...")
@@ -581,6 +714,13 @@ class SwarmOrchestrator:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
                         self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
+                        battery = msg.get('battery')
+                        self._blender_notify({
+                            "cmd": "drone_status",
+                            "id": sender_id,
+                            "status": "ready",
+                            "battery": battery
+                        })
             except zmq.Again:
                 continue  # Timeout, loop back to check self.running
 
@@ -605,6 +745,12 @@ class SwarmOrchestrator:
             batt = msg.get('battery', 'N/A')
             elapsed = msg.get('flight_duration', 'N/A')
             self.logger.info(f"Drone {d_id} LANDED. Batt: {batt} Time: {elapsed}s")
+            self._blender_notify({
+                "cmd": "drone_status",
+                "id": d_id,
+                "status": "landed",
+                "battery": batt
+            })
 
     def emergency_stop(self):
         """Broadcasts emergency command and waits for landing confirmations."""
@@ -675,6 +821,18 @@ class SwarmOrchestrator:
                 with open(self.ctrl_cfg['downloads_file'], 'w') as f:
                     json.dump(self.pending_downloads, f)
 
+        # Notify Blender that logs have been fetched
+        self._blender_notify({"cmd": "logs_fetched"})
+        self._blender_notify({"cmd": "all_stopped"})
+
+        # Close Blender monitor socket
+        if self._blender_monitor_sock:
+            try:
+                self._blender_monitor_sock.close()
+            except OSError:
+                pass
+            self._blender_monitor_sock = None
+
         # Close Sockets
         if self.http_server:
             self.http_server.shutdown()
@@ -714,10 +872,12 @@ class SwarmOrchestrator:
                 self._blender_stop_server = srv
                 self.logger.info(f"Blender stop listener on port {self._blender_stop_port}")
 
-                while self.running.is_set():
+                while True:
                     try:
                         client, addr = srv.accept()
                     except socket.timeout:
+                        if not self.running.is_set():
+                            break
                         continue
                     except OSError:
                         break
