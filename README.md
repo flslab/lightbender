@@ -5,6 +5,8 @@ When equipped with a cage, a LightBender facilitates safe, bare-hand interaction
 
 Authors: Hamed Alimohammadzadeh(halimoha@usc.edu), Shuqin Zhu (shuqinzh@usc.edu), and Shahram Ghandeharizadeh (shahram@usc.edu)
 
+Acknowledgments:  This research is supported in part by the National Science Foundation under Grant No. CMMI-2425754, CloudBank, and CloudLab. 
+
 ## Features
 
 * Illuminations using a swarm of LightBenders, see below.
