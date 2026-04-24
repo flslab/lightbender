@@ -4,6 +4,7 @@ orchestrator/swarm_manifest.yaml
 orchestrator/logs
 orchestrator/uploader/token.json
 *.log
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
