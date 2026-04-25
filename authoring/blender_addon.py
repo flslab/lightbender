@@ -24,8 +24,10 @@ from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
 
-REPO_DIR = "/path/to/lightbender"
-ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
+REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
+ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "mock_orchestrator"))
+# REPO_DIR = "/path/to/lightbender"
+# ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 
 # ---------------------------------------------------------------------------
@@ -1918,6 +1920,7 @@ class UL_SwarmDroneList(bpy.types.UIList):
         
         swatch_col = row.column()
         swatch_col.ui_units_x = 1.0
+        swatch_col.scale_x = 0.5 
         swatch_col.enabled = False
         swatch_col.prop(item, "status_color", text="")
 
@@ -5041,6 +5044,14 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
         row.prop_enum(props, "swarm_view_mode", 'LIST')
         row.prop_enum(props, "swarm_view_mode", 'GRID')
 
+        # Nodes sockets provide perfectly circular colored icons naturally!
+        status_dot = {
+            "idle":    'NODE_SOCKET_FLOAT', # Grey solid circle
+            "booting": 'NODE_SOCKET_RGBA',  # Yellow solid circle
+            "ready":   'NODE_SOCKET_SHADER',# Green solid circle
+            "flying":  'NODE_SOCKET_STRING',# Blue solid circle
+        }
+
         if props.swarm_view_mode == 'LIST':
             # Filter controls
             row = layout.row(align=True)
@@ -5053,23 +5064,20 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
             list_box = layout.box()
             header = list_box.row(align=True)
             
-            pad_col = header.column()
-            pad_col.label(text="", icon='BLANK1')
-
             icon_col = header.column()
-            icon_col.ui_units_x = 2.10
-            icon_col.label(text="")
+            icon_col.ui_units_x = 1.3
+            icon_col.label(text=" ")
             
-            id_col = header.column()
-            id_col.ui_units_x = 2.30
+            id_col = header.column()    
+            id_col.ui_units_x = 2.3
             id_col.label(text="ID")
 
             status_col = header.column()
-            status_col.ui_units_x = 4.5
+            status_col.ui_units_x = 4
             status_col.label(text="Status")
 
             battery_col = header.column()
-            battery_col.ui_units_x = 3.0
+            battery_col.ui_units_x = 4
             battery_col.label(text="Battery")
 
             # Directly loop and draw the items to avoid scrolling sub-pages
@@ -5090,26 +5098,23 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                 if show:
                     has_items = True
                     item_row = list_box.row(align=True)
-                    
-                    pad_col = item_row.column()
-                    pad_col.label(text="", icon='BLANK1')
 
                     icon_col = item_row.column()
-                    icon_col.ui_units_x = 2.10
-                    icon_col.enabled = False
-                    icon_col.prop(d, "status_color", text="")
+                    icon_col.ui_units_x = 0.5
+                    icon_col.label(text="", icon=status_dot.get(d.status, 'NODE_SOCKET_FLOAT'))
+
                     
                     id_col = item_row.column()
-                    id_col.ui_units_x = 2.30
+                    id_col.ui_units_x = 2.3
                     op = id_col.operator("drone.select_lb_in_scene", text=d.drone_id, emboss=False)
                     op.drone_id = d.drone_id
 
                     status_col = item_row.column()
-                    status_col.ui_units_x = 4.5
+                    status_col.ui_units_x = 4
                     status_col.label(text=d.status)
 
                     battery_col = item_row.column()
-                    battery_col.ui_units_x = 3.0
+                    battery_col.ui_units_x = 4
                     batt_str = f"{d.battery:.2f}V" if d.battery >= 0 else "—"
                     battery_col.label(text=batt_str)
             
@@ -5118,13 +5123,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                 col.label(text="No items match filter", icon='INFO')
 
         else:
-            # Nodes sockets provide perfectly circular colored icons naturally!
-            status_dot = {
-                "idle":    'NODE_SOCKET_FLOAT', # Grey solid circle
-                "booting": 'NODE_SOCKET_RGBA',  # Yellow solid circle
-                "ready":   'NODE_SOCKET_SHADER',# Green solid circle
-                "flying":  'NODE_SOCKET_STRING',# Blue solid circle
-            }
+
             if not drones:
                 box = layout.box()
                 box.label(text="No LightBenders loaded", icon='INFO')

@@ -212,7 +212,7 @@ def build_sequence(drones, battery_threshold):
                 "cmd": "drone_status",
                 "id": drone["id"],
                 "status": "ready",
-                "battery": round(4.18 - (index * 0.03), 2),
+                "battery": round(8.18 - (index * 0.03), 2),
             }
         )
         landed_messages.append(
@@ -220,7 +220,7 @@ def build_sequence(drones, battery_threshold):
                 "cmd": "drone_status",
                 "id": drone["id"],
                 "status": "landed",
-                "battery": round(4.05 - (index * 0.04), 2),
+                "battery": round(8.05 - (index * 0.04), 2),
             }
         )
 
@@ -317,7 +317,7 @@ def main():
             port = int(parts[1])
     manifest_path = args.manifest.resolve()
     manifest = load_manifest(manifest_path)
-    battery_threshold = manifest.get("mission", {}).get("battery_threshold", 3.9)
+    battery_threshold = manifest.get("mission", {}).get("battery_threshold", 7)
     drones = build_drone_payloads(manifest, manifest_path, selected_ids=args.drone_id)
 
     if not drones:
