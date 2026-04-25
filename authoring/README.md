@@ -102,7 +102,7 @@ These controls appear when a LightBender object (`lb*`) is the active selection.
 
 ### Generative Layouts
 
-Collapsed by default. Automates swarm placement from an SVG file.
+Automates swarm placement from an SVG file.
 
 #### SVG Transform and Place
 
@@ -123,7 +123,7 @@ Click **Transform and Place** to run the placement.
 
 ### Automated Animations
 
-Collapsed by default. Contains four keyframe-generation tools.
+Contains four keyframe-generation tools.
 
 #### Morph
 
@@ -194,7 +194,7 @@ Click **Generate Fly-In/Fly-Out** to write keyframes; **Trash** icon clears them
 
 ### Global LED Effects
 
-Collapsed by default. Applies a procedural LED animation preset to all selected (or all) LightBenders in the scene.
+Applies a procedural LED animation preset to all selected (or all) LightBenders in the scene.
 
 **Preset** — choose from seven animation presets:
 
@@ -221,7 +221,7 @@ Click **Apply to Selected** to write the expression only to the selected LightBe
 
 ### Physics & Simulation
 
-Collapsed by default. Injects positional noise and staggers LightBender positions based on camera perspective to avoid downwash and overlaps.
+Injects positional noise and staggers LightBender positions based on camera perspective to avoid downwash and overlaps.
 
 #### Error & Drift Simulators
 
@@ -266,7 +266,7 @@ Click **Stagger** to apply; **Reset Stagger** to restore original positions.
 
 ### Mission Export
 
-Always visible (not collapsed). Writes the animation to an SFL (YAML) file and optionally launches the orchestrator.
+Writes the animation to an SFL (YAML) file and optionally launches the orchestrator.
 
 #### Export Config
 
