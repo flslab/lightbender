@@ -4,7 +4,7 @@ bl_info = {
     "version": (1, 17),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
-    "description": "Create light-element drones, animate LEDs with pointers, add position errors, and export YAML",
+    "description": "Create light-element LightBenders, animate LEDs with pointers, add position errors, and export YAML",
     "category": "Animation",
 }
 
@@ -26,7 +26,8 @@ from mathutils import Vector, Matrix
 REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
 # REPO_DIR = "/path/to/lightbender"
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
-ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
+ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "mock_orchestrator"))
+# ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 
 # ---------------------------------------------------------------------------
 #    Illuminate / Interaction Session State
@@ -60,11 +61,6 @@ SWARM_MONITOR_SESSION = {
 
 def get_default_interaction_yaml_path(mission_name):
     return os.path.join(ORCHESTRATOR_DIR, "SFL", f"{mission_name}.yaml")
-
-
-def get_default_orchestrator_path():
-    return os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
-
 
 def get_controller_python():
     controller_root = REPO_DIR
@@ -165,16 +161,16 @@ def show_popup(context, title, lines, icon='INFO'):
 
 
 def read_manifest_ips(id_filter=None):
-    """Read drone IP addresses from swarm_manifest.yaml next to the orchestrator.
+    """Read LightBender IP addresses from swarm_manifest.yaml next to the orchestrator.
     
     Args:
-        id_filter: optional set/list of drone IDs (e.g. {'lb1','lb2'}) to include.
-                   If None, all drones are returned.
+        id_filter: optional set/list of LightBender IDs (e.g. {'lb1','lb2'}) to include.
+                   If None, all LightBenders are returned.
     Returns:
-        list of IP strings for matching drones.
+        list of IP strings for matching LightBenders.
     """
     entries = []  # list of (id, ip) tuples
-    manifest_path = os.path.join(os.path.dirname(get_default_orchestrator_path()), "swarm_manifest.yaml")
+    manifest_path = os.path.join(ORCHESTRATOR_DIR, "swarm_manifest.yaml")
     if not os.path.isfile(manifest_path):
         return []
     try:
@@ -224,9 +220,10 @@ def read_manifest_ips(id_filter=None):
 
 def launch_orchestrator(target_script, flags, dark_room=False):
     python_exec = get_controller_python()
-    cmd_str = f"'{python_exec}' '{target_script}' {' '.join(flags)}"
+    cmds = [f"'{python_exec}' '{target_script}'", *flags, "--blender '127.0.0.1:5598'"]
     if dark_room:
-        cmd_str += " --dark"
+        cmds.append("--dark")
+    cmd_str = " ".join(cmds)
 
     apple_script = f'''
     tell application "Terminal"
@@ -470,6 +467,7 @@ def _swarm_auto_stop(reason=""):
         props.illuminate_running = False
         props.swarm_connected = False
         props.swarm_stopping = False
+        props.swarm_launch_confirmed = False
         props.swarm_logs_fetched = True
         props.swarm_drones.clear()
     print(f"[LB] Auto-stop: {reason}")
@@ -484,7 +482,12 @@ def _swarm_terminate_cleanup():
         props.illuminate_running = False
         props.swarm_connected = False
         props.swarm_stopping = False
+        props.swarm_launch_confirmed = False
         props.swarm_logs_fetched = True
+        
+        for d in props.swarm_drones:
+            d.status = "idle"
+            d.status_color = _STATUS_COLORS["idle"]
 
 
 def open_swarm_monitor_socket(port=5598):
@@ -501,6 +504,10 @@ def open_swarm_monitor_socket(port=5598):
     except OSError as e:
         print(f"[LB] Swarm monitor socket failed on port {port}: {e}")
         return False
+
+    scene = getattr(bpy.context, "scene", None)
+    if scene and hasattr(scene, "drone_props"):
+        scene.drone_props.swarm_launch_confirmed = False
 
     if not SWARM_MONITOR_SESSION["timer_registered"]:
         bpy.app.timers.register(swarm_monitor_timer, first_interval=0.2)
@@ -546,7 +553,12 @@ def _process_swarm_monitor_msg(msg):
     elif cmd == "drone_status":
         did = msg.get("id")
         if did and did in SWARM_MONITOR_SESSION["drones"]:
-            SWARM_MONITOR_SESSION["drones"][did]["status"] = msg.get("status", "idle")
+            status = msg.get("status", "idle")
+            if status == "landed":
+                status = "idle"
+            elif status == "ready" and SWARM_MONITOR_SESSION["drones"][did]["status"] == "flying":
+                status = "flying"
+            SWARM_MONITOR_SESSION["drones"][did]["status"] = status
             if msg.get("battery") is not None:
                 SWARM_MONITOR_SESSION["drones"][did]["battery"] = msg["battery"]
             _sync_swarm_collection()
@@ -566,7 +578,7 @@ def _process_swarm_monitor_msg(msg):
 
 
 def _sync_swarm_collection():
-    """Sync the SWARM_MONITOR_SESSION drones dict → scene.drone_props.swarm_drones collection."""
+    """Sync the SWARM_MONITOR_SESSION LightBenders dict → scene.drone_props.swarm_drones collection."""
     scene = getattr(bpy.context, "scene", None)
     if not scene or not hasattr(scene, "drone_props"):
         return
@@ -689,7 +701,7 @@ _STATUS_COLORS = {
     "idle":    (0.35, 0.35, 0.35),
     "booting": (1.0,  0.75, 0.0),
     "ready":   (0.18, 0.75, 0.18),
-    "landed":  (0.2,  0.5,  1.0),
+    "flying":  (0.2,  0.5,  1.0),
 }
 
 
@@ -735,7 +747,7 @@ class LEDPointer(bpy.types.PropertyGroup):
 
 
 class DrawEraseGroupItem(bpy.types.PropertyGroup):
-    """A single drone assigned to a draw/erase group"""
+    """A single LightBender assigned to a draw/erase group"""
     obj_ptr: PointerProperty(type=bpy.types.Object)
     direction: EnumProperty(
         name="Direction",
@@ -750,7 +762,7 @@ class DrawEraseGroupItem(bpy.types.PropertyGroup):
 
 
 class DrawEraseGroup(bpy.types.PropertyGroup):
-    """A collection of drones representing a single stroke or letter"""
+    """A collection of LightBenders representing a single stroke or letter"""
     name: StringProperty(name="Group Name", default="Stroke")
     drones: CollectionProperty(type=DrawEraseGroupItem)
     active_drone_index: IntProperty(default=0)
@@ -817,7 +829,7 @@ class DroneProperties(bpy.types.PropertyGroup):
     # Position Error Settings
     error_distance: FloatProperty(
         name="Error Distance",
-        description="Distance to randomly offset the lb drones in the YZ plane",
+        description="Distance to randomly offset the LightBenders in the YZ plane",
         default=0.05,
         min=0.0,
         unit='LENGTH'
@@ -1193,6 +1205,7 @@ class DroneProperties(bpy.types.PropertyGroup):
     swarm_logs_fetched: BoolProperty(name="Logs Fetched", default=True)
     swarm_connected: BoolProperty(name="Orchestrator Connected", default=False)
     swarm_stopping: BoolProperty(name="Stopping", default=False)
+    swarm_launch_confirmed: BoolProperty(name="Launch Confirmed", default=False)
     swarm_view_mode: EnumProperty(
         name="View Mode",
         items=[('LIST', "List", ""), ('GRID', "Grid", "")],
@@ -1205,7 +1218,7 @@ class DroneProperties(bpy.types.PropertyGroup):
             ('idle',    "Idle",    ""),
             ('booting', "Booting", ""),
             ('ready',   "Ready",   ""),
-            ('landed',  "Landed",  ""),
+            ('flying',  "Flying",  ""),
         ],
         default='ALL',
     )
@@ -1213,8 +1226,8 @@ class DroneProperties(bpy.types.PropertyGroup):
         name="Voltage",
         items=[
             ('ALL',        "All",        "Show all voltage levels"),
-            ('CHARGED',    "Charged",    "Battery at or above threshold"),
-            ('DISCHARGED', "Discharged", "Battery below threshold"),
+            ('CHARGED',    "Charged",    "Battery level is healthy"),
+            ('DISCHARGED', "Discharged", "Battery level is low"),
         ],
         default='ALL',
     )
@@ -1232,7 +1245,7 @@ class DroneProperties(bpy.types.PropertyGroup):
 
 def get_led_material():
     """Returns a material that emits light based on Object Color"""
-    mat_name = "Drone_LED_Material"
+    mat_name = "LightBender_LED_Material"
     mat = bpy.data.materials.get(mat_name)
     if not mat:
         mat = bpy.data.materials.new(name=mat_name)
@@ -1256,8 +1269,8 @@ def get_led_material():
 
 
 def get_structure_material():
-    """Returns a dark-gray diffuse material for drone structure meshes (hidden from render)"""
-    mat_name = "Drone_Structure_Material"
+    """Returns a dark-gray diffuse material for LightBender structure meshes (hidden from render)"""
+    mat_name = "LightBender_Structure_Material"
     mat = bpy.data.materials.get(mat_name)
     if not mat:
         mat = bpy.data.materials.new(name=mat_name)
@@ -1282,7 +1295,7 @@ def get_structure_material():
 # ------------------------------------------------------------------------
 
 class OBJECT_OT_add_drone(bpy.types.Operator):
-    """Create a new Drone with Light Elements"""
+    """Create a new LightBender with Light Elements"""
     bl_idname = "drone.add_drone"
     bl_label = "Add LightBender"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1486,7 +1499,7 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         # 1. Create Main Drone Body
         bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
         drone_base = context.active_object
-        drone_base.name = "Drone_Base"
+        drone_base.name = "LightBender_Base"
         drone_base.empty_display_size = 0.1
 
         # 2. Add Properties
@@ -1708,14 +1721,14 @@ class DRONE_OT_add_drones_to_group(bpy.types.Operator):
                     new_item.obj_ptr = obj
                     added += 1
 
-        self.report({'INFO'}, f"Added {added} drones to {group.name}")
+        self.report({'INFO'}, f"Added {added} LightBenders to {group.name}")
         return {'FINISHED'}
 
 
 class DRONE_OT_remove_drone_from_group(bpy.types.Operator):
-    """Remove selected drone from the active group list"""
+    """Remove selected LightBender from the active group list"""
     bl_idname = "drone.remove_drone_from_group"
-    bl_label = "Remove Drone"
+    bl_label = "Remove LightBender"
 
     def execute(self, context):
         props = context.scene.drone_props
@@ -1729,9 +1742,9 @@ class DRONE_OT_remove_drone_from_group(bpy.types.Operator):
 
 
 class DRONE_OT_move_drone_in_group(bpy.types.Operator):
-    """Move drone up or down in the sequence"""
+    """Move LightBender up or down in the sequence"""
     bl_idname = "drone.move_drone_in_group"
-    bl_label = "Move Drone"
+    bl_label = "Move LightBender"
     direction: EnumProperty(items=[('UP', "Up", ""), ('DOWN', "Down", "")])
 
     def execute(self, context):
@@ -1893,20 +1906,36 @@ class UL_GlobalColorList(bpy.types.UIList):
         layout.prop(item, "color", text="")
 
 
+_SWARM_COL_SWATCH = 1.0
+_SWARM_COL_ID = 7.0
+_SWARM_COL_STATUS = 7.0
+_SWARM_COL_BATTERY = 5.5
+
+
 class UL_SwarmDroneList(bpy.types.UIList):
-    """List of drones in the swarm monitor panel"""
+    """List of LightBenders in the swarm monitor panel"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
-        # Non-editable color swatch as status indicator
-        swatch = row.column()
-        swatch.enabled = False
-        swatch.scale_x = 0.18
-        swatch.prop(item, "status_color", text="")
-        # Clickable drone ID label
-        op = row.operator("drone.select_lb_in_scene", text=item.drone_id, emboss=False)
+        
+        swatch_col = row.column()
+        swatch_col.ui_units_x = 1.0
+        swatch_col.enabled = False
+        swatch_col.prop(item, "status_color", text="")
+
+        # Clickable LightBender ID label
+        id_col = row.column()
+        id_col.ui_units_x = 4.0
+        op = id_col.operator("drone.select_lb_in_scene", text=item.drone_id, emboss=False)
         op.drone_id = item.drone_id
+
+        status_col = row.column()
+        status_col.ui_units_x = 4.5
+        status_col.label(text=item.status)
+
+        battery_col = row.column()
+        battery_col.ui_units_x = 3.0
         batt_str = f"{item.battery:.2f}V" if item.battery >= 0 else "—"
-        row.label(text=f"{item.status}  {batt_str}")
+        battery_col.label(text=batt_str)
 
     def filter_items(self, context, data, propname):
         props = context.scene.drone_props
@@ -1938,7 +1967,7 @@ class UL_SwarmDroneList(bpy.types.UIList):
 # ------------------------------------------------------------------------
 
 def _fold_straight_angles(drone_type, fold_angle):
-    """Return (s1, s2) straight angles for the given drone type and user fold_angle."""
+    """Return (s1, s2) straight angles for the given LightBender type and user fold_angle."""
     if drone_type == 'TYPE_H':
         return fold_angle, fold_angle + 180.0
     elif drone_type == 'TYPE_V':
@@ -1988,7 +2017,7 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
                if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
 
         if not lbs:
-            self.report({'WARNING'}, "No LB drones found in the scene.")
+            self.report({'WARNING'}, "No LightBenders found in the scene.")
             return {'CANCELLED'}
 
         # --- Compute per-LB initial positions ---
@@ -2405,7 +2434,7 @@ class DRONE_OT_apply_global_expression(bpy.types.Operator):
                     drones_to_affect.append(obj)
                     
         if not drones_to_affect:
-            self.report({'WARNING'}, "No matching drones found to apply.")
+            self.report({'WARNING'}, "No matching LightBenders found to apply.")
             return {'CANCELLED'}
 
         for lb in drones_to_affect:
@@ -2817,7 +2846,7 @@ def revert_drone_error(obj):
 
 
 class DRONE_OT_apply_error(bpy.types.Operator):
-    """Apply a random YZ offset to lb[id] drones based on input distance"""
+    """Apply a random YZ offset to lb[id] LightBenders based on input distance"""
     bl_idname = "drone.apply_error"
     bl_label = "Apply Positional Error"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2865,12 +2894,12 @@ class DRONE_OT_apply_error(bpy.types.Operator):
 
         # Force a viewport update
         context.view_layer.update()
-        self.report({'INFO'}, f"Applied positional error to {applied_count} lb drones.")
+        self.report({'INFO'}, f"Applied positional error to {applied_count} LightBenders.")
         return {'FINISHED'}
 
 
 class DRONE_OT_reset_error(bpy.types.Operator):
-    """Reset lb[id] drones to their pre-error coordinates"""
+    """Reset lb[id] LightBenders to their pre-error coordinates"""
     bl_idname = "drone.reset_error"
     bl_label = "Reset Positional Error"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2883,12 +2912,12 @@ class DRONE_OT_reset_error(bpy.types.Operator):
                     reset_count += 1
 
         context.view_layer.update()
-        self.report({'INFO'}, f"Reset positional error for {reset_count} lb drones.")
+        self.report({'INFO'}, f"Reset positional error for {reset_count} LightBenders.")
         return {'FINISHED'}
 
 
 class DRONE_OT_apply_drift(bpy.types.Operator):
-    """Apply continuous noise-based drift to lb[id] drones"""
+    """Apply continuous noise-based drift to lb[id] LightBenders"""
     bl_idname = "drone.apply_drift"
     bl_label = "Apply Dynamic Drift"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2932,12 +2961,12 @@ class DRONE_OT_apply_drift(bpy.types.Operator):
                 applied_count += 1
 
         context.view_layer.update()
-        self.report({'INFO'}, f"Applied dynamic drift to {applied_count} lb drones.")
+        self.report({'INFO'}, f"Applied dynamic drift to {applied_count} LightBenders.")
         return {'FINISHED'}
 
 
 class DRONE_OT_reset_drift(bpy.types.Operator):
-    """Remove drift noise modifiers from lb[id] drones"""
+    """Remove drift noise modifiers from lb[id] LightBenders"""
     bl_idname = "drone.reset_drift"
     bl_label = "Reset Dynamic Drift"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2959,7 +2988,7 @@ class DRONE_OT_reset_drift(bpy.types.Operator):
                         reset_count += 1
 
         context.view_layer.update()
-        self.report({'INFO'}, f"Removed drift from {reset_count} lb drones.")
+        self.report({'INFO'}, f"Removed drift from {reset_count} LightBenders.")
         return {'FINISHED'}
 
 
@@ -3010,7 +3039,7 @@ def revert_deconflict_stagger(obj):
 
 
 class DRONE_OT_deconflict_stagger(bpy.types.Operator):
-    """Call deconflict.py to stagger drones based on camera perspective"""
+    """Call deconflict.py to stagger LightBenders based on camera perspective"""
     bl_idname = "drone.deconflict_stagger"
     bl_label = "Stagger"
     bl_options = {'REGISTER', 'UNDO'}
@@ -3052,7 +3081,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                         obj["deconflict_orig_action"] = orig_act.name
 
         if not drones:
-            self.report({'WARNING'}, "No lb# drones found.")
+            self.report({'WARNING'}, "No LightBenders found.")
             return {'CANCELLED'}
 
         # Find frames with location keyframes
@@ -3233,11 +3262,11 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         if applied_at_least_once:
             context.view_layer.update()
             if len(frames_to_stagger) > 1:
-                self.report({'INFO'}, f"Staggered {len(drones)} drones across {len(frames_to_stagger)} keyframes.")
+                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders across {len(frames_to_stagger)} keyframes.")
             else:
-                self.report({'INFO'}, f"Staggered {len(drones)} drones.")
+                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders.")
         else:
-            self.report({'WARNING'}, "Stagger did not apply to any drones.")
+            self.report({'WARNING'}, "Stagger did not apply to any LightBenders.")
 
         # Cleanup
         try:
@@ -3250,7 +3279,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
 
 class DRONE_OT_deconflict_reset(bpy.types.Operator):
-    """Reset drones to pre-stagger positions"""
+    """Reset LightBenders to pre-stagger positions"""
     bl_idname = "drone.deconflict_reset"
     bl_label = "Reset Stagger"
     bl_options = {'REGISTER', 'UNDO'}
@@ -3265,7 +3294,7 @@ class DRONE_OT_deconflict_reset(bpy.types.Operator):
 
         context.scene.frame_set(context.scene.frame_current)
         context.view_layer.update()
-        self.report({'INFO'}, f"Reset stagger for {reset_count} drones.")
+        self.report({'INFO'}, f"Reset stagger for {reset_count} LightBenders.")
         return {'FINISHED'}
 
 
@@ -3274,7 +3303,7 @@ class DRONE_OT_deconflict_reset(bpy.types.Operator):
 # ------------------------------------------------------------------------
 
 def evaluate_leds(scene):
-    """Iterates all drones and updates LED colors based on formula"""
+    """Iterates all LightBenders and updates LED colors based on formula"""
     fps = scene.render.fps
     # Avoid div by zero
     t = (scene.frame_current - scene.frame_start) / fps if fps else 0
@@ -3380,7 +3409,7 @@ class DRONE_OT_force_update(bpy.types.Operator):
 # ------------------------------------------------------------------------
 
 class EXPORT_OT_drone_yaml(bpy.types.Operator):
-    """Export Drone Animation to YAML"""
+    """Export LightBender Animation to YAML"""
     bl_idname = "drone.export_yaml"
     bl_label = "Export YAML"
 
@@ -3395,7 +3424,7 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
         drones_to_export = [obj for obj in context.selected_objects if "servo_1" in obj and "servo_2" in obj]
 
         if not drones_to_export:
-            self.report({'ERROR'}, "No Drones selected")
+            self.report({'ERROR'}, "No LightBenders selected")
             return {'CANCELLED'}
 
         fps = scene.render.fps
@@ -3539,7 +3568,7 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
 
 
 class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
-    """Export Drone Animation to YAML and Run Orchestrator (Illumination mode)"""
+    """Export LightBender Animation to YAML and Run Orchestrator (Illumination mode)"""
     bl_idname = "drone.export_and_illuminate"
     bl_label = "Illuminate"
 
@@ -3554,7 +3583,7 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
                 drones_to_export.append(obj)
 
         if not drones_to_export:
-            self.report({'ERROR'}, "No lb# drones found in scene")
+            self.report({'ERROR'}, "No LightBenders found in scene")
             return {'CANCELLED'}
 
         # Select the drones
@@ -3574,7 +3603,7 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
             return {'CANCELLED'}
 
         python_exec = get_controller_python()
-        cmd_str = f"'{python_exec}' '{target_script}' --illumination"
+        cmd_str = f"'{python_exec}' '{target_script}' --illumination --blender '127.0.0.1:5598'"
         if props.export_dark_room:
             cmd_str += " --dark"
 
@@ -3614,17 +3643,9 @@ class DRONE_OT_stop_illuminate(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.drone_props
 
-        # Send stop via both channels
+        # Send stop via monitor channel
         swarm_monitor_send({"cmd": "stop"})
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2.0)
-            s.connect(('127.0.0.1', 5599))
-            s.sendall(b'Blender commanded stop\n')
-            s.close()
-            self.report({'INFO'}, "Sent stop signal to orchestrator")
-        except Exception as e:
-            self.report({'WARNING'}, f"Could not reach orchestrator stop port: {e}")
+        self.report({'INFO'}, "Sent stop signal to orchestrator via monitor socket")
 
         # Wait for all_stopped from orchestrator before resetting state
         props.swarm_stopping = True
@@ -3650,7 +3671,7 @@ class EXPORT_OT_interaction_yaml(bpy.types.Operator):
         drones_to_export = [obj for obj in context.selected_objects if "servo_1" in obj and "servo_2" in obj]
 
         if not drones_to_export:
-            self.report({'ERROR'}, "No Drones selected")
+            self.report({'ERROR'}, "No LightBenders selected")
             return {'CANCELLED'}
 
         try:
@@ -3675,7 +3696,7 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
         drones_to_export = get_lb_scene_objects(scene)
 
         if not drones_to_export:
-            self.report({'ERROR'}, "No lb# drones found in scene")
+            self.report({'ERROR'}, "No LightBenders found in scene")
             return {'CANCELLED'}
 
         target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", (props.export_mission_name.strip() or "blender_mission") + ".yaml")
@@ -3814,19 +3835,9 @@ class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.drone_props
 
-        # Try the monitor socket first (available from launch start)
+        # Use the monitor socket (available from launch start)
         swarm_monitor_send({"cmd": "stop"})
-
-        # Also try the legacy stop listener port
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2.0)
-            s.connect(('127.0.0.1', 5599))
-            s.sendall(b'Blender commanded stop\n')
-            s.close()
-            self.report({'INFO'}, "Sent stop signal to orchestrator")
-        except Exception as e:
-            self.report({'WARNING'}, f"Could not reach orchestrator stop port: {e}")
+        self.report({'INFO'}, "Sent stop signal to orchestrator via monitor socket")
 
         # Close interaction TCP session immediately; wait for all_stopped for monitor
         close_static_interaction_session()
@@ -3839,13 +3850,20 @@ class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
 
 
 class DRONE_OT_confirm_launch(bpy.types.Operator):
-    """Send confirm_launch to the orchestrator once all drones are ready"""
+    """Send confirm_launch to the orchestrator once all LightBenders are ready"""
     bl_idname = "drone.confirm_launch"
     bl_label = "Confirm Launch"
 
     def execute(self, context):
         swarm_monitor_send({"cmd": "confirm_launch"})
-        self.report({'INFO'}, "Launch confirmed.")
+        context.scene.drone_props.swarm_launch_confirmed = True
+        
+        for did, data in SWARM_MONITOR_SESSION["drones"].items():
+            if data["status"] == "ready":
+                data["status"] = "flying"
+        _sync_swarm_collection()
+        
+        self.report({'INFO'}, "Launch confirmed. LightBenders are flying.")
         return {'FINISHED'}
 
 
@@ -3854,7 +3872,7 @@ class DRONE_OT_select_lb_in_scene(bpy.types.Operator):
     bl_idname = "drone.select_lb_in_scene"
     bl_label = "Select in Scene"
 
-    drone_id: StringProperty(name="Drone ID", default="")
+    drone_id: StringProperty(name="LightBender ID", default="")
 
     def execute(self, context):
         obj = context.scene.objects.get(self.drone_id)
@@ -3868,7 +3886,7 @@ class DRONE_OT_select_lb_in_scene(bpy.types.Operator):
 
 
 class DRONE_OT_transform_and_place(bpy.types.Operator):
-    """Convert SVG to LightBender layout and create drones"""
+    """Convert SVG to LightBender layout and create LightBenders"""
     bl_idname = "drone.transform_and_place"
     bl_label = "Transform and Place"
     bl_options = {'REGISTER', 'UNDO'}
@@ -4558,7 +4576,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
                     ptr.value = 25.0
                     ptr.keyframe_insert(data_path="value", frame=f_end)
                     
-        self.report({'INFO'}, f"Morph Generated using {len(matched_ids)} drones.")
+        self.report({'INFO'}, f"Morph Generated using {len(matched_ids)} LightBenders.")
         
         # Make keyframes linear
         for obj, _ in lbs:
@@ -4652,7 +4670,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             layout.separator()
             layout.operator("drone.force_update_leds", text="Test/Update LEDs", icon='LIGHT')
         else:
-            layout.label(text="Select a drone to animate", icon='INFO')
+            layout.label(text="Select a LightBender to animate", icon='INFO')
 
 
 class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
@@ -4937,14 +4955,16 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             all_ready = bool(props.swarm_drones) and all(d.status == "ready" for d in props.swarm_drones)
             row = layout.row(align=True)
             confirm_col = row.row(align=True)
-            confirm_col.enabled = all_ready and props.illuminate_running
-            confirm_col.operator("drone.confirm_launch", text="Confirm Launch", icon='PLAY')
+            confirm_col.enabled = all_ready and props.illuminate_running and not props.swarm_launch_confirmed and not props.swarm_stopping
+            op_text = "Launch Confirmed" if props.swarm_launch_confirmed else "Confirm Launch"
+            op_icon = 'CHECKMARK' if props.swarm_launch_confirmed else 'PLAY'
+            confirm_col.operator("drone.confirm_launch", text=op_text, icon=op_icon)
             stop_col = row.row(align=True)
             stop_col.enabled = props.illuminate_running and props.swarm_connected and not props.swarm_stopping
             stop_col.operator("drone.stop_illuminate", text="Stop", icon='SNAP_FACE')
 
             if props.swarm_stopping:
-                layout.label(text="Stopping — waiting for drones to land…", icon='INFO')
+                layout.label(text="Stopping — waiting for LightBenders to land…", icon='INFO')
 
         else:
             # --- Interaction Mode (inline, always visible) ---
@@ -4971,14 +4991,16 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             all_ready = bool(props.swarm_drones) and all(d.status == "ready" for d in props.swarm_drones)
             row = layout.row(align=True)
             confirm_col = row.row(align=True)
-            confirm_col.enabled = all_ready and props.illuminate_running
-            confirm_col.operator("drone.confirm_launch", text="Confirm Launch", icon='PLAY')
+            confirm_col.enabled = all_ready and props.illuminate_running and not props.swarm_launch_confirmed and not props.swarm_stopping
+            op_text = "Confirm Launch"
+            op_icon = 'CHECKMARK' if props.swarm_launch_confirmed else 'PLAY'
+            confirm_col.operator("drone.confirm_launch", text=op_text, icon=op_icon)
             stop_col = row.row(align=True)
             stop_col.enabled = props.illuminate_running and props.swarm_connected and not props.swarm_stopping and not props.edit_active
             stop_col.operator("drone.stop_illuminate_interaction", text="Stop", icon='SNAP_FACE')
 
             if props.swarm_stopping:
-                layout.label(text="Stopping — waiting for drones to land…", icon='INFO')
+                layout.label(text="Stopping — waiting for LightBenders to land…", icon='INFO')
 
             layout.separator()
 
@@ -5023,35 +5045,86 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
         if props.swarm_view_mode == 'LIST':
             # Filter controls
             row = layout.row(align=True)
-            row.prop(props, "swarm_filter_status", text="")
-            row.prop(props, "swarm_filter_voltage", text="")
-            if props.swarm_filter_voltage != 'ALL':
-                row.prop(props, "swarm_battery_threshold", text="V")
+            row.prop(props, "swarm_filter_status", text="Status")
+            row.prop(props, "swarm_filter_voltage", text="Voltage")
+            # if props.swarm_filter_voltage != 'ALL':
+            #     row.label(text=f"Threshold: {props.swarm_battery_threshold:.1f}V")
 
-            # Sync active index from viewport selection
-            active_obj = context.active_object
-            if active_obj and drones:
-                for i, item in enumerate(drones):
-                    if item.drone_id == active_obj.name:
-                        if props.swarm_active_drone_index != i:
-                            props.swarm_active_drone_index = i
-                        break
+            # Dynamic split layout matched mathematically across list and header
+            list_box = layout.box()
+            header = list_box.row(align=True)
+            
+            pad_col = header.column()
+            pad_col.label(text="", icon='BLANK1')
 
-            layout.template_list(
-                "UL_SwarmDroneList", "",
-                props, "swarm_drones",
-                props, "swarm_active_drone_index",
-                rows=max(len(drones), 3)
-            )
+            icon_col = header.column()
+            icon_col.ui_units_x = 2.10
+            icon_col.label(text="")
+            
+            id_col = header.column()
+            id_col.ui_units_x = 2.30
+            id_col.label(text="ID")
+
+            status_col = header.column()
+            status_col.ui_units_x = 4.5
+            status_col.label(text="Status")
+
+            battery_col = header.column()
+            battery_col.ui_units_x = 3.0
+            battery_col.label(text="Battery")
+
+            # Directly loop and draw the items to avoid scrolling sub-pages
+            threshold = props.swarm_battery_threshold
+            has_items = False
+            for d in drones:
+                # Custom filtering logic
+                show = True
+                if props.swarm_filter_status != 'ALL' and d.status != props.swarm_filter_status:
+                    show = False
+                if show and props.swarm_filter_voltage != 'ALL' and d.battery >= 0:
+                    is_charged = d.battery >= threshold
+                    if props.swarm_filter_voltage == 'CHARGED' and not is_charged:
+                        show = False
+                    elif props.swarm_filter_voltage == 'DISCHARGED' and is_charged:
+                        show = False
+                
+                if show:
+                    has_items = True
+                    item_row = list_box.row(align=True)
+                    
+                    pad_col = item_row.column()
+                    pad_col.label(text="", icon='BLANK1')
+
+                    icon_col = item_row.column()
+                    icon_col.ui_units_x = 2.10
+                    icon_col.enabled = False
+                    icon_col.prop(d, "status_color", text="")
+                    
+                    id_col = item_row.column()
+                    id_col.ui_units_x = 2.30
+                    op = id_col.operator("drone.select_lb_in_scene", text=d.drone_id, emboss=False)
+                    op.drone_id = d.drone_id
+
+                    status_col = item_row.column()
+                    status_col.ui_units_x = 4.5
+                    status_col.label(text=d.status)
+
+                    battery_col = item_row.column()
+                    battery_col.ui_units_x = 3.0
+                    batt_str = f"{d.battery:.2f}V" if d.battery >= 0 else "—"
+                    battery_col.label(text=batt_str)
+            
+            if not has_items:
+                col = list_box.column()
+                col.label(text="No items match filter", icon='INFO')
 
         else:
-            # Status → solid color strip icon (SEQUENCE_COLOR = flat, no gradient)
-            # 01=red, 04=yellow, 05=green, 07=blue, 09=gray
+            # Nodes sockets provide perfectly circular colored icons naturally!
             status_dot = {
-                "idle":    'SEQUENCE_COLOR_09',
-                "booting": 'SEQUENCE_COLOR_04',
-                "ready":   'SEQUENCE_COLOR_05',
-                "landed":  'SEQUENCE_COLOR_07',
+                "idle":    'NODE_SOCKET_FLOAT', # Grey solid circle
+                "booting": 'NODE_SOCKET_RGBA',  # Yellow solid circle
+                "ready":   'NODE_SOCKET_SHADER',# Green solid circle
+                "flying":  'NODE_SOCKET_STRING',# Blue solid circle
             }
             if not drones:
                 box = layout.box()
@@ -5059,26 +5132,41 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                 return
 
             sorted_drones = sorted(drones, key=lambda d: d.drone_id)
-            grid = layout.grid_flow(
-                row_major=True, columns=0,
-                even_columns=True, even_rows=True, align=True
-            )
-            for d in sorted_drones:
-                icon = status_dot.get(d.status, 'SEQUENCE_COLOR_01')
-                # Strip the "lb" prefix so the label is just the number
-                short_id = d.drone_id[2:] if d.drone_id.startswith("lb") else d.drone_id
-                op = grid.operator(
+
+            # Simple sequential grid mapping
+            grid_box = layout.box()
+            columns_per_row = 10
+            row = grid_box.row(align=True)
+            for i, d in enumerate(sorted_drones):
+                if i > 0 and i % columns_per_row == 0:
+                    row = grid_box.row(align=True)
+                icon = status_dot.get(d.status, 'COLORSET_01_VEC')
+                op = row.operator(
                     "drone.select_lb_in_scene",
-                    text=short_id,
+                    text="",  # Only colored icon square
                     icon=icon,
                 )
                 op.drone_id = d.drone_id
+                
+            # Detail view for selected drone
+            layout.separator()
+            detail_box = layout.box()
+            active_obj = context.active_object
+            selected_drone = None
+            if active_obj:
+                for d in drones:
+                    if d.drone_id == active_obj.name:
+                        selected_drone = d
+                        break
 
-        if props.illuminate_running and drones:
-            ready_count = sum(1 for d in drones if d.status == "ready")
-            if ready_count < len(drones):
-                layout.label(text=f"Waiting: {ready_count}/{len(drones)} ready", icon='TIME')
-
+            if selected_drone:
+                detail_box.label(text=f"Selected: {selected_drone.drone_id}", icon='OBJECT_DATA')
+                col = detail_box.column()
+                col.label(text=f"Status: {selected_drone.status}")
+                batt_str = f"{selected_drone.battery:.2f}V" if selected_drone.battery >= 0 else "—"
+                col.label(text=f"Battery: {batt_str}")
+            else:
+                detail_box.label(text="No LightBender selected", icon='INFO')
 
 # ------------------------------------------------------------------------
 #    Registration

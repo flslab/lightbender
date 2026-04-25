@@ -73,3 +73,19 @@ When executed, the orchestrator will:
 4. Prompt you (if not skipped) to launch the swarm.
 5. Manage flight state logic and await "LANDED" confirmations.
 6. Gather logs locally and trigger the `uploader` to save them seamlessly to Google Drive.
+
+## Mock Blender Flow
+
+To emulate an illumination launch without booting the real swarm, run:
+
+```bash
+python mock_orchestrator.py
+```
+
+This mock client connects to the Blender add-on's swarm monitor socket on `127.0.0.1:5598`, sends the same newline-delimited JSON status messages as the real orchestrator, and pauses before each message group so you can confirm the next step from the CLI.
+
+Helpful flags:
+- `--drone-id lb1 --drone-id lb2`: limit the mock run to specific drones.
+- `--manifest path/to/swarm_manifest.yaml`: use a different manifest.
+- `--message-delay 0.0`: send each group immediately with no spacing between messages.
+- `--auto-cleanup-on-stop`: if Blender sends `stop`, automatically follow with `logs_fetched` and `all_stopped`.

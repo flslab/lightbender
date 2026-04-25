@@ -1,0 +1,127 @@
+controller:
+  ip: 192.168.1.233
+  zmq_cmd_port: 5556
+  zmq_ack_port: 5557
+  http_port: 8000
+  mission_path: "../mock_orchestrator/SFL"
+#  mission_file: translation.yaml
+  mission_file: blender_mission.yaml
+  downloads_file: ../../fls-cf-offboard-controller/downloads.json
+  zmq_interact_port: 5560
+
+# ─── Network mode ─────────────────────────────────────────────────────────────
+# mode: wifi      (default) — use existing infrastructure WiFi
+# mode: adhoc     — 802.11 IBSS ad-hoc between drones + this machine (no router)
+# mode: bluetooth — Bluetooth PAN; this machine acts as NAP, drones as PANU
+#
+# Each drone also needs an `adhoc_ip` field (used in both adhoc and bluetooth).
+# controller_ip is the IP THIS machine takes on the new network.
+#
+network:
+  mode: wifi        # wifi | adhoc | bluetooth
+
+  adhoc:
+    interface: wlan0
+    ssid: fls-adhoc
+    channel: 6
+    controller_ip: 10.0.0.100   # set this on your laptop when joining the adhoc net
+
+  bluetooth:
+    interface: hci0
+    controller_mac: "AA:BB:CC:DD:EE:FF"  # replace with: System Settings → About → Bluetooth
+    controller_ip: 10.0.0.100            # IP your laptop uses on the BT PAN
+
+common:
+  work_dir: /home/fls/fls-cf-offboard-controller
+  venv_path: /home/fls/env
+
+drones:
+  - id: "lb11"
+    ip: "192.168.1.144"
+    user: fls
+    label: FLS
+    init_pos: [0, 0, 0.24]
+    type: V
+    uri: "radio://0/100/2M/E7E7E7E706"
+  - id: "lb2"
+    ip: 192.168.1.232
+    user: fls
+    init_pos: [0.2, 0.0, 0.24 ]
+    type: V
+    uri: radio://0/100/2M/E7E7E7E702
+  - id: "lb3"
+    ip: 192.168.1.134
+    user: fls
+    init_pos: [ 0.2, 0, 0.24 ]
+    type: V
+    uri: radio://0/100/2M/E7E7E7E703
+  - id: "lb4"
+    ip: 192.168.1.136
+    user: fls
+    init_pos: [ 0, -1, 0.24 ]
+    type: H
+    uri: radio://0/100/2M/E7E7E7E704
+  - id: "lb5"
+    ip: 192.168.1.57
+    user: fls
+    init_pos: [ -0.25, 1, 0.2420 ]
+    type: H
+    uri: radio://0/100/2M/E7E7E7E705
+
+
+  # - id: "lb10"
+#   ip: 192.168.1.151       # WiFi IP (used for initial SSH)
+#   adhoc_ip: 10.0.0.1      # IP used in adhoc or bluetooth mode
+#   user: fls
+#   init_pos: [ 0.0, 0.6, 0.24 ]
+#   type: H
+#   uri: radio://0/100/2M/E7E7E7E705
+# - id: "lb11"
+#   ip: 192.168.1.144       # WiFi IP (used for initial SSH)
+#   adhoc_ip: 10.0.0.2      # IP used in adhoc or bluetooth mode
+#   user: fls
+#   init_pos: [ 0.0, 0.6, 0.24 ]
+#   type: H
+#   uri: radio://0/100/2M/E7E7E7E705
+
+  - id: "lb1"
+    ip: 192.168.1.89
+    user: fls
+    init_pos: [ -0.2499, -0.45, 0.24 ]
+    type: V
+    servo_offsets: [0, -1]
+    uri: radio://0/100/2M/E7E7E7E701
+  - id: "lb7"
+    ip: 192.168.1.110
+    user: fls
+    init_pos: [ -0.4794, -0.1368, 0.24 ]
+    type: H
+    servo_offsets: [3, 0]
+    uri: radio://0/100/2M/E7E7E7E707
+  - id: "lb9"
+    ip: 192.168.1.238
+    user: fls
+    init_pos: [ 0.0, 0.0, 0.24 ]
+    type: V
+    servo_offsets: [-1, 0]
+    uri: radio://0/100/2M/E7E7E7E709
+#apparatus:
+#  - id: "apparatus"
+#  - id: "shadow_apparatus"
+#    init_pos: [0.4517, -0.6071, 1.3130]
+#  - id: "apparatus_marker2"
+#    init_pos: [1.30, -0.17, 0.98]
+
+mission:
+  delta_t: 0.0
+  require_handshake: false
+  default_height: 0.24
+  battery_threshold: 7
+
+camera_node:
+  ip: 192.168.1.90
+  user: fls
+
+radio_node:
+  ip: 192.168.1.90
+  user: fls
