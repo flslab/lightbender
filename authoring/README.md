@@ -40,17 +40,13 @@ LightBender visual effects for different illuminations:
 - **Live swarm monitoring** — real-time per-drone status and battery voltage in list or grid view with filtering
 - **Export & launch** — write the full animation to YAML and optionally launch the orchestrator or an interactive bare-hand editing session directly
 
-### Setting `REPO_DIR` and Installing the Add-On
+### Installing the Add-On
 
-1. Open `blender_addon.py` and set `REPO_DIR` at the top of the file to the absolute path of your local repository clone:
+1. In Blender, go to **Edit > Preferences > Add-ons > Install…**, select `blender_addon.py`, and enable the **LightBender Swarm Animator** add-on.
 
-   ```python
-   REPO_DIR = "/path/to/lightbender"
-   ```
+2. The panel will appear in the **3D Viewport sidebar** under the **LightBender** tab (`N` key to open).
 
-2. In Blender, go to **Edit > Preferences > Add-ons > Install…**, select `blender_addon.py`, and enable the **LightBender Swarm Animator** add-on.
-
-3. The panel will appear in the **3D Viewport sidebar** under the **LightBender** tab (`N` key to open).
+3. In **Edit > Preferences > Add-ons**, find **LightBender Swarm Animator** and set the **Repository Directory** to the absolute path of your local clone. The path is saved permanently in Blender's user preferences — you only need to set it once.
 
 ---
 
