@@ -5255,6 +5255,21 @@ classes = (
     VIEW3D_PT_lb_swarm_monitor,
 )
 
+@persistent
+def on_load_reset_properties(dummy):
+    for scene in bpy.data.scenes:
+        if hasattr(scene, "drone_props"):
+            props = scene.drone_props
+            props.illuminate_running = False
+            props.swarm_logs_fetched = True
+            props.swarm_connected = False
+            props.swarm_stopping = False
+            props.swarm_launch_confirmed = False
+            props.edit_active = False
+            props.interaction_editor_active = False
+            props.interaction_connected_count = 0
+            props.interaction_recording_active = False
+
 
 def register():
     for cls in classes:
@@ -5265,6 +5280,9 @@ def register():
 
     if update_leds_handler not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(update_leds_handler)
+        
+    if on_load_reset_properties not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(on_load_reset_properties)
 
 
 def unregister():
@@ -5272,6 +5290,9 @@ def unregister():
 
     if update_leds_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(update_leds_handler)
+
+    if on_load_reset_properties in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(on_load_reset_properties)
 
     del bpy.types.Scene.drone_props
     del bpy.types.Object.drone_props
