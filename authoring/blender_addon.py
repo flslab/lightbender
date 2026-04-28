@@ -23,11 +23,8 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-
-REPO_DIR = "/Users/shuqinzhu/Documents/FLS_Research/lightbender"
-ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "mock_orchestrator"))
-# REPO_DIR = "/path/to/lightbender"
-# ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
+REPO_DIR = "/path/to/lightbender"
+ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
 AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
 
 # ---------------------------------------------------------------------------
