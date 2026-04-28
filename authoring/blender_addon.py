@@ -23,9 +23,33 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
-REPO_DIR = "/path/to/lightbender"
-ORCHESTRATOR_DIR = os.path.abspath(os.path.join(REPO_DIR, "orchestrator"))
-AUTHORING_DIR = os.path.abspath(os.path.join(REPO_DIR, "authoring"))
+class LightBenderAddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    repo_dir: StringProperty(
+        name="Repository Directory",
+        description="Absolute path to the local lightbender repository clone",
+        subtype='DIR_PATH',
+        default="",
+    )
+
+    def draw(self, context):
+        self.layout.prop(self, "repo_dir")
+
+
+def get_repo_dir():
+    prefs = bpy.context.preferences.addons.get(__name__)
+    if prefs:
+        return prefs.preferences.repo_dir
+    return ""
+
+
+def get_authoring_dir():
+    return os.path.abspath(os.path.join(get_repo_dir(), "authoring"))
+
+
+def get_orchestrator_dir():
+    return os.path.abspath(os.path.join(get_repo_dir(), "orchestrator"))
 
 # ---------------------------------------------------------------------------
 #    Illuminate / Interaction Session State
@@ -58,10 +82,15 @@ SWARM_MONITOR_SESSION = {
 }
 
 def get_default_interaction_yaml_path(mission_name):
-    return os.path.join(ORCHESTRATOR_DIR, "SFL", f"{mission_name}.yaml")
+    return os.path.join(get_orchestrator_dir(), "SFL", f"{mission_name}.yaml")
+
+
+def get_default_orchestrator_path():
+    return os.path.join(get_orchestrator_dir(), "orchestrator.py")
+
 
 def get_controller_python():
-    controller_root = REPO_DIR
+    controller_root = get_repo_dir()
     candidates = [
         os.path.join(controller_root, "venv", "bin", "python"),
         os.path.join(controller_root, ".venv", "bin", "python"),
@@ -168,7 +197,7 @@ def read_manifest_ips(id_filter=None):
         list of IP strings for matching LightBenders.
     """
     entries = []  # list of (id, ip) tuples
-    manifest_path = os.path.join(ORCHESTRATOR_DIR, "swarm_manifest.yaml")
+    manifest_path = os.path.join(os.path.dirname(get_default_orchestrator_path()), "swarm_manifest.yaml")
     if not os.path.isfile(manifest_path):
         return []
     try:
@@ -482,7 +511,7 @@ def _swarm_terminate_cleanup():
         props.swarm_stopping = False
         props.swarm_launch_confirmed = False
         props.swarm_logs_fetched = True
-        
+
         for d in props.swarm_drones:
             d.status = "idle"
             d.status_color = _STATUS_COLORS["idle"]
@@ -1914,10 +1943,10 @@ class UL_SwarmDroneList(bpy.types.UIList):
     """List of LightBenders in the swarm monitor panel"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
-        
+
         swatch_col = row.column()
         swatch_col.ui_units_x = 1.0
-        swatch_col.scale_x = 0.5 
+        swatch_col.scale_x = 0.5
         swatch_col.enabled = False
         swatch_col.prop(item, "status_color", text="")
 
@@ -3100,14 +3129,14 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         try:
             addon_dir = os.path.dirname(os.path.realpath(__file__))
         except NameError:
-            addon_dir = f"{AUTHORING_DIR}"
+            addon_dir = get_authoring_dir()
 
         input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
         output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
 
         deconflict_script = os.path.join(addon_dir, "deconflict.py")
         if not os.path.exists(deconflict_script):
-            alt_path = os.path.join(AUTHORING_DIR, "deconflict.py")
+            alt_path = os.path.join(get_authoring_dir(), "deconflict.py")
             if os.path.exists(alt_path):
                 deconflict_script = alt_path
             else:
@@ -3590,8 +3619,8 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         for obj in drones_to_export:
             obj.select_set(True)
 
-        target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", "blender_mission.yaml")
-        target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
+        target_yaml = os.path.join(get_orchestrator_dir(), "SFL", "blender_mission.yaml")
+        target_script = os.path.join(get_orchestrator_dir(), "orchestrator.py")
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
@@ -3698,8 +3727,8 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
             self.report({'ERROR'}, "No LightBenders found in scene")
             return {'CANCELLED'}
 
-        target_yaml = os.path.join(ORCHESTRATOR_DIR, "SFL", (props.export_mission_name.strip() or "blender_mission") + ".yaml")
-        target_script = os.path.join(ORCHESTRATOR_DIR, "orchestrator.py")
+        target_yaml = os.path.join(get_orchestrator_dir(), "SFL", (props.export_mission_name.strip() or "blender_mission") + ".yaml")
+        target_script = os.path.join(get_orchestrator_dir(), "orchestrator.py")
 
         try:
             os.makedirs(os.path.dirname(target_yaml), exist_ok=True)
@@ -3856,12 +3885,12 @@ class DRONE_OT_confirm_launch(bpy.types.Operator):
     def execute(self, context):
         swarm_monitor_send({"cmd": "confirm_launch"})
         context.scene.drone_props.swarm_launch_confirmed = True
-        
+
         for did, data in SWARM_MONITOR_SESSION["drones"].items():
             if data["status"] == "ready":
                 data["status"] = "flying"
         _sync_swarm_collection()
-        
+
         self.report({'INFO'}, "Launch confirmed. LightBenders are flying.")
         return {'FINISHED'}
 
@@ -3907,7 +3936,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         # try:
         #     addon_dir = os.path.dirname(os.path.realpath(__file__))
         # except NameError:
-        addon_dir = AUTHORING_DIR
+        addon_dir = get_authoring_dir()
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
 
@@ -4375,7 +4404,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
             self.report({'WARNING'}, "No existing LightBenders found in scene.")
             return {'CANCELLED'}
 
-        addon_dir = AUTHORING_DIR
+        addon_dir = get_authoring_dir()
         temp_dir = tempfile.gettempdir()
         target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
@@ -5060,12 +5089,12 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
             # Dynamic split layout matched mathematically across list and header
             list_box = layout.box()
             header = list_box.row(align=True)
-            
+
             icon_col = header.column()
             icon_col.ui_units_x = 1.3
             icon_col.label(text=" ")
-            
-            id_col = header.column()    
+
+            id_col = header.column()
             id_col.ui_units_x = 2.3
             id_col.label(text="ID")
 
@@ -5091,7 +5120,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                         show = False
                     elif props.swarm_filter_voltage == 'DISCHARGED' and is_charged:
                         show = False
-                
+
                 if show:
                     has_items = True
                     item_row = list_box.row(align=True)
@@ -5100,7 +5129,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                     icon_col.ui_units_x = 0.5
                     icon_col.label(text="", icon=status_dot.get(d.status, 'NODE_SOCKET_FLOAT'))
 
-                    
+
                     id_col = item_row.column()
                     id_col.ui_units_x = 2.3
                     op = id_col.operator("drone.select_lb_in_scene", text=d.drone_id, emboss=False)
@@ -5114,7 +5143,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                     battery_col.ui_units_x = 4
                     batt_str = f"{d.battery:.2f}V" if d.battery >= 0 else "—"
                     battery_col.label(text=batt_str)
-            
+
             if not has_items:
                 col = list_box.column()
                 col.label(text="No items match filter", icon='INFO')
@@ -5142,7 +5171,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
                     icon=icon,
                 )
                 op.drone_id = d.drone_id
-                
+
             # Detail view for selected drone
             layout.separator()
             detail_box = layout.box()
@@ -5168,6 +5197,7 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
 # ------------------------------------------------------------------------
 
 classes = (
+    LightBenderAddonPreferences,
     LEDPointer,
     ColorItem,
     SwarmDroneItem,
@@ -5225,6 +5255,21 @@ classes = (
     VIEW3D_PT_lb_swarm_monitor,
 )
 
+@persistent
+def on_load_reset_properties(dummy):
+    for scene in bpy.data.scenes:
+        if hasattr(scene, "drone_props"):
+            props = scene.drone_props
+            props.illuminate_running = False
+            props.swarm_logs_fetched = True
+            props.swarm_connected = False
+            props.swarm_stopping = False
+            props.swarm_launch_confirmed = False
+            props.edit_active = False
+            props.interaction_editor_active = False
+            props.interaction_connected_count = 0
+            props.interaction_recording_active = False
+
 
 def register():
     for cls in classes:
@@ -5235,6 +5280,9 @@ def register():
 
     if update_leds_handler not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(update_leds_handler)
+        
+    if on_load_reset_properties not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(on_load_reset_properties)
 
 
 def unregister():
@@ -5242,6 +5290,9 @@ def unregister():
 
     if update_leds_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(update_leds_handler)
+
+    if on_load_reset_properties in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(on_load_reset_properties)
 
     del bpy.types.Scene.drone_props
     del bpy.types.Object.drone_props
