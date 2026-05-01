@@ -374,11 +374,20 @@ class DroneProcessor:
         vicon_times = []
         vicon_pos = []
 
+        if 'viewpoint_offsets' in data and len(data['viewpoint_offsets']) > 0:
+            vp_data = data['viewpoint_offsets']
+            if isinstance(vp_data[0], list) and 'start_times' in data:
+                self.viewpoint_offset = np.array(vp_data[self.time_range_index])
+            else:
+                self.viewpoint_offset = np.array(vp_data)
+        else:
+            self.viewpoint_offset = np.array([0.0, 0.0, 0.0])
+
         for frame in data['frames']:
             t = frame['time']
             if self.start_time <= t <= self.stop_time:
                 vicon_times.append(t)
-                vicon_pos.append(frame['tvec'])
+                vicon_pos.append((np.array(frame['tvec']) - self.viewpoint_offset).tolist())
 
         vicon_times = np.array(vicon_times)
         vicon_pos = np.array(vicon_pos)
@@ -484,8 +493,8 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     if not visualize_only and not compare_yaml:
         sample_pairs = None
         for drone_id in drones_config:
-            search_pattern = f"/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/logs/{drone_id}_{tag}*.json"
-            files = glob.glob(search_pattern) or glob.glob(f"{drone_id}_{tag}*.json")
+            search_pattern = f"/Users/hamed/Documents/Holodeck/lightbender/orchestrator/logs/*/{drone_id}_{tag}.json"
+            files = glob.glob(search_pattern) or glob.glob(f"{drone_id}_{tag}.json")
             if files:
                 with open(files[0], 'r') as f:
                     d = json.load(f)
@@ -521,7 +530,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
             continue
 
         # Search for log file starting with drone_id
-        search_pattern = f"/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/logs/{drone_id}_{tag}*.json"
+        search_pattern = f"/Users/hamed/Documents/Holodeck/lightbender/orchestrator/logs/*/{drone_id}_{tag}.json"
         files = glob.glob(search_pattern)
 
         if not files:
