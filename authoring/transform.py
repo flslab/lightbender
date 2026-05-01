@@ -1,7 +1,8 @@
 import argparse
 import xml.etree.ElementTree as ET
 import yaml
-from svg.path import parse_path, CubicBezier
+import math
+from svg.path import parse_path, CubicBezier, QuadraticBezier, Arc
 
 
 def extract_paths_from_svg(svg_file):
@@ -20,11 +21,36 @@ def extract_paths_from_svg(svg_file):
     return paths
 
 
-def build_raw_graph(paths, curve_samples=5):
+def build_raw_graph(paths, max_width=2.0, max_length=1.0, max_segment_length=0.1):
     """Parses path data and builds a graph with unscaled, raw coordinates."""
     raw_nodes = []
     edges = []
     vertex_map = {}
+
+    parsed_paths = [parse_path(p) for p in paths]
+
+    # 1. Estimate bounding box to find scale factor
+    min_y, max_y = float('inf'), float('-inf')
+    min_z, max_z = float('inf'), float('-inf')
+
+    for parsed_path in parsed_paths:
+        for segment in parsed_path:
+            # Sample a few points to approximate bounds
+            for i in range(11):
+                pt = segment.point(i / 10.0)
+                min_y = min(min_y, pt.real)
+                max_y = max(max_y, pt.real)
+                min_z = min(min_z, pt.imag)
+                max_z = max(max_z, pt.imag)
+
+    current_width = max_y - min_y if min_y != float('inf') else 0
+    current_length = max_z - min_z if min_z != float('inf') else 0
+
+    scale = 1.0
+    if current_width > 0 or current_length > 0:
+        scale_y = (max_width / current_width) if current_width > 0 else 1.0
+        scale_z = (max_length / current_length) if current_length > 0 else 1.0
+        scale = min(scale_y, scale_z)
 
     def get_node_id(svg_x, svg_y):
         # Map 2D SVG to 3D graph (x -> y, y -> z)
@@ -44,12 +70,14 @@ def build_raw_graph(paths, curve_samples=5):
 
         return vertex_map[coord_key]
 
-    for path_data in paths:
-        parsed_path = parse_path(path_data)
-
+    for parsed_path in parsed_paths:
         for segment in parsed_path:
             # Determine number of segments depending on whether it's a curve or line
-            num_samples = curve_samples if isinstance(segment, CubicBezier) else 1
+            if isinstance(segment, (CubicBezier, QuadraticBezier, Arc)):
+                physical_len = segment.length() * scale
+                num_samples = max(1, int(math.ceil(physical_len / max_segment_length)))
+            else:
+                num_samples = 1
 
             # Start point
             prev_node_id = get_node_id(segment.start.real, segment.start.imag)
@@ -160,6 +188,8 @@ def main():
                         help="Target Y coordinate for the center of the graph (default: 0.0).")
     parser.add_argument("-cz", "--center-z", type=float, default=0.0,
                         help="Target Z coordinate for the center of the graph (default: 0.0).")
+    parser.add_argument("-ms", "--max-segment", type=float, default=0.15,
+                        help="Maximum segment length for curved paths (default: 0.1m).")
     parser.add_argument("--visualize", action="store_true",
                         help="Open a 2D plot of the generated graph nodes and edges.")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
@@ -174,7 +204,12 @@ def main():
         return
 
     print(f"Found {len(paths)} path elements.")
-    raw_nodes, edges = build_raw_graph(paths)
+    raw_nodes, edges = build_raw_graph(
+        paths,
+        max_width=args.max_width,
+        max_length=args.max_length,
+        max_segment_length=args.max_segment
+    )
 
     print(
         f"Normalizing and scaling (Max Width: {args.max_width}, Max Length: {args.max_length}, Center: {args.center_y}, {args.center_z})...")
