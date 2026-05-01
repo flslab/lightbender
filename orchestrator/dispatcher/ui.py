@@ -1,6 +1,9 @@
 import tkinter as tk
+import json
 import math
 import logging
+import signal
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +14,8 @@ class DispatcherUI(tk.Tk):
         self.geometry("1100x800")
         self.configure(bg="#1E1E1E")
         self.confirmed = False
+        self.extra_params = {}
+        self._draw_after_id = None
         
         self.assignments = assignments
         self.outliers = outliers or []
@@ -86,9 +91,10 @@ class DispatcherUI(tk.Tk):
         self.nodes = []
         
         self.canvas.bind("<Button-1>", self.on_click)
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
         
         # Initial draw delayed slightly to allow window to maximize
-        self.after(50, self.draw_map)
+        self._draw_after_id = self.after(50, self.draw_map)
 
     def confirm(self):
         self.confirmed = True
@@ -101,7 +107,25 @@ class DispatcherUI(tk.Tk):
             if a_idx != -1:
                 self.extra_params['anchor'] = self.outliers[a_idx]
         self.quit()
-        self.destroy()
+
+    def cancel(self):
+        self.confirmed = False
+        self.extra_params = {}
+        self.quit()
+
+    def cleanup_tk_state(self):
+        if self._draw_after_id is not None:
+            try:
+                self.after_cancel(self._draw_after_id)
+            except tk.TclError:
+                pass
+            self._draw_after_id = None
+
+        # Delete tkinter Variables while the Tk interpreter is still alive to prevent
+        # "main thread is not in main loop" / Tcl_AsyncDelete errors during GC cleanup.
+        for attr in ('viewpoint_var', 'anchor_var'):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     def _world_to_canvas(self, x, y, min_x, max_x, min_y, max_y, width, height):
         pad = 0.2 # 20% padding around the field
@@ -125,12 +149,13 @@ class DispatcherUI(tk.Tk):
         return cx, cy
 
     def draw_map(self):
+        self._draw_after_id = None
         self.canvas.delete("all")
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         
         if width <= 1 or height <= 1:
-            self.after(50, self.draw_map)
+            self._draw_after_id = self.after(50, self.draw_map)
             return
 
         points_x = []
@@ -214,16 +239,64 @@ def show_ui(assignments, outliers, mission):
     Renders the Dispatcher UI and waits for user confirmation.
     Returns (edited assignments, extra_params) if confirmed, (None, None) otherwise.
     """
-    app = DispatcherUI(assignments, outliers, mission)
-    # Make sure window takes focus
-    app.lift()
-    app.attributes('-topmost', True)
-    app.after_idle(app.attributes, '-topmost', False)
-    app.focus_force()
-    
-    import os
-    # Bring the specific python process to the front on macOS
-    os.system(f"osascript -e 'tell application \"System Events\" to set frontmost of the first process whose unix id is {os.getpid()} to true'")
-    
-    app.mainloop()
-    return (app.assignments, app.extra_params) if app.confirmed else (None, None)
+    app = None
+    topmost_after_id = None
+    try:
+        app = DispatcherUI(assignments, outliers, mission)
+        # Make sure window takes focus
+        app.lift()
+        app.attributes('-topmost', True)
+        topmost_after_id = app.after_idle(app.attributes, '-topmost', False)
+        app.focus_force()
+        
+        import os
+        # Bring the specific python process to the front on macOS
+        os.system(f"osascript -e 'tell application \"System Events\" to set frontmost of the first process whose unix id is {os.getpid()} to true'")
+        
+        app.mainloop()
+
+        return (app.assignments, app.extra_params) if app.confirmed else (None, None)
+    finally:
+        if app is not None:
+            try:
+                if topmost_after_id is not None:
+                    try:
+                        app.after_cancel(topmost_after_id)
+                    except tk.TclError:
+                        pass
+                app.cleanup_tk_state()
+            except tk.TclError:
+                pass
+            try:
+                app.destroy()
+            except tk.TclError:
+                pass
+
+def _run_from_json(input_path, output_path):
+    with open(input_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    assignments, extra_params = show_ui(
+        payload["assignments"],
+        payload.get("outliers"),
+        payload.get("mission"),
+    )
+
+    result = {
+        "confirmed": assignments is not None,
+        "assignments": assignments,
+        "extra_params": extra_params,
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(result, f)
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 2:
+        raise SystemExit("Usage: ui.py INPUT_JSON OUTPUT_JSON")
+
+    # Let the parent orchestrator handle Ctrl+C and terminate this subprocess.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _run_from_json(argv[0], argv[1])
+
+if __name__ == "__main__":
+    main()
