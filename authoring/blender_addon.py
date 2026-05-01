@@ -3303,9 +3303,9 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         if applied_at_least_once:
             context.view_layer.update()
             if len(frames_to_stagger) > 1:
-                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders across {len(frames_to_stagger)} keyframes.")
+                self.report({'INFO'}, f"Staggered {len(drones)} LightBenders across {len(frames_to_stagger)} keyframes.")
             else:
-                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders.")
+                self.report({'INFO'}, f"Staggered {len(drones)} LightBenders.")
         else:
             self.report({'WARNING'}, "Stagger did not apply to any LightBenders.")
 
