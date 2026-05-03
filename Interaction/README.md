@@ -4,7 +4,7 @@ A hovering LightBender detects the user's bare-hand interaction once its speed e
 Authors: Shuqin Zhu, Shahram Ghandeharizadeh
 
 This directory contains:
-* The cage design for LightBenders and Crazyflies (see [Cage Design](Cage_Design/) directory.).
+* The cage design for LightBenders and Crazyflies (see [Cage Design](Cage_Design/) directory).
 * Standalone uilities to process logs from Raspbarry Pi carried by LightBenders.
 * Tools to generate line charts.
 * Tools to identify a LightBender in a video recording, and overlay the speed dashboard next to it.
