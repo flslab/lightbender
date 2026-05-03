@@ -14,7 +14,7 @@ The following video shows Shahram and Shuqin interacting with a happy emoji.
 - [Interaction with happy emoji.](https://youtu.be/_huysBvEuR4)
 - [Vertical interaction with a LightBender.](https://youtu.be/ilh584zCPyQ)
 
-Bare-hand interactions have diverse applications ranging from health-care to education and entertainment.  Our Blender add-on enables one or more users to adjust the position of LightBenders in an illumination using their bare-hands.  For a video demonstration, see [authoring]([authoring/](https://youtu.be/_I6qcD0NoYM)).
+Bare-hand interactions have diverse applications ranging from health-care to education and entertainment.  Our Blender add-on enables one or more users to adjust the position of LightBenders in an illumination using their bare-hands.  For a video demonstration, see [authoring](https://youtu.be/_I6qcD0NoYM).
 
 # Implementation
 Details of the authoring tool are available in [Authoring Tool](https://github.com/flslab/lightbender/tree/master/authoring).
