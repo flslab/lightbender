@@ -1,12 +1,20 @@
-# Authors: 
-Shuqin Zhu, Shahram Ghandeharizadeh
+# LightBender Interactions: 
+A hovering LightBender detects the user's bare-hand interaction once its speed exceeds a threshold.  It switches to interaction mode where it implements physics-based translation.  It detects the user's disengagement once its speed drops below a threshold.  It uses the velocity vector to compute a new position to hover at. 
 
-Description: 
-* This directory contains the cage design for LightBenders and Crazyflies(see [Cage Design](Cage_Design/) directory.).
+Authors: Shuqin Zhu, Shahram Ghandeharizadeh
+
+This directory contains:
+* The cage design for LightBenders and Crazyflies (see [Cage Design](Cage_Design/) directory.).
 * Standalone uilities to process logs from Raspbarry Pi carried by LightBenders.
 * Tools to generate line charts.
 * Tools to identify a LightBender in a video recording, and overlay the speed dashboard next to it.
 
+The following video shows Shahram and Shuqin interacting with a happy emoji.
+
+- [Interaction with happy emoji.](https://youtu.be/_huysBvEuR4)
+- [Vertical interaction with a LightBender.](https://youtu.be/ilh584zCPyQ)
+
+Bare-hand interactions have diverse applications ranging from health-care to education and entertainment.  Our Blender add-on enables one or more users to adjust the position of LightBenders in an illumination using their bare-hands.  For a video demonstration, see [authoring](authoring/) directory.
 
 # Implementation
 The source code for interaction is available in [Inreaction Controller](../controller/Interaction) directory.
