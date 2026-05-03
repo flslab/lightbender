@@ -9,9 +9,9 @@ This directory contains:
 * Tools to generate line charts.
 * Tools to identify a LightBender in a video recording, and overlay the speed dashboard next to it.
 
-The following video shows Shahram and Shuqin interacting with a happy emoji.
+The following videos show:
 
-- [Interaction with happy emoji.](https://youtu.be/_huysBvEuR4)
+- [Shahram and Shuqin interacting with a happy emoji.](https://youtu.be/_huysBvEuR4)
 - [Vertical interaction with a LightBender.](https://youtu.be/ilh584zCPyQ)
 
 Bare-hand interactions have diverse applications ranging from health-care to education and entertainment.  Our Blender add-on enables one or more users to adjust the position of LightBenders in an illumination using their bare-hands.  For a video demonstration, see [authoring](https://youtu.be/_I6qcD0NoYM).
