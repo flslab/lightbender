@@ -1,5 +1,5 @@
 # LightBender Interactions: 
-A hovering LightBender detects the user's bare-hand interaction once its speed exceeds a threshold.  It switches to interaction mode where it implements physics-based translation.  It detects the user's disengagement once its speed drops below a threshold.  It uses the velocity vector to compute a new position to hover at. 
+A hovering LightBender detects the user's bare-hand interaction once its speed exceeds a threshold.  It switches to interaction mode where it implements physics-based translation.  It detects the user's disengagement once its speed drops below a threshold.  Using its velocity vector, it calculates a new position at which to hover. 
 
 Authors: Shuqin Zhu, Shahram Ghandeharizadeh
 
