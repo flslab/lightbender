@@ -63,3 +63,6 @@ env.bak/
 venv.bak/
 mock_orchestrator
 ./mock_orchestrator
+Interaction/analysis/results
+.skills
+skills/

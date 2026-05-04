@@ -1,10 +1,15 @@
 import logging
 import logging.config
+from pathlib import Path
+
 import yaml
 import os
 
+BASE_DIR = Path(__file__).resolve().parent
 
-def setup_logging(config_path='logging_config.yaml'):
+CONFIG_FILE = BASE_DIR / 'logging_config.yaml'
+
+def setup_logging(config_path=CONFIG_FILE):
     """
     Load logging configuration from a YAML file.
     If the file is not found, default to basic config.

@@ -25,10 +25,13 @@ from restart import reboot_crazyflie
 from switch_network import apply_network_mode
 
 # from Interaction.vicon_noise_tracker import run_tracker
+from pathlib import Path
 
-MANIFEST_FILE = 'swarm_manifest.yaml'
-DRONE_SCRIPT = 'controller.py'
-CAMERA_SCRIPT = 'camera_node.py'
+BASE_DIR = Path(__file__).resolve().parent
+
+MANIFEST_FILE = BASE_DIR / 'swarm_manifest.yaml'
+DRONE_SCRIPT = BASE_DIR / 'controller.py'
+CAMERA_SCRIPT = BASE_DIR / 'camera_node.py'
 
 
 class SwarmOrchestrator:
@@ -642,7 +645,7 @@ class SwarmOrchestrator:
                         raise KeyboardInterrupt("Stopped while waiting for confirm_launch")
                 else:
                     input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
-                # time.sleep(10)
+                    # time.sleep(10)
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
             self.took_off = True
@@ -875,13 +878,15 @@ class SwarmOrchestrator:
                 exp_type = "illumination"
                 if args.interaction or args.intractable_illumination:
                     exp_type = "interaction"
-                cmd = [sys.executable, "-m", "uploader.upload", "--experiment", target_dir, "--type", exp_type, "--datetime", self.date_tag]
+                abs_target_dir = os.path.abspath(target_dir)
+                orchestrator_dir = os.path.dirname(os.path.abspath(__file__))
+                cmd = [sys.executable, "-m", "uploader.upload", "--experiment", abs_target_dir, "--type", exp_type, "--datetime", self.date_tag]
+                upload_log_path = os.path.join(abs_target_dir, "upload.log")
                 try:
-                    subprocess.Popen(cmd)
-                    self.logger.info(f"Upload triggered successfully: {' '.join(cmd)}")
+                    with open(upload_log_path, "w") as upload_log:
+                        subprocess.Popen(cmd, cwd=orchestrator_dir, stdout=upload_log, stderr=upload_log)
+                    self.logger.info(f"Upload triggered successfully: {' '.join(cmd)} (output → {upload_log_path})")
                 except Exception as e:
-                    self.logger.error(f"Failed to trigger upload command: {e}")
-
                     self.logger.error(f"Failed to trigger upload command: {e}")
 
 if __name__ == "__main__":

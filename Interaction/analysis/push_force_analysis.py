@@ -536,7 +536,7 @@ def main(logfile, show_plot=False):
 
 if __name__ == "__main__":
     _project_root = Path(__file__).resolve().parents[2]
-    _log_dir = _project_root / 'logs' / 'mass_emulation'
+    _log_dir = _project_root / 'orchestrator' / 'logs' / 'translation_2026-04-28_13-20-48'
 
     for _logfile in sorted(_log_dir.glob("*.json")):
         main(str(_logfile), show_plot=False)

@@ -1,18 +1,72 @@
+import json
 import logging
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from .vicon_scanner import ViconScanner, mock_scan, sort_and_match, ViconConnectionError, InsufficientMarkersError
-from .ui import show_ui
 
 logger = logging.getLogger(__name__)
 
-import multiprocessing as mp
 
-def _run_ui_process(assignments, outliers, mission_data, queue):
-    from .ui import show_ui
-    import signal
-    # Ignore SIGINT in the child to let the parent handle KeyboardInterrupt safely
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    final_assgn, extra_params = show_ui(assignments, outliers, mission_data)
-    queue.put((final_assgn, extra_params))
+def _run_ui_subprocess(assignments, outliers, mission_data):
+    """Run Tk in a plain Python subprocess and receive the result via JSON files."""
+    ui_script = Path(__file__).resolve().with_name("ui.py")
+
+    with tempfile.TemporaryDirectory(prefix="dispatcher_ui_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        input_path = tmp_path / "input.json"
+        output_path = tmp_path / "output.json"
+
+        payload = {
+            "assignments": assignments,
+            "outliers": outliers,
+            "mission": mission_data,
+        }
+        input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        cmd = [sys.executable, str(ui_script), str(input_path), str(output_path)]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        try:
+            stdout, stderr = proc.communicate()
+        except KeyboardInterrupt:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            raise
+
+        if stdout.strip():
+            logger.debug(stdout.strip())
+        if stderr.strip():
+            logger.warning(stderr.strip())
+
+        if proc.returncode != 0:
+            logger.warning(f"Dispatcher UI process exited with code {proc.returncode}.")
+            return None, None
+
+        if not output_path.exists():
+            logger.warning("Dispatcher UI exited without writing a result.")
+            return None, None
+
+        try:
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            logger.warning(f"Dispatcher UI wrote invalid JSON: {e}")
+            return None, None
+
+        if not result.get("confirmed"):
+            return None, None
+
+        return result.get("assignments"), result.get("extra_params") or {}
 
 def run_dispatch(manifest_drones, mission_data, vicon_host="192.168.1.39", mock=False):
     """
@@ -39,25 +93,9 @@ def run_dispatch(manifest_drones, mission_data, vicon_host="192.168.1.39", mock=
     # Generate initial sorted assignments
     assignments, outliers = sort_and_match(vicon_points, manifest_drones)
     
-    # Run UI in an isolated process to protect Orchestrator signal handlers and ensure closure
+    # Run UI in an isolated subprocess so Tcl/Tk owns a clean top-level process.
     logger.info("Opening Dispatcher UI for confirmation...")
-    ctx = mp.get_context('spawn')
-    queue = ctx.Queue()
-    p = ctx.Process(target=_run_ui_process, args=(assignments, outliers, mission_data, queue))
-    p.start()
-    
-    try:
-        # Wait until UI completes or user interrupts
-        p.join()
-    except KeyboardInterrupt:
-        p.terminate()
-        p.join()
-        raise  # Re-raise to trigger orchestrator.py emergency handlers
-    
-    if not queue.empty():
-        final_assignments, extra_params = queue.get()
-    else:
-        final_assignments, extra_params = None, None
+    final_assignments, extra_params = _run_ui_subprocess(assignments, outliers, mission_data)
 
     if not final_assignments:
         logger.warning("Dispatcher UI aborted or skipped. No Vicon coordinates will be updated.")

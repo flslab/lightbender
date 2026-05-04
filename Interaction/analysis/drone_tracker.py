@@ -21,11 +21,11 @@ import cv2
 import numpy as np
 
 
-INPUT_VIDEO   = '../../orchestrator/logs/lit_3/tmp_lb4.mp4'
-OUTPUT_VIDEO  = '../../orchestrator/logs/lit_3/final.mp4'   # e.g. "tracked.mp4"
-OVERLAY_VIDEO = "../../orchestrator/logs/lit_3/lb5_emoji_interaction_off_2026-04-21_09-34-57_dashboard.mov"
+INPUT_VIDEO   = '/Users/shuqinzhu/Documents/FLS_Research/lightbender/orchestrator/logs/emoji_interaction_off_2026-05-01_14-36-08/2_4.mp4'
+OUTPUT_VIDEO  = '/Users/shuqinzhu/Documents/FLS_Research/lightbender/orchestrator/logs/emoji_interaction_off_2026-05-01_14-36-08/2_4_5.mp4'   # e.g. "tracked.mp4"
+OVERLAY_VIDEO = "/Users/shuqinzhu/Documents/FLS_Research/lightbender/orchestrator/logs/emoji_interaction_off_2026-05-01_14-36-08/lb5_emoji_interaction_off_2026-05-01_14-36-08_dashboard.mov"
 MODE          = "manual"   # "manual" | "auto"
-START_TIME_S  = 0       # Time in seconds to start reading the video
+START_TIME_S  = 8.2       # Time in seconds to start reading the video
 
 OVERLAY_GAP = 10   # pixels between bbox edge and overlay
 
@@ -328,6 +328,28 @@ def run(input_path, output_path, mode, overlay_path, start_time_s=0.0):
                     ow, oh, side = overlay_size
                     display = place_overlay(display, ov_frame, bbox, W, H, (ow, oh), side,
                                             premultiplied=overlay_vid._premultiplied)
+                else:
+                    # Overlay exhausted — write this frame then drain the rest without display
+                    if writer:
+                        writer.write(display)
+                    cv2.destroyAllWindows()
+                    print("Overlay finished. Writing remaining frames without display...")
+                    frames_written = 1
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        if writer:
+                            writer.write(frame)
+                        frames_written += 1
+                    print(f"  {frames_written} frame(s) written.")
+                    cap.release()
+                    if overlay_vid:
+                        overlay_vid.release()
+                    if writer:
+                        writer.release()
+                        print("Done.")
+                    return
 
             if writer:
                 writer.write(display)
