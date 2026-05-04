@@ -2,3 +2,7 @@
 	path = controller
 	url = git@github.com:flslab/fls-cf-offboard-controller.git
 	branch = master
+[submodule "crazyflie-firmware"]
+	path = crazyflie-firmware
+	url = git@github.com:flslab/crazyflie-firmware.git
+	branch = add_reset_PID_integrall_callback
