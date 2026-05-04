@@ -22,6 +22,6 @@ Bare-hand interactions have diverse applications ranging from health-care to edu
 
 # Implementation
 Details of the authoring tool are available in [Authoring Tool](https://github.com/flslab/lightbender/tree/master/authoring).
-The source code for interaction is available in [Inreaction Controller](https://github.com/flslab/fls-cf-offboard-controller/tree/master/Interaction) directory.
 
+The source code for interaction is available in [Inreaction Controller](https://github.com/flslab/fls-cf-offboard-controller/tree/master/Interaction) directory.
 Further instructions to run this feature of LightBender, see [Controller README](https://github.com/flslab/fls-cf-offboard-controller/README.md).
