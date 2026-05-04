@@ -30,8 +30,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 MANIFEST_FILE = BASE_DIR / 'swarm_manifest.yaml'
-DRONE_SCRIPT = BASE_DIR / 'controller.py'
-CAMERA_SCRIPT = BASE_DIR / 'camera_node.py'
+DRONE_SCRIPT = 'controller.py'
+CAMERA_SCRIPT = 'camera_node.py'
 
 
 class SwarmOrchestrator:
