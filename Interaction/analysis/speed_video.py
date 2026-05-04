@@ -40,11 +40,11 @@ from PIL import Image, ImageDraw, ImageFont
 # VIDEO_DURATION = 19.0  # seconds of log time to render per video
 
 
-LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '../../orchestrator/logs/lit_3'
+LOG_DIR        = sys.argv[1] if len(sys.argv) > 1 else '/Users/shuqinzhu/Documents/FLS_Research/lightbender/orchestrator/logs/emoji_interaction_off_2026-05-01_14-36-08'
 OUT_DIR        = sys.argv[2] if len(sys.argv) > 2 else LOG_DIR
 FPS            = 30
 FONT           = 20
-WAIT_OFFSET_S  = 6.80   # seconds after "Waiting For User Interaction" to use as t=0
+WAIT_OFFSET_S  = 7.80   # seconds after "Waiting For User Interaction" to use as t=0
 VIDEO_DURATION = 11.0  # seconds of log time to render per video\
 
 DASH_MODE        = 'light'   # 'dark' | 'light'
@@ -313,8 +313,8 @@ def process_log(args):
     ax.spines['right'].set_visible(False)
     ax.grid(True, linestyle='--', alpha=0.7)
 
-    ax.axhline(100, linestyle='--', color='tab:purple', linewidth=1.5,
-               label=r'$S_D = S_Q = S_H = 100.0~mm/s$')
+    ax.axhline(130, linestyle='--', color='tab:purple', linewidth=1.5,
+               label=r'$S_D = S_Q = S_H = 130.0~mm/s$')
     ax.legend(fontsize=FONT - 4)
     line_done,  = ax.plot([], [], linewidth=1.2, color='tab:blue', animated=True)
     line_ahead, = ax.plot([], [], linewidth=1.2, color='lightgray', animated=True)

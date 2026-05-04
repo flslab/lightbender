@@ -25,10 +25,13 @@ from restart import reboot_crazyflie
 from switch_network import apply_network_mode
 
 # from Interaction.vicon_noise_tracker import run_tracker
+from pathlib import Path
 
-MANIFEST_FILE = 'swarm_manifest.yaml'
-DRONE_SCRIPT = 'controller.py'
-CAMERA_SCRIPT = 'camera_node.py'
+BASE_DIR = Path(__file__).resolve().parent
+
+MANIFEST_FILE = BASE_DIR / 'swarm_manifest.yaml'
+DRONE_SCRIPT = BASE_DIR / 'controller.py'
+CAMERA_SCRIPT = BASE_DIR / 'camera_node.py'
 
 
 class SwarmOrchestrator:
@@ -642,7 +645,7 @@ class SwarmOrchestrator:
                         raise KeyboardInterrupt("Stopped while waiting for confirm_launch")
                 else:
                     input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
-                    time.sleep(10)
+                    # time.sleep(10)
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
             self.took_off = True

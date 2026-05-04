@@ -7,8 +7,14 @@ Description:
 * Tools to generate line charts.
 * Tools to identify a LightBender in a video recording, and overlay the speed dashboard next to it.
 
+# Run:
+Prior to run Interaction, generate the swarm manifest file ```swarm_manifest.yaml``` under orchestrator directory (see [example](../orchestrator/swarm_manifest_sample.yaml).
+Once the file was generated and configured, run:
+```bash
+python3 "$(git rev-parse --show-toplevel)/orchestrator/orchestrator.py" --interaction --intractable-illumination
+```
 
 # Implementation
-The source code for interaction is available in [Inreaction Controller](../controller/Interaction) directory.
+The source code for interaction is available in [Inreaction Controller](https://github.com/flslab/fls-cf-offboard-controller/tree/master/Interaction) directory.
 
-Further instructions to run this feature of LightBender, see [Controller README](../controller/README.md).
+Further instructions to run this feature of LightBender, see [Controller README](https://github.com/flslab/fls-cf-offboard-controller/README.md).
