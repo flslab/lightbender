@@ -495,6 +495,7 @@ def _swarm_auto_stop(reason=""):
         props.swarm_connected = False
         props.swarm_stopping = False
         props.swarm_launch_confirmed = False
+        props.swarm_confirm_text = "Confirm Launch"
         props.swarm_logs_fetched = True
         props.swarm_drones.clear()
     print(f"[LB] Auto-stop: {reason}")
@@ -510,6 +511,7 @@ def _swarm_terminate_cleanup():
         props.swarm_connected = False
         props.swarm_stopping = False
         props.swarm_launch_confirmed = False
+        props.swarm_confirm_text = "Confirm Launch"
         props.swarm_logs_fetched = True
 
         for d in props.swarm_drones:
@@ -535,6 +537,7 @@ def open_swarm_monitor_socket(port=5598):
     scene = getattr(bpy.context, "scene", None)
     if scene and hasattr(scene, "drone_props"):
         scene.drone_props.swarm_launch_confirmed = False
+        scene.drone_props.swarm_confirm_text = "Confirm Launch"
 
     if not SWARM_MONITOR_SESSION["timer_registered"]:
         bpy.app.timers.register(swarm_monitor_timer, first_interval=0.2)
@@ -602,6 +605,15 @@ def _process_swarm_monitor_msg(msg):
     elif cmd == "all_stopped":
         SWARM_MONITOR_SESSION["all_stopped"] = True
         _swarm_terminate_cleanup()
+    elif cmd == "request_mission_confirm":
+        scene = getattr(bpy.context, "scene", None)
+        if scene and hasattr(scene, "drone_props"):
+            scene.drone_props.swarm_launch_confirmed = False
+            scene.drone_props.swarm_confirm_text = "Confirm Mission"
+        for did, data in SWARM_MONITOR_SESSION.get("drones", {}).items():
+            if data.get("status") == "flying":
+                data["status"] = "ready"
+        _sync_swarm_collection()
 
 
 def _sync_swarm_collection():
@@ -1233,6 +1245,7 @@ class DroneProperties(bpy.types.PropertyGroup):
     swarm_connected: BoolProperty(name="Orchestrator Connected", default=False)
     swarm_stopping: BoolProperty(name="Stopping", default=False)
     swarm_launch_confirmed: BoolProperty(name="Launch Confirmed", default=False)
+    swarm_confirm_text: StringProperty(name="Confirm Text", default="Confirm Launch")
     swarm_view_mode: EnumProperty(
         name="View Mode",
         items=[('LIST', "List", ""), ('GRID', "Grid", "")],
@@ -3290,9 +3303,9 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         if applied_at_least_once:
             context.view_layer.update()
             if len(frames_to_stagger) > 1:
-                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders across {len(frames_to_stagger)} keyframes.")
+                self.report({'INFO'}, f"Staggered {len(drones)} LightBenders across {len(frames_to_stagger)} keyframes.")
             else:
-                self.report({'INFO'}, f"Staggered {len(LightBenders)} LightBenders.")
+                self.report({'INFO'}, f"Staggered {len(drones)} LightBenders.")
         else:
             self.report({'WARNING'}, "Stagger did not apply to any LightBenders.")
 
@@ -4984,7 +4997,7 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             row = layout.row(align=True)
             confirm_col = row.row(align=True)
             confirm_col.enabled = all_ready and props.illuminate_running and not props.swarm_launch_confirmed and not props.swarm_stopping
-            op_text = "Launch Confirmed" if props.swarm_launch_confirmed else "Confirm Launch"
+            op_text = "Launch Confirmed" if props.swarm_launch_confirmed else props.swarm_confirm_text
             op_icon = 'CHECKMARK' if props.swarm_launch_confirmed else 'PLAY'
             confirm_col.operator("drone.confirm_launch", text=op_text, icon=op_icon)
             stop_col = row.row(align=True)
@@ -5020,7 +5033,7 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             row = layout.row(align=True)
             confirm_col = row.row(align=True)
             confirm_col.enabled = all_ready and props.illuminate_running and not props.swarm_launch_confirmed and not props.swarm_stopping
-            op_text = "Confirm Launch"
+            op_text = "Launch Confirmed" if props.swarm_launch_confirmed else props.swarm_confirm_text
             op_icon = 'CHECKMARK' if props.swarm_launch_confirmed else 'PLAY'
             confirm_col.operator("drone.confirm_launch", text=op_text, icon=op_icon)
             stop_col = row.row(align=True)
@@ -5265,6 +5278,7 @@ def on_load_reset_properties(dummy):
             props.swarm_connected = False
             props.swarm_stopping = False
             props.swarm_launch_confirmed = False
+            props.swarm_confirm_text = "Confirm Launch"
             props.edit_active = False
             props.interaction_editor_active = False
             props.interaction_connected_count = 0

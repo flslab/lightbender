@@ -657,6 +657,7 @@ class SwarmOrchestrator:
                     if not self.args.skip_confirm:
                         if self._blender_monitor_sock:
                             self._confirm_launch_event.clear()
+                            self._blender_notify({"cmd": "request_mission_confirm"})
                             self.logger.info(f">>> Mission {i+1}/{len(self.missions)}: Waiting for Blender confirm...")
                             while not self._confirm_launch_event.is_set() and self.running.is_set():
                                 self._confirm_launch_event.wait(timeout=1.0)
