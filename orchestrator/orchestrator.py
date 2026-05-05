@@ -233,13 +233,20 @@ class SwarmOrchestrator:
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         
+        if hasattr(drone, "flowdeck"):
+            localization_flags = "--check-deck bcFlow2" 
+            if hasattr(drone, "save_vicon"):
+                localization_flags += " --save-vicon "
+        else:
+            localization_flags = "--vicon"
+        
         cmd = [
             f"cd {self.common_cfg['work_dir']} && ",
             f"source {self.common_cfg['venv_path']}/bin/activate && ",
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --orchestrated --tag {self.tag} ",
-            "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
+            "--ground-test " if self.args.ground else f" {localization_flags} {mocap_args} ",
             f"{viewpoint_arg}",
             f"{anchor_arg}",
             f"--drone-id {drone['id']} ",
