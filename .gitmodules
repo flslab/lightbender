@@ -6,3 +6,7 @@
 	path = crazyflie-firmware
 	url = https://github.com/flslab/crazyflie-firmware.git
 	branch = add_reset_PID_integral
+[submodule "log-visualizer"]
+	path = log-visualizer
+	url = https://github.com/flslab/fls-cf-log-visualizer.git
+	branch = main
