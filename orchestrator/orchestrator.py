@@ -232,10 +232,10 @@ class SwarmOrchestrator:
             
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
-        
-        if hasattr(drone, "flowdeck"):
+        tracker_arg = f"--tracker --save-camera" if drone.get('tracker') else ""
+        if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
-            if hasattr(drone, "save_vicon"):
+            if drone.get('save_vicon'):
                 localization_flags += " --save-vicon "
         else:
             localization_flags = "--vicon"
@@ -250,6 +250,7 @@ class SwarmOrchestrator:
             f"{viewpoint_arg}",
             f"{anchor_arg}",
             f"--drone-id {drone['id']} ",
+            f"{tracker_arg}",
             f"--led --led-brightness 0.5 --led-count {led_count} " if led_count > 0 else " ",
             f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
@@ -705,7 +706,16 @@ class SwarmOrchestrator:
             local = f"{local_dir}/{drone['id']}_{tag}.json"
             success = self._download_file(drone, remote, local, "Log")
 
-            # Vicon noise log (only if tracker was launched)
+            # Tracker video and log (only if tracker was launched)
+            if drone.get("tracker"):
+                tr = f"{work}/logs/video.mp4"
+                tl = f"{local_dir}/{drone['id']}_tracker_{tag}.mp4"
+                success = success and self._download_file(drone, tr, tl, "Tracker")
+                tr = f"{work}/logs/tracker_{tag}.json"
+                tl = f"{local_dir}/{drone['id']}_tracker_{tag}.json"
+                success = success and self._download_file(drone, tr, tl, "Tracker")
+
+            # Vicon noise log
             if item.get('vicon_log'):
                 vr = f"{work}/logs/vicon_{tag}.json"
                 vl = f"{local_dir}/vicon_{tag}.json"
