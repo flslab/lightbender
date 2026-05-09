@@ -10,3 +10,7 @@
 	path = log-visualizer
 	url = https://github.com/flslab/fls-cf-log-visualizer.git
 	branch = main
+[submodule "relative-localization"]
+	path = relative-localization
+	url = https://github.com/flslab/fls-marker-localization.git
+	branch = master
