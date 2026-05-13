@@ -224,15 +224,16 @@ class SwarmOrchestrator:
         servo_count = drone.get('servo_count', 2)
         servo_offsets = drone.get('servo_offsets', [0.0] * servo_count)
         led_count = drone.get('led_count', 50)
+        init_yaw = drone.get('init_yaw', 0)
         if hasattr(drone, "obj_name"):
             mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
             p = drone['init_pos']
-            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud --init-yaw {init_yaw} "
             
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
-        tracker_arg = f"--tracker --save-camera" if drone.get('tracker') else ""
+        tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
             if drone.get('save_vicon'):
@@ -602,9 +603,10 @@ class SwarmOrchestrator:
                     if not self.running.is_set():
                         return
 
-                self.reboot_flight_controllers(remote=bool(self.radio_node))
-                if not self.running.is_set():
-                    return
+                if not self.args.skip_reboot:
+                    self.reboot_flight_controllers(remote=bool(self.radio_node))
+                    if not self.running.is_set():
+                        return
 
                 def boot_drone(drone):
                     self._blender_notify({"cmd": "drone_status", "id": drone['id'], "status": "booting"})
@@ -672,7 +674,8 @@ class SwarmOrchestrator:
                         else:
                             input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
                     if i == 0:
-                        time.sleep(5)
+                        # time.sleep(5)
+                        pass
                     self.logger.info(f"Broadcasting START for Mission {i+1}...")
                     self.pub_socket.send_json({"cmd": "START"})
 
@@ -922,6 +925,7 @@ if __name__ == "__main__":
     parser.add_argument("--radio", action="store_true", help="run mission with CrazyRadio")
     parser.add_argument("--loadcell", action="store_true", help="run with loadcell")
     parser.add_argument("--skip-confirm", action="store_true", help="run without pressing enter")
+    parser.add_argument("--skip-reboot", action="store_true", help="skip drone reboot process")
     parser.add_argument("--skip-dispatcher", action="store_true", help="skip the dispatcher logic and UI")
     parser.add_argument("--http-port", type=int, default=None, help="override manifest http_port")
     parser.add_argument("--zmq-cmd-port", type=int, default=None, help="override manifest zmq_cmd_port")
