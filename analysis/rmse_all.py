@@ -397,12 +397,16 @@ class DroneProcessor:
         self.act_pos_fn = interp1d(rel_times, vicon_pos, axis=0, kind='linear', fill_value="extrapolate",
                                    bounds_error=False)
 
-        ekf_time = np.array(data['cf']['time'])
+        cf_log_group = data.get('cf', data.get('cf_ATT_RATE'))
+        if not cf_log_group:
+            raise Exception("No 'cf' log group found in data.")
+
+        ekf_time = np.array(cf_log_group['time'])
         ekf_rel_times = ekf_time - self.start_time
 
-        roll = np.array(data['cf']['params']['stateEstimate.roll']['data'])
-        pitch = np.array(data['cf']['params']['stateEstimate.pitch']['data'])
-        yaw = np.array(data['cf']['params']['stateEstimate.yaw']['data'])
+        roll = np.array(cf_log_group['params']['stateEstimate.roll']['data'])
+        pitch = np.array(cf_log_group['params']['stateEstimate.pitch']['data'])
+        yaw = np.array(cf_log_group['params']['stateEstimate.yaw']['data'])
 
         self.act_r_fn = interp1d(ekf_rel_times, np.radians(roll), fill_value="extrapolate")
         self.act_p_fn = interp1d(ekf_rel_times, np.radians(pitch), fill_value="extrapolate")
