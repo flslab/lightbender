@@ -234,6 +234,7 @@ class SwarmOrchestrator:
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
+        smooth_controller_rate = f"--smooth-controller-rate {100 if drone.get('tracker') else 50}"
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
             if drone.get('save_vicon'):
@@ -256,7 +257,7 @@ class SwarmOrchestrator:
             f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
             f"--takeoff-altitude {alt} ",
-            "--smooth-controller-rate 50 ",
+            f"{smooth_controller_rate}",
             "--log ",
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
         ]
@@ -372,9 +373,13 @@ class SwarmOrchestrator:
         self.radio_node = updated.get("radio_node")
         self.logger.info(f"Network switch complete. Controller IP: {self.ctrl_cfg['ip']}")
 
-    def shutdown_nodes(self):
+    def shutdown_nodes(self, target_ids=None):
         """Sends sudo shutdown command to all drones."""
-        for drone in self.drones:
+        drones_to_target = self.drones
+        if target_ids:
+            drones_to_target = [d for d in self.drones if d['id'] in target_ids]
+            
+        for drone in drones_to_target:
             self.logger.info(f"Shutting down Drone {drone['id']}...")
             try:
                 conn = Connection(host=drone['ip'], user=drone['user'])
@@ -382,9 +387,13 @@ class SwarmOrchestrator:
             except Exception:
                 pass
 
-    def kill_processes(self):
+    def kill_processes(self, target_ids=None):
         """Kills python processes on all drones."""
-        for drone in self.drones:
+        drones_to_target = self.drones
+        if target_ids:
+            drones_to_target = [d for d in self.drones if d['id'] in target_ids]
+            
+        for drone in drones_to_target:
             self.logger.info(f"Killing processes on Drone {drone['id']}...")
             try:
                 conn = Connection(host=drone['ip'], user=drone['user'])
@@ -517,11 +526,11 @@ class SwarmOrchestrator:
                 self._blender_monitor_sock = None
 
     def run(self):
-        if self.args.off:
-            self.shutdown_nodes()
+        if self.args.off is not None:
+            self.shutdown_nodes(self.args.off)
             return
-        if self.args.kill:
-            self.kill_processes()
+        if self.args.kill is not None:
+            self.kill_processes(self.args.kill)
             return
 
         date_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -916,8 +925,8 @@ if __name__ == "__main__":
     parser.add_argument("--intractable-illumination", action="store_true",
                         help="interaction application with illumination")
     parser.add_argument("--morphing", action="store_true", help="illumination application with morphing emulator")
-    parser.add_argument("--off", action="store_true", help="shutdown the raspberry pis")
-    parser.add_argument("--kill", action="store_true", help="stop the controller")
+    parser.add_argument("--off", nargs="*", default=None, help="shutdown the raspberry pis. Optionally provide a list of drone IDs.")
+    parser.add_argument("--kill", nargs="*", default=None, help="stop the controller. Optionally provide a list of drone IDs.")
     parser.add_argument("--ground", action="store_true", help="ground test")
     parser.add_argument("--dark", action="store_true", help="recording in darkness")
     parser.add_argument("--record", action="store_true", help="run the camera only to record")
