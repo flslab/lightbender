@@ -186,6 +186,12 @@ if [ ! -f "$MISSION_YAML" ]; then
     echo "Error: Mission YAML was not generated at $MISSION_YAML"
     exit 1
 fi
+if [ "$NO_VIZ" = false ]; then
+    echo "----------------------------------------"
+    echo "  Visualizing Mission File"
+    echo "----------------------------------------"
+    python $REPO_ROOT/analysis/rmse_all.py --yaml "$MISSION_YAML" --lit-only
+fi
 
 # echo "Mission generated at $MISSION_YAML"
 
