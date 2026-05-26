@@ -71,7 +71,7 @@ CAM_Y=0.0
 CAM_Z=1.0
 
 COLOR="[255, 255, 255]"
-MANIFEST="$REPO_ROOT/orchestrator/swarm_manifest.yaml"
+MANIFEST="$REPO_ROOT/orchestrator/swarm_manifest_sample.yaml"
 MISSION_DIR="$REPO_ROOT/orchestrator/SFL"
 MISSION_YAML="$MISSION_DIR/lb_author_mission.yaml"
 ORCHESTRATOR="$REPO_ROOT/orchestrator/orchestrator.py"
