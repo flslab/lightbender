@@ -680,7 +680,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         print(f"COMBINED (All Drones): Overall RMSE {overall_comb_rmse:.2f} mm")
         print(f"COMBINED (All Drones): Max RMSE {max_comb_rmse:.2f} mm")
     else:
-        print("COMBINED: No valid data.")
+        print("COMBINED: No flight data provided.")
 
     for p in processors:
         d_rmse = np.array(results['drones'][p.drone_id]['rmse'])
