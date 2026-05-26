@@ -465,7 +465,7 @@ class DroneProcessor:
 # 3. MAIN ANALYSIS LOGIC
 # ==========================================
 
-def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, lit_only=False):
+def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, lit_only=False, trim_start=0.0, trim_end=0.0):
     print(f"Loading Configuration from {yaml_file}...")
     with open(yaml_file, 'r') as f:
         yaml_data = yaml.safe_load(f)
@@ -544,9 +544,12 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     # We want to cover the extent of the longest GT plan
     max_duration = max([p.gt_duration for p in processors])
 
+    if trim_end > 0.0:
+        max_duration = max(0.0, max_duration - trim_end)
+
     # Sampling rate for analysis (100Hz)
     dt_analysis = 0.01
-    timestamps = np.arange(0, max_duration, dt_analysis)
+    timestamps = np.arange(trim_start, max_duration, dt_analysis)
 
     results = {
         'timestamps': timestamps,
@@ -832,9 +835,11 @@ if __name__ == "__main__":
     parser.add_argument('--max_a', type=float, default=0.25, help='Maximum acceleration (m/s^2)')
     parser.add_argument('--max_j', type=float, default=17.0, help='Maximum jerk (m/s^3)')
     parser.add_argument('--max_s', type=float, default=550.0, help='Maximum snap (m/s^4)')
+    parser.add_argument('--trim-start', type=float, default=0.0, help='Trim start of data (seconds)')
+    parser.add_argument('--trim-end', type=float, default=0.0, help='Trim end of data (seconds)')
     parser.add_argument('--ignore-rpy', action='store_true', dest='ignore_rpy', help='Ignore actual roll, pitch, and yaw data')
     parser.add_argument('--lit-only', action='store_true', dest='lit_only', help='Only include lit (non-black) LEDs in RMSE computation and visualization')
 
     args = parser.parse_args()
 
-    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy, args.lit_only)
+    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy, args.lit_only, args.trim_start, args.trim_end)
