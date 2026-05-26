@@ -1,15 +1,53 @@
 #!/bin/bash
 set -e
 
-if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <input_file.svg>"
+# Repository root
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+
+echo "Repository root: $REPO_ROOT"
+
+# Default values
+NO_VIZ=false
+ILLUMINATE=false
+INPUT_SVG=""
+
+# Parse command line options
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --no-viz) NO_VIZ=true; shift ;;
+        --illuminate) ILLUMINATE=true; shift ;;
+        -*) echo "Unknown option: $1"; exit 1 ;;
+        *) 
+            if [ -z "$INPUT_SVG" ]; then
+                INPUT_SVG="$1"
+            else
+                echo "Error: Multiple input files specified: $INPUT_SVG and $1"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$INPUT_SVG" ]; then
+    echo "Usage: $0 [--no-viz] [--illuminate] <input_file.svg>"
     exit 1
 fi
 
-INPUT_SVG=$1
 if [ ! -f "$INPUT_SVG" ]; then
     echo "Error: Input file '$INPUT_SVG' not found."
     exit 1
+fi
+
+TRANSFORM_VIZ="--visualize"
+PLACE_VIZ=""
+DECONFLICT_VIZ=""
+
+if [ "$NO_VIZ" = true ]; then
+    TRANSFORM_VIZ=""
+    PLACE_VIZ="--no_viz"
+    DECONFLICT_VIZ="--no_viz"
 fi
 
 # --- Configuration ---
@@ -33,13 +71,13 @@ CAM_Y=0.0
 CAM_Z=1.0
 
 COLOR="[255, 255, 255]"
-MANIFEST="/path/to/swarm_manifest.yaml"
-MISSION_DIR="/path/to/mission"
+MANIFEST="$REPO_ROOT/orchestrator/swarm_manifest.yaml"
+MISSION_DIR="$REPO_ROOT/orchestrator/SFL"
 MISSION_YAML="$MISSION_DIR/lb_author_mission.yaml"
-ORCHESTRATOR="/path/to/orchestrator.py"
+ORCHESTRATOR="$REPO_ROOT/orchestrator/orchestrator.py"
 
 # --- Derived paths ---
-BASE_DIR="results/lb_author"
+BASE_DIR="$REPO_ROOT/authoring/results/lb_author"
 FILE_BASENAME=$(basename "$INPUT_SVG" .svg)
 OUT_DIR="$BASE_DIR/$FILE_BASENAME"
 mkdir -p "$OUT_DIR"
@@ -62,13 +100,18 @@ echo "       Max Height     : $TRANSFORM_MAX_HEIGHT"
 echo "       Center         : ($TRANSFORM_CENTER_X, $TRANSFORM_CENTER_Z)"
 echo "     Output: $GRAPH_YAML"
 echo "----------------------------------------"
-python transform.py \
+if [ ! -f "$INPUT_SVG" ]; then
+    echo "Error: Input file '$INPUT_SVG' not found. Cannot proceed with Step 1 (Transform)."
+    exit 1
+fi
+python $REPO_ROOT/authoring/transform.py \
     --input "$INPUT_SVG" \
     --output "$GRAPH_YAML" \
     -mw "$TRANSFORM_MAX_WIDTH" \
     -ml "$TRANSFORM_MAX_HEIGHT" \
     -cy "$TRANSFORM_CENTER_X" \
     -cz "$TRANSFORM_CENTER_Z" \
+    $TRANSFORM_VIZ
     # --csv > /dev/null
 
 echo "----------------------------------------"
@@ -79,13 +122,17 @@ echo "       Policy                     : $POLICY"
 echo "       LightBender Segment Length : $MAX_LENGTH"
 echo "     Output: $TENTATIVE_LAYOUT"
 echo "----------------------------------------"
-python place.py \
+if [ ! -f "$GRAPH_YAML" ]; then
+    echo "Error: Input file '$GRAPH_YAML' not found. Cannot proceed with Step 2 (Place)."
+    exit 1
+fi
+python $REPO_ROOT/authoring/place.py \
     --input "$GRAPH_YAML" \
     --output "$TENTATIVE_LAYOUT" \
     --policy "$POLICY" \
     --max_len "$MAX_LENGTH" \
     --min_chunck_len "$MIN_CHUNK_LEN" \
-    --no_viz \
+    $PLACE_VIZ \
     # --csv > /dev/null
 
 echo "----------------------------------------"
@@ -100,7 +147,11 @@ echo "       Distance       : $PLACEMENT"
 echo "       Viewpoint      : ($CAM_X, $CAM_Y, $CAM_Z)"
 echo "     Output: $STAGGERED_LAYOUT"
 echo "----------------------------------------"
-python deconflict.py \
+if [ ! -f "$TENTATIVE_LAYOUT" ]; then
+    echo "Error: Input file '$TENTATIVE_LAYOUT' not found. Cannot proceed with Step 3 (Stagger)."
+    exit 1
+fi
+python $REPO_ROOT/authoring/deconflict.py \
     --input_file "$TENTATIVE_LAYOUT" \
     --output_file "$STAGGERED_LAYOUT" \
     --selection_method "$SELECTION" \
@@ -109,7 +160,7 @@ python deconflict.py \
     --move_direction "$MOVE" \
     --placement_type "$PLACEMENT" \
     --camera_pos $CAM_X $CAM_Y $CAM_Z \
-    --no_viz \
+    $DECONFLICT_VIZ \
     # --csv > /dev/null
 
 echo "----------------------------------------"
@@ -120,7 +171,11 @@ echo "       Color     : '$COLOR'"
 echo "       File Name : '$FILE_BASENAME'"
 echo "     Output: $MISSION_YAML"
 echo "----------------------------------------"
-python convert_to_mission.py \
+if [ ! -f "$STAGGERED_LAYOUT" ]; then
+    echo "Error: Input file '$STAGGERED_LAYOUT' not found. Cannot proceed with Step 4 (Convert)."
+    exit 1
+fi
+python $REPO_ROOT/authoring/convert_to_mission.py \
     --input "$STAGGERED_LAYOUT" \
     --output "$MISSION_YAML" \
     --manifest "$MANIFEST" \
@@ -134,8 +189,10 @@ fi
 
 # echo "Mission generated at $MISSION_YAML"
 
-echo "----------------------------------------"
-echo "  5. Illuminating Using Orchestrator"
-echo "----------------------------------------"
-cd "$(dirname "$ORCHESTRATOR")"
-python3 orchestrator.py --illumination --skip-confirm
+if [ "$ILLUMINATE" = true ]; then
+    echo "----------------------------------------"
+    echo "  5. Illuminating Using Orchestrator"
+    echo "----------------------------------------"
+    cd "$(dirname "$ORCHESTRATOR")"
+    python $REPO_ROOT/orchestrator/orchestrator.py --illumination --skip-confirm
+fi
