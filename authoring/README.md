@@ -329,6 +329,23 @@ The script runs the following steps sequentially, ensuring the input file of eac
 4. **Convert to SFL (`convert_to_mission.py`)**: Converts the staggered layout into an SFL mission file.
 5. **Orchestrator (`orchestrator.py`)**: (Optional) Triggers the swarm orchestrator to illuminate the deconflicted mission layout.
 
+### Setup Python Virtual Environment
+
+If you have not already, go to the lightbender/ directory and create a Python virtual environment:
+
+```bash
+cd lightbender/
+python3 -m venv env
+source env/bin/activate
+pip install -r authoring/requirements.txt
+```
+
+After the first time you only need to activate the virtual environment:
+
+```bash
+source env/bin/activate
+```
+
 ### Usage
 
 ```bash
@@ -345,6 +362,7 @@ To run the complete pipeline with visualizers:
 ```bash
 bash authoring/lb_author.sh authoring/svg/s.svg
 ```
+**Note:** To proceed to the next step, you need to close the plot windows.
 
 To run the complete pipeline silently without visualizers:
 ```bash
