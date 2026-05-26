@@ -313,3 +313,50 @@ Live swarm monitor, nested inside Mission Export. Updated in real time while the
   - Clicking a list entry selects the corresponding LightBender object in the 3D viewport.
 
 - **Grid** — compact tile view with one button per drone labeled with its numeric ID. Tile color indicates status: gray = idle, yellow = booting, green = ready, blue = landed, red = error. Clicking a tile selects the drone in the 3D viewport.
+
+---
+
+## LB Author, CLI End-to-End Pipeline
+
+For users who want to run the full authoring pipeline from the command line without using the graphical interface, the `lb_author.sh` script automates the complete flow from SVG parsing to spatial staggering and orchestrator invocation.
+
+### Pipeline Steps
+
+The script runs the following steps sequentially, ensuring the input file of each script is available before proceeding:
+1. **Transform (`transform.py`)**: Converts an SVG file into a scaled 3D graph.
+2. **Place (`place.py`)**: Maps the 3D graph onto a tentative layout of LightBenders.
+3. **Stagger/Deconflict (`deconflict.py`)**: Checks for overlap and downwash conflicts and repositions drones to resolve them.
+4. **Convert to SFL (`convert_to_mission.py`)**: Converts the staggered layout into an SFL mission file.
+5. **Orchestrator (`orchestrator.py`)**: (Optional) Triggers the swarm orchestrator to illuminate the deconflicted mission layout.
+
+### Usage
+
+```bash
+bash authoring/lb_author.sh [options] <input_file.svg>
+```
+
+#### Options
+
+- `--no-viz`: Disables all step-by-step graphical 2D and 3D visualizers (e.g., matplotlib popups), allowing the entire script to run silently in headless/CLI environments.
+- `--illuminate`: Automatically triggers the swarm orchestrator (`orchestrator.py`) at the end of the pipeline to launch and execute the generated mission layout.
+
+#### Examples
+To run the complete pipeline with visualizers:
+```bash
+bash authoring/lb_author.sh authoring/svg/s.svg
+```
+
+To run the complete pipeline silently without visualizers:
+```bash
+bash authoring/lb_author.sh --no-viz authoring/svg/s.svg
+```
+
+To run the pipeline and immediately launch the orchestrator:
+```bash
+bash authoring/lb_author.sh --illuminate authoring/svg/s.svg
+```
+
+Optianly you can visualize the final SFL file using the following command:
+```bash
+python analysis/rmse_all.py --yaml orchestrator/SFL/lb_author_mission.yaml --lit-only
+```
