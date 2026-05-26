@@ -12,7 +12,7 @@ from scipy.interpolate import interp1d
 # ==========================================
 
 # Offset of camera relative to mocap (frame tvec) data for the localizing lb (in drone body frame)
-CAMERA_OFFSET_BODY = np.array([0.018, -0.035, -0.025])
+CAMERA_OFFSET_BODY = np.array([0.00, -0.035, -0.035])
 
 # Offset of marker relative to mocap data for the anchor FLS (in drone body frame)
 MARKER_OFFSET_BODY = np.array([0.01, 0.035, -0.035])
@@ -230,7 +230,7 @@ def main():
     
     print(f"\nResults:")
     print(f"Mean Euclidean Error: {mean_error:.2f} mm")
-    print(f"True RMSE: {true_rmse:.2f} mm")
+    print(f"RMSE: {true_rmse:.2f} mm")
     print(f"Max Error: {max_error:.2f} mm")
     
     # Plot
@@ -253,7 +253,7 @@ def main():
     # Error Plot
     axs[0].plot(valid_times, errors, label='Relative Error')
     axs[0].axhline(mean_error, color='r', linestyle='--', label=f'Mean Error: {mean_error:.2f} mm')
-    axs[0].axhline(true_rmse, color='g', linestyle='-.', label=f'True RMSE: {true_rmse:.2f} mm')
+    axs[0].axhline(true_rmse, color='g', linestyle='-.', label=f'RMSE: {true_rmse:.2f} mm')
     axs[0].set_title('Relative Localization Error Over Time')
     axs[0].set_ylabel('Error (mm)')
     axs[0].grid(True)
