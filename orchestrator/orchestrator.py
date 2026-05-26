@@ -225,6 +225,7 @@ class SwarmOrchestrator:
         servo_offsets = drone.get('servo_offsets', [0.0] * servo_count)
         led_count = drone.get('led_count', 50)
         init_yaw = drone.get('init_yaw', 0)
+        ground_test = drone.get('ground_test', False)
         if hasattr(drone, "obj_name"):
             mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
@@ -259,6 +260,7 @@ class SwarmOrchestrator:
             f"--takeoff-altitude {alt} ",
             f"{smooth_controller_rate}",
             "--log ",
+            f"--ground-test" if ground_test else "",
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
         ]
         return " ".join(cmd)
