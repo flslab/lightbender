@@ -235,6 +235,7 @@ def main():
         yaml.dump(graph_data, file, default_flow_style=False, sort_keys=False)
 
     if args.visualize:
+        print("Close the plot window to continue")
         visualize_graph(final_nodes, edges)
 
 

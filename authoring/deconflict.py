@@ -1330,10 +1330,14 @@ if __name__ == "__main__":
     # 8. Visualize Results (Optional)
     if not args.no_viz:
         # Interference Graph Visualization
+        print("Close the plot window to continue")
         visualize_interference_graph(graph, moved, positions, abstract_layout=args.abstract_graph)
         # Conflict Bar Chart
+        print("Close the plot window to continue")
         visualize_conflict_bar_chart(graph)
         # 2D Before/After
+        print("Close the plot window to continue")
         visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
         # 3D Structure Visualization
+        print("Close the plot window to continue")
         visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)

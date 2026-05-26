@@ -514,6 +514,7 @@ class SetCoverStrategy(PlacementStrategy):
 
         # Optional: Visualize Candidates before exact solving
         if getattr(args, 'viz_candidates', False):
+            print("Close the plot window to continue")
             visualize_candidates(graph, candidates, max_length)
 
         # E. Solve Exact Set Cover with Overlap Penalty
@@ -930,4 +931,5 @@ if __name__ == "__main__":
         print("=" * 40)
 
     if not args.no_viz:
+        print("Close the plot window to continue")
         visualize_placement(graph, lightbenders)

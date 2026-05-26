@@ -190,6 +190,7 @@ if [ "$NO_VIZ" = false ]; then
     echo "----------------------------------------"
     echo "  Visualizing Mission File"
     echo "----------------------------------------"
+    echo "Close the plot window to continue."
     python $REPO_ROOT/analysis/rmse_all.py --yaml "$MISSION_YAML" --lit-only
 fi
 
