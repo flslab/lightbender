@@ -2,3 +2,5 @@ numpy
 matplotlib
 pyyaml
 svg.path
+scipy
+seaborn
