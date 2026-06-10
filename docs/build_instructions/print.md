@@ -20,10 +20,10 @@ Print the listed parts with the proper material based on the type of LightBender
 |--------------|----------|-----|
 | frame        | PA6-CF   | 1   |
 | landing_gear | PA6-CF   | 2   |
-| rod_1        | PA6-CF   | 1   |
-| rod_2        | PA6-CF   | 1   |
-| joint_1      | PA6-CF   | 1   |
-| joint_2      | PA6-CF   | 1   |
+| rod_segment  | PA6-CF   | 1   |
+| tube_segment | PA6-CF   | 1   |
+| rod_joint    | PA6-CF   | 1   |
+| tube_joint   | PA6-CF   | 1   |
 | servo_case   | PLA_CF   | 1   |
 | gearbox_case | PLA_CF   | 1   |
 | rpi_cover    | PLA_CF   | 1   |
