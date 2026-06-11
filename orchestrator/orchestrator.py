@@ -220,12 +220,21 @@ class SwarmOrchestrator:
         return f" ".join(cmd)
 
     def _get_drone_cmd_illumination(self, drone):
-        alt = self.mission['drones'][drone['id']]['target'][2]
+        drone_mission = self.mission['drones'][drone['id']]
+        alt = drone_mission['target'][2]
         servo_count = drone.get('servo_count', 2)
         servo_offsets = drone.get('servo_offsets', [0.0] * servo_count)
         led_count = drone.get('led_count', 50)
         init_yaw = drone.get('init_yaw', 0)
         ground_test = drone.get('ground_test', False)
+        marker_id = drone.get('marker_id')
+        target_id = 0
+        if drone_mission.get('relative_anchor'):
+            anchor_id = drone_mission['relative_anchor']['id']
+            anchor_drone = self._get_drone_by_id(anchor_id)
+            if anchor_drone:
+                target_id = anchor_drone.get('marker_id', 0)
+        
         if hasattr(drone, "obj_name"):
             mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
@@ -235,7 +244,7 @@ class SwarmOrchestrator:
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
-        smooth_controller_rate = f"--smooth-controller-rate {100 if drone.get('tracker') else 50}"
+        smooth_controller_rate = f"--smooth-controller-rate 100"
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
             if drone.get('save_vicon'):
@@ -250,6 +259,8 @@ class SwarmOrchestrator:
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --orchestrated --tag {self.tag} ",
             "--ground-test " if self.args.ground else f" {localization_flags} {mocap_args} ",
+            f"--marker-id {marker_id} " if marker_id is not None else "",
+            f"--target-id {target_id} " if target_id is not None else "",
             f"{viewpoint_arg}",
             f"{anchor_arg}",
             f"--drone-id {drone['id']} ",
@@ -259,10 +270,13 @@ class SwarmOrchestrator:
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
             f"--takeoff-altitude {alt} ",
             f"{smooth_controller_rate}",
+            "--enable-tracker-kf  --tracker-encoder-rate 50 --tracker-camera-rate 100",
+            "--velocity-p 2.0",
             "--log ",
             f"--ground-test" if ground_test else "",
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
         ]
+
         return " ".join(cmd)
 
     def _get_drone_cmd_morphing(self, drone):
@@ -296,6 +310,13 @@ class SwarmOrchestrator:
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
         ]
         return " ".join(cmd)
+
+    
+    def _get_drone_by_id(self, drone_id):
+        for d in self.drones:
+            if d['id'] == drone_id:
+                return d
+        return None
 
     def _get_camera_cmd(self):
         camera_params = [
