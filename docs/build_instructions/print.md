@@ -35,7 +35,7 @@ Print the listed parts with the proper material based on the type of LightBender
 - The 3d models are available in the `3d` directory under `linear` and `semicircle`.
 - Dry the PA6-CF filament before printing for the best result.
 - Use smooth PEI / high temp plate.
-- Clean the oil, fingerprints, and printing waste from the plate before printing.
+- Clean the oil, fingerprints, and printing waste from the plate before printing. Preferably wash it with water and soap.
 - Apply 3D printing liquid glue to the plate when printing using PA6-CF.
 - For printing the frame use `0.2mm strength` profile, and use `concentric` top and bottom
   surface pattern.
