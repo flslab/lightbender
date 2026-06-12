@@ -1,4 +1,5 @@
-# 3D Print
+# 3D Printing
+
 Print the listed parts with the proper material based on the type of LightBender you are building.
 
 

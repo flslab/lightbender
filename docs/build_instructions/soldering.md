@@ -57,7 +57,7 @@ Step 10: Remove the 3-pin connectors from the flight controller. First remove th
 
 Step 11: Desolder the power wires from the FC.
 
-## ESC and Power Assembly
+## ESC and FC Assembly
 
 Step 12: Solder wire B to the FC.
 
@@ -74,6 +74,7 @@ Step 15: Mount the ESC on the frame using the 8mm screws. The ESC should be moun
 Step 16: Solder the motor signal wires from step 4 to the FC. Make sure you connect the wires to the top side of the FC.
 
 Step 17: Pass the motor signal wires through the frame and solder them to the corresponding motor posts on the ESC. Refer to the image below.
+
 <div>
 <img src="../img/motor_signal_wires.jpg" width="600" />
 </div>
@@ -83,6 +84,29 @@ Step 18: Connect the FC anttena to the coaxical connector labeled as A on the to
 Step 19: Solder motor wires from the motors to the ESC. Refer to the image above to see the correct wire ordering for each motor.
 
 Finally your frame should look like this:
+
 <div>
 <img src="../img/assembled_frame.jpeg" width="600" />
 </div>
+
+## RPi Baseboard and Power Assembly
+
+Step 20: Solder the red wire of C to the VIN pin of the power Regualtor and red wire D to the OUT pin of the power Regualtor. Solder the black wires to the GND pins of the power Regualtor.
+
+Step 21: Solder the power wires of the servo the the OUT and GND of the power regulator. Connect red to OUT and brown/black to GND.
+
+Step 22: Solder the other ends of wire D to the RPi baseboard 5V and GND pins.
+
+Step 23: Solder the yellow signal wires of the servos to the pins 12 and 35 on the RPi baseboard.
+
+Step 24: Solder a 3-wire male connector to the RPi baseboard with wires for 5V, GND, and data. Connect the data wire to the pin 19 on the RPi baseboard.
+
+Step 25: Solder 3 magnet wires to the input 5V, GND and Data pints of the 26-LED strip.
+
+Step 26: Solder 2 magent wires to the 5V and GND pins of the 24-LED strip on its opposite side from the input pins.
+
+Step 27: Connect the data pin of the 26-LED strip to the data pin of the 24-LED strip.
+
+Step 28: Solder the 3-wire female connector to the other ends of the magnet wires. There should be 2 ground wires, 2 5V wires and one data wire. Use heat shring tubings to cover the connections.
+
+## Gearbox Assembly
