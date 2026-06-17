@@ -329,7 +329,7 @@ class SetCoverStrategy(PlacementStrategy):
     """
 
     def _generate_sliding_edge_candidates(self, L: float, max_length: float, duplicate_thresh: float) -> List[float]:
-        """Original implementation: Slides candidates from both endpoints inward."""
+        """Slides candidates from both endpoints inward."""
         edge_d_candidates = []
         if L <= 2 * max_length:
             edge_d_candidates.append(L / 2.0)
@@ -352,7 +352,7 @@ class SetCoverStrategy(PlacementStrategy):
         return edge_d_candidates
 
     def _generate_efficient_edge_candidates(self, L: float, max_length: float) -> List[float]:
-        """New implementation: Spaces N and N-1 LightBenders evenly across the line."""
+        """Spaces N and N-1 LightBenders evenly across the line."""
         edge_d_candidates = []
         if L <= 2 * max_length:
             # One candidate perfectly covers the whole edge
@@ -917,6 +917,10 @@ if __name__ == "__main__":
 
     save_to_solver_format(lightbenders, args.output)
 
+    if not args.no_viz:
+        print("Close the plot window to continue")
+        visualize_placement(graph, lightbenders)
+
     if args.csv:
         print(f"{(end_time - start_time) * 1000:.3f},{total_lbs},{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
     else:
@@ -930,6 +934,3 @@ if __name__ == "__main__":
         print(f"Rod Length Utilization: {utilization:.1f}%")
         print("=" * 40)
 
-    if not args.no_viz:
-        print("Close the plot window to continue")
-        visualize_placement(graph, lightbenders)

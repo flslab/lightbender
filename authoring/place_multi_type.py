@@ -905,6 +905,10 @@ if __name__ == "__main__":
 
     save_to_solver_format(lightbenders, args.output)
 
+    if not args.no_viz:
+        print("Close the plot window to continue")
+        visualize_placement(graph, lightbenders)
+
     if args.csv:
         lb_types_count = " ".join([f"{ml}:{length_counts[ml]}" for ml in sorted(length_counts.keys())])
         print(f"{(end_time - start_time) * 1000:.3f},{total_lbs} ({lb_types_count}),{total_rods},{avg_rod_len:.2f},{utilization:.1f}%")
@@ -921,5 +925,4 @@ if __name__ == "__main__":
         print(f"Rod Length Utilization: {utilization:.1f}%")
         print("--------------------------\n")
 
-    if not args.no_viz:
-        visualize_placement(graph, lightbenders)
+    

@@ -1301,6 +1301,25 @@ if __name__ == "__main__":
     max_capacity = sum(p.max_length_limit * 2 for p in final_points_data)
     utilization = (total_length / max_capacity * 100) if max_capacity > 0 else 0
 
+    # 7. Save Results
+    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
+
+    # 8. Visualize Results (Optional)
+    if not args.no_viz:
+        # Interference Graph Visualization
+        print("Close the plot window to continue")
+        visualize_interference_graph(graph, moved, positions, abstract_layout=args.abstract_graph)
+        # Conflict Bar Chart
+        print("Close the plot window to continue")
+        visualize_conflict_bar_chart(graph)
+        # 2D Before/After
+        print("Close the plot window to continue")
+        visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
+        # 3D Structure Visualization
+        print("Close the plot window to continue")
+        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
+
+    
     if args.csv:
         # CSV format: Downwashes,Overlaps,UnresolvedDownwashes,UnresolvedOverlaps,PointsSelected,PointsMoved,AvgDist,MinDist,MaxDist
         print(
@@ -1323,21 +1342,3 @@ if __name__ == "__main__":
         print(f"Travel Distance - Max:         {max_dist*1000:.0f} mm")
         print(f"Utilization:                   {utilization:.1f}%")
         print("=" * 40)
-
-    # 7. Save Results
-    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
-
-    # 8. Visualize Results (Optional)
-    if not args.no_viz:
-        # Interference Graph Visualization
-        print("Close the plot window to continue")
-        visualize_interference_graph(graph, moved, positions, abstract_layout=args.abstract_graph)
-        # Conflict Bar Chart
-        print("Close the plot window to continue")
-        visualize_conflict_bar_chart(graph)
-        # 2D Before/After
-        print("Close the plot window to continue")
-        visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
-        # 3D Structure Visualization
-        print("Close the plot window to continue")
-        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
