@@ -4706,7 +4706,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
                 col = row.column(align=True)
                 col.operator("drone.add_pointer", icon='ADD', text="")
                 col.operator("drone.remove_pointer", icon='REMOVE', text="")
-                box.label(text="Pos | Color Expression", icon='INFO')
+                box.label(text="LED Index | Color Expression", icon='INFO')
 
             layout.separator()
             layout.operator("drone.force_update_leds", text="Test/Update LEDs", icon='LIGHT')
