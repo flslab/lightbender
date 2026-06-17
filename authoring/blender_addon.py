@@ -4697,16 +4697,16 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             else:
                 # Pointer Mode UI
                 box = layout.box()
-                box.label(text="Base Color (Start):")
+                box.label(text="Base Color Expression:")
                 box.prop(obj_props, "led_base_color", text="")
-                box.label(text="Pointers (Split Points):")
+                box.label(text="Pointers:")
                 row = box.row()
                 row.template_list("UL_DronePointerList", "", obj_props, "led_pointers", obj_props,
                                   "active_pointer_index")
                 col = row.column(align=True)
                 col.operator("drone.add_pointer", icon='ADD', text="")
                 col.operator("drone.remove_pointer", icon='REMOVE', text="")
-                box.label(text="Pos | Right-Side Color", icon='INFO')
+                box.label(text="Pos | Color Expression", icon='INFO')
 
             layout.separator()
             layout.operator("drone.force_update_leds", text="Test/Update LEDs", icon='LIGHT')
