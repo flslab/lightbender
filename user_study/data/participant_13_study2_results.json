@@ -1,0 +1,231 @@
+{
+  "participantId": 13,
+  "studyType": 2,
+  "age": 22,
+  "gender": "Female",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 6,
+        "5": 3
+      },
+      "displayOrder": [
+        3,
+        1,
+        2,
+        5,
+        4
+      ],
+      "duration": 142.064
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 8,
+        "2": 8,
+        "3": 8,
+        "4": 7,
+        "5": 6
+      },
+      "displayOrder": [
+        3,
+        1,
+        2,
+        4,
+        5
+      ],
+      "duration": 47.825
+    },
+    {
+      "trialIndex": 2,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 7,
+        "5": 2
+      },
+      "displayOrder": [
+        1,
+        2,
+        4,
+        5,
+        3
+      ],
+      "duration": 41.387
+    },
+    {
+      "trialIndex": 3,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 5
+      },
+      "displayOrder": [
+        4,
+        3,
+        1,
+        2,
+        5
+      ],
+      "duration": 33.61
+    },
+    {
+      "trialIndex": 4,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 9,
+        "3": 8,
+        "4": 7,
+        "5": 4
+      },
+      "displayOrder": [
+        2,
+        1,
+        4,
+        3,
+        5
+      ],
+      "duration": 52.155
+    },
+    {
+      "trialIndex": 5,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 7,
+        "5": 5
+      },
+      "displayOrder": [
+        5,
+        2,
+        4,
+        1,
+        3
+      ],
+      "duration": 30.207
+    },
+    {
+      "trialIndex": 6,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 10,
+        "4": 7,
+        "5": 6
+      },
+      "displayOrder": [
+        2,
+        1,
+        5,
+        3,
+        4
+      ],
+      "duration": 38.499
+    },
+    {
+      "trialIndex": 7,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 9,
+        "2": 9,
+        "3": 9,
+        "4": 8,
+        "5": 5
+      },
+      "displayOrder": [
+        5,
+        1,
+        4,
+        3,
+        2
+      ],
+      "duration": 42.866
+    },
+    {
+      "trialIndex": 8,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 7,
+        "5": 3
+      },
+      "displayOrder": [
+        2,
+        5,
+        4,
+        3,
+        1
+      ],
+      "duration": 23.366
+    },
+    {
+      "trialIndex": 9,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 8,
+        "5": 4
+      },
+      "displayOrder": [
+        5,
+        2,
+        1,
+        3,
+        4
+      ],
+      "duration": 36.933
+    },
+    {
+      "trialIndex": 10,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 9,
+        "4": 9,
+        "5": 3
+      },
+      "displayOrder": [
+        3,
+        4,
+        2,
+        1,
+        5
+      ],
+      "duration": 26.265
+    }
+  ],
+  "postQuestions": {
+    "q1": "Note: I use the word 'disturbance' to describe wavering and general non-stability of a shape.\n\nbetween different shapes: 1) Different shapes have different 'risky' types of disturbance, where 'riskiness' is defined as the likelihood to generate a misunderstanding of the intended shape. For example, an emoticon face > ^ < (it was something like this but I don't have characters for it) if disturbed by a horizontal oscillation is more likely to become meaningless or than a smile by horizontal oscillation because there's more ways to interpret the arrow symbols, but a '=>' smile in vertical oscillation would be less recognizable to me personally than the other emoticon face. 2) Some shapes are more robust to disturbances in position than others. It doesn't just seem to be the simpleness of the shape, as an S is reasonably complex but is more recognizeable than an emoticon if disturbed a few millimeters away from its intended representation, but the simpleness also does help most of the time (like the x).\n\nBetween instances of the same shape: As mentioned above, the 'risky' disturbance directions were different for different shapes. I'll enumerate what I recall below but in general, shapes that were largely stable were easiest to recognize and most comfortable to look at, and in a larger context (with more shapes) I would prefer those more 'stable' static representations, but for each shape individually most representations even with disturbances were still very recognizeable. I would describe the most recognizeably shapes as wavering or oscillating.\nSpecific 'quality issues' for different shapes\n1) For various instances of the arrow, if the - moved too far from the > horizontally, it lost its meaning and if the - moved up or down relative to the > it was also a lot less clear it was supposed to be an arrow.\n2)S: diagonal disturbances were worst and oscillation was uncomfortabe visually because of how many pieces there were\n3) => smile: mostly recognizeable, but because the smile part was just two lines if it went up and down vertically it became kind of unintelligble and if the tops went too wide it was also unintelligble\n4) <^> (something like this) face: Very susceptible to quality impairment from disturbance in most directions because the recognizeability comes from the standardization of the symbols on a keyboard because it's a made-up symbol we only see in that context."
+  }
+}

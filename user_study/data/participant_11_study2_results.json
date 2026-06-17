@@ -1,0 +1,231 @@
+{
+  "participantId": 11,
+  "studyType": 2,
+  "age": 27,
+  "gender": "Male",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 7,
+        "5": 3
+      },
+      "displayOrder": [
+        4,
+        2,
+        1,
+        5,
+        3
+      ],
+      "duration": 170.722
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 7
+      },
+      "displayOrder": [
+        2,
+        1,
+        4,
+        3,
+        5
+      ],
+      "duration": 44.564
+    },
+    {
+      "trialIndex": 2,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 9
+      },
+      "displayOrder": [
+        5,
+        1,
+        3,
+        2,
+        4
+      ],
+      "duration": 37.437
+    },
+    {
+      "trialIndex": 3,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 8
+      },
+      "displayOrder": [
+        2,
+        5,
+        1,
+        3,
+        4
+      ],
+      "duration": 36.628
+    },
+    {
+      "trialIndex": 4,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 7,
+        "5": 3
+      },
+      "displayOrder": [
+        3,
+        1,
+        2,
+        4,
+        5
+      ],
+      "duration": 30.933
+    },
+    {
+      "trialIndex": 5,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 8
+      },
+      "displayOrder": [
+        2,
+        3,
+        5,
+        4,
+        1
+      ],
+      "duration": 19.799
+    },
+    {
+      "trialIndex": 6,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 10,
+        "5": 7
+      },
+      "displayOrder": [
+        4,
+        2,
+        5,
+        1,
+        3
+      ],
+      "duration": 21.365
+    },
+    {
+      "trialIndex": 7,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 8,
+        "5": 5
+      },
+      "displayOrder": [
+        5,
+        4,
+        2,
+        1,
+        3
+      ],
+      "duration": 30.167
+    },
+    {
+      "trialIndex": 8,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 8
+      },
+      "displayOrder": [
+        5,
+        2,
+        3,
+        1,
+        4
+      ],
+      "duration": 17.002
+    },
+    {
+      "trialIndex": 9,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 9,
+        "5": 7
+      },
+      "displayOrder": [
+        1,
+        5,
+        3,
+        4,
+        2
+      ],
+      "duration": 17.228
+    },
+    {
+      "trialIndex": 10,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 9,
+        "4": 10,
+        "5": 3
+      },
+      "displayOrder": [
+        3,
+        5,
+        4,
+        2,
+        1
+      ],
+      "duration": 24.366
+    }
+  ],
+  "postQuestions": {
+    "q1": "the shapes which had connected components which moved independently seemed to be much more affected by the motion than the shapes which were multiple disconnected pieces.\n"
+  }
+}

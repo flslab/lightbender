@@ -1,0 +1,231 @@
+{
+  "participantId": 21,
+  "studyType": 2,
+  "age": 27,
+  "gender": "Male",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 8,
+        "4": 3,
+        "5": 1
+      },
+      "displayOrder": [
+        1,
+        5,
+        3,
+        4,
+        2
+      ],
+      "duration": 164.227
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 10,
+        "3": 7,
+        "4": 3,
+        "5": 1
+      },
+      "displayOrder": [
+        2,
+        4,
+        1,
+        3,
+        5
+      ],
+      "duration": 56.328
+    },
+    {
+      "trialIndex": 2,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 9,
+        "3": 10,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        3,
+        1,
+        4,
+        2,
+        5
+      ],
+      "duration": 45.933
+    },
+    {
+      "trialIndex": 3,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 6,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        3,
+        5,
+        2,
+        4,
+        1
+      ],
+      "duration": 34.365
+    },
+    {
+      "trialIndex": 4,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 7,
+        "4": 3,
+        "5": 1
+      },
+      "displayOrder": [
+        1,
+        3,
+        5,
+        2,
+        4
+      ],
+      "duration": 34.465
+    },
+    {
+      "trialIndex": 5,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 7,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        4,
+        5,
+        3,
+        1
+      ],
+      "duration": 41.466
+    },
+    {
+      "trialIndex": 6,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 2,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        1,
+        4,
+        5,
+        3
+      ],
+      "duration": 28.732
+    },
+    {
+      "trialIndex": 7,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 7,
+        "4": 2,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        3,
+        5,
+        1,
+        2
+      ],
+      "duration": 28.431
+    },
+    {
+      "trialIndex": 8,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 9,
+        "4": 7,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        4,
+        2,
+        3,
+        5
+      ],
+      "duration": 30.765
+    },
+    {
+      "trialIndex": 9,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 6,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        3,
+        2,
+        1,
+        5
+      ],
+      "duration": 32.132
+    },
+    {
+      "trialIndex": 10,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 2,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        5,
+        1,
+        3,
+        2
+      ],
+      "duration": 33.102
+    }
+  ],
+  "postQuestions": {
+    "q1": "Yes, some of the shapes were distorted a lot; some of the shapes seemed more blurry than others."
+  }
+}

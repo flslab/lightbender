@@ -1,0 +1,231 @@
+{
+  "participantId": 1,
+  "studyType": 2,
+  "age": 25,
+  "gender": "Male",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 10,
+        "3": 9,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        4,
+        1,
+        5,
+        3
+      ],
+      "duration": 155.53
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 8,
+        "4": 6,
+        "5": 3
+      },
+      "displayOrder": [
+        1,
+        5,
+        3,
+        4,
+        2
+      ],
+      "duration": 26.926
+    },
+    {
+      "trialIndex": 2,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 10,
+        "3": 6,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        2,
+        5,
+        1,
+        3
+      ],
+      "duration": 23.266
+    },
+    {
+      "trialIndex": 3,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 9,
+        "4": 6,
+        "5": 2
+      },
+      "displayOrder": [
+        2,
+        1,
+        3,
+        4,
+        5
+      ],
+      "duration": 17.132
+    },
+    {
+      "trialIndex": 4,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 8,
+        "2": 10,
+        "3": 7,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        3,
+        2,
+        1,
+        5,
+        4
+      ],
+      "duration": 21.765
+    },
+    {
+      "trialIndex": 5,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 6,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        4,
+        3,
+        5,
+        2
+      ],
+      "duration": 30.999
+    },
+    {
+      "trialIndex": 6,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 10,
+        "4": 6,
+        "5": 1
+      },
+      "displayOrder": [
+        1,
+        3,
+        4,
+        2,
+        5
+      ],
+      "duration": 20.761
+    },
+    {
+      "trialIndex": 7,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 6,
+        "2": 8,
+        "3": 10,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        3,
+        5,
+        2,
+        1
+      ],
+      "duration": 14.767
+    },
+    {
+      "trialIndex": 8,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 6,
+        "3": 8,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        3,
+        2,
+        4,
+        5
+      ],
+      "duration": 57.997
+    },
+    {
+      "trialIndex": 9,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        5,
+        4,
+        2,
+        1,
+        3
+      ],
+      "duration": 20.328
+    },
+    {
+      "trialIndex": 10,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 6,
+        "5": 0
+      },
+      "displayOrder": [
+        3,
+        2,
+        1,
+        4,
+        5
+      ],
+      "duration": 12.832
+    }
+  ],
+  "postQuestions": {
+    "q1": "The ones that I marked as good were the steadier ones, whose pieces didn't break. For the shapes that resembled a connected part, this difference was clearer; for others, I had a higher tolerance."
+  }
+}

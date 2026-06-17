@@ -1,0 +1,231 @@
+{
+  "participantId": 5,
+  "studyType": 2,
+  "age": 27,
+  "gender": "Male",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 2,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        2,
+        3,
+        5,
+        4
+      ],
+      "duration": 147.528
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 8,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        2,
+        5,
+        3,
+        4
+      ],
+      "duration": 54.231
+    },
+    {
+      "trialIndex": 2,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 5,
+        "4": 10,
+        "5": 2
+      },
+      "displayOrder": [
+        4,
+        1,
+        2,
+        5,
+        3
+      ],
+      "duration": 28.297
+    },
+    {
+      "trialIndex": 3,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        1,
+        3,
+        4,
+        5
+      ],
+      "duration": 30.365
+    },
+    {
+      "trialIndex": 4,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 5,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        4,
+        2,
+        5,
+        3
+      ],
+      "duration": 31.362
+    },
+    {
+      "trialIndex": 5,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 8,
+        "2": 10,
+        "3": 10,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        5,
+        3,
+        1,
+        2,
+        4
+      ],
+      "duration": 42.165
+    },
+    {
+      "trialIndex": 6,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 7,
+        "2": 10,
+        "3": 8,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        5,
+        2,
+        3,
+        1,
+        4
+      ],
+      "duration": 21.765
+    },
+    {
+      "trialIndex": 7,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        2,
+        4,
+        3,
+        5
+      ],
+      "duration": 20.832
+    },
+    {
+      "trialIndex": 8,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 7,
+        "5": 2
+      },
+      "displayOrder": [
+        1,
+        4,
+        5,
+        2,
+        3
+      ],
+      "duration": 26.06
+    },
+    {
+      "trialIndex": 9,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 10,
+        "4": 8,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        3,
+        4,
+        5,
+        1
+      ],
+      "duration": 19.564
+    },
+    {
+      "trialIndex": 10,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 8,
+        "4": 8,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        4,
+        3,
+        1,
+        5
+      ],
+      "duration": 22.261
+    }
+  ],
+  "postQuestions": {
+    "q1": "Beyond the movements of separate parts, some lines were rather blurry in some shapes, but nothing too different beyond these two."
+  }
+}

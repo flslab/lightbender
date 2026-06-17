@@ -1,0 +1,231 @@
+{
+  "participantId": 4,
+  "studyType": 2,
+  "age": 18,
+  "gender": "Male",
+  "results": [
+    {
+      "trialIndex": 0,
+      "shape": "x",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 7,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        1,
+        5,
+        2,
+        3
+      ],
+      "duration": 116.428
+    },
+    {
+      "trialIndex": 1,
+      "shape": "y",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 8,
+        "3": 8,
+        "4": 8,
+        "5": 2
+      },
+      "displayOrder": [
+        2,
+        3,
+        4,
+        5,
+        1
+      ],
+      "duration": 65.128
+    },
+    {
+      "trialIndex": 2,
+      "shape": "s",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 2,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        3,
+        2,
+        5,
+        1
+      ],
+      "duration": 41.165
+    },
+    {
+      "trialIndex": 3,
+      "shape": "a",
+      "repetition": 1,
+      "ratings": {
+        "1": 10,
+        "2": 6,
+        "3": 9,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        1,
+        3,
+        2,
+        5
+      ],
+      "duration": 40.499
+    },
+    {
+      "trialIndex": 4,
+      "shape": "e",
+      "repetition": 1,
+      "ratings": {
+        "1": 9,
+        "2": 9,
+        "3": 10,
+        "4": 6,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        3,
+        4,
+        2,
+        5
+      ],
+      "duration": 50.663
+    },
+    {
+      "trialIndex": 5,
+      "shape": "s",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 7,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        3,
+        5,
+        2,
+        1
+      ],
+      "duration": 41.666
+    },
+    {
+      "trialIndex": 6,
+      "shape": "a",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 10,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        1,
+        2,
+        5,
+        3,
+        4
+      ],
+      "duration": 31.166
+    },
+    {
+      "trialIndex": 7,
+      "shape": "e",
+      "repetition": 2,
+      "ratings": {
+        "1": 10,
+        "2": 9,
+        "3": 8,
+        "4": 5,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        4,
+        1,
+        5,
+        3
+      ],
+      "duration": 55.733
+    },
+    {
+      "trialIndex": 8,
+      "shape": "s",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 10,
+        "3": 5,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        2,
+        3,
+        5,
+        4,
+        1
+      ],
+      "duration": 41.163
+    },
+    {
+      "trialIndex": 9,
+      "shape": "a",
+      "repetition": 3,
+      "ratings": {
+        "1": 10,
+        "2": 6,
+        "3": 9,
+        "4": 3,
+        "5": 0
+      },
+      "displayOrder": [
+        4,
+        1,
+        2,
+        3,
+        5
+      ],
+      "duration": 38.232
+    },
+    {
+      "trialIndex": 10,
+      "shape": "e",
+      "repetition": 3,
+      "ratings": {
+        "1": 9,
+        "2": 10,
+        "3": 8,
+        "4": 4,
+        "5": 0
+      },
+      "displayOrder": [
+        5,
+        1,
+        3,
+        4,
+        2
+      ],
+      "duration": 60.666
+    }
+  ],
+  "postQuestions": {
+    "q1": "colors, shapes and speed of movement"
+  }
+}
