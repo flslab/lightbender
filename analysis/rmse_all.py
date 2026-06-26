@@ -415,6 +415,14 @@ class DroneProcessor:
         else:
             self.viewpoint_offset = np.array([0.0, 0.0, 0.0])
 
+        if 'reference_offsets' in data and len(data['reference_offsets']) > 0:
+            vp_data = data['reference_offsets']
+            if isinstance(vp_data[0], list) and 'start_times' in data:
+                self.viewpoint_offset += np.array(vp_data[self.time_range_index])
+            else:
+                self.viewpoint_offset += np.array(vp_data)
+
+
         for frame in data['frames']:
             t = frame['time']
             if self.start_time <= t <= self.stop_time:
