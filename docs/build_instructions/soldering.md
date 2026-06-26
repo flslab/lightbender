@@ -31,9 +31,7 @@ Cut the wires from motor to desired length.
 
 Step 2: Cut the mulex wires as shown below.
 
-<div>
-<img src="../img/mulex_wires.jpg" width="600" />
-</div>
+![Cutting the mulex wires.](../img/mulex_wires.jpg)
 
 Step 3: Cut the XT30 power wires from the ESC to desired length(around 2 inch or 5 cm).
 
@@ -51,9 +49,7 @@ Step 9: Cut two strips of 24 and 26 LEDs from LED strip. When cutting make sure 
 
 Step 10: Remove the 3-pin connectors from the flight controller. First remove the plastic housing gently using a plier, and then remove the pins using a soldering iron.
 
-<div>
-<img src="../../img/fc_remove_connector.jpeg" width="600" />
-</div>
+![Removing plastic housings.](../img/fc_remove_connector.jpeg)
 
 Step 11: Desolder the power wires from the FC.
 
@@ -61,9 +57,7 @@ Step 11: Desolder the power wires from the FC.
 
 Step 12: Solder wire B to the FC.
 
-<div>
-<img src="../img/fc_power_2.jpeg" width="600" />
-</div>
+![Soldering power cables to the FC.](../img/fc_power_2.jpeg)
 
 Step 13: Solder the capacitor and XT30 power wires to the bottom side of the ESC.
 
@@ -75,9 +69,7 @@ Step 16: Solder the motor signal wires from step 4 to the FC. Make sure you conn
 
 Step 17: Pass the motor signal wires through the frame and solder them to the corresponding motor posts on the ESC. Refer to the image below.
 
-<div>
-<img src="../img/motor_signal_wires.jpg" width="600" />
-</div>
+![Wring motors.](../img/motor_signal_wires.jpg)
 
 Step 18: Connect the FC anttena to the coaxical connector labeled as A on the top of the flight controller. Mount the flight controller on the frame using the 8mm screws and rubber balls.
 
@@ -85,9 +77,7 @@ Step 19: Solder motor wires from the motors to the ESC. Refer to the image above
 
 Finally your frame should look like this:
 
-<div>
-<img src="../img/assembled_frame.jpeg" width="600" />
-</div>
+![Assembled frame.](../img/assembled_frame.jpeg)
 
 ## RPi Baseboard and Power Assembly
 
