@@ -23,6 +23,7 @@ class DispatcherUI(tk.Tk):
         
         self.viewpoint_var = tk.IntVar(value=-1)
         self.anchor_var = tk.IntVar(value=-1)
+        self.reference_var = tk.IntVar(value=-1)
         
         # Header label
         header = tk.Label(self, text="Automated Swarm Dispatcher\nClick a drone, then another to swap ID assignments.",
@@ -36,10 +37,10 @@ class DispatcherUI(tk.Tk):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(20, 10), pady=10)
 
         if self.outliers:
-            sidebar = tk.Frame(main_frame, bg="#2A2A2A", width=300)
+            sidebar = tk.Frame(main_frame, bg="#2A2A2A", width=360)
             sidebar.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 20), pady=10)
             
-            lbl_outliers = tk.Label(sidebar, text="Unassigned Markers\n(Viewpoint / Anchor)", 
+            lbl_outliers = tk.Label(sidebar, text="Unassigned Markers\n(Viewpoint / Anchor / Reference)", 
                                     bg="#2A2A2A", fg="#FFFFFF", font=("Arial", 12, "bold"))
             lbl_outliers.pack(pady=(10, 5))
 
@@ -48,16 +49,24 @@ class DispatcherUI(tk.Tk):
             tk.Label(hdr_frame, text="Coordinates", bg="#2A2A2A", fg="#AAAAAA", width=15).pack(side=tk.LEFT)
             tk.Label(hdr_frame, text="View ", bg="#2A2A2A", fg="#AAAAAA", width=5).pack(side=tk.LEFT)
             tk.Label(hdr_frame, text="Anchor", bg="#2A2A2A", fg="#AAAAAA", width=5).pack(side=tk.LEFT)
+            tk.Label(hdr_frame, text="Reference", bg="#2A2A2A", fg="#AAAAAA", width=9).pack(side=tk.LEFT)
+
+            def clear_conflicting_selection(selected_var):
+                selected = selected_var.get()
+                if selected == -1:
+                    return
+                for var in (self.viewpoint_var, self.anchor_var, self.reference_var):
+                    if var is not selected_var and var.get() == selected:
+                        var.set(-1)
 
             def on_vp_select():
-                v = self.viewpoint_var.get()
-                if v != -1 and self.anchor_var.get() == v:
-                    self.anchor_var.set(-1)
+                clear_conflicting_selection(self.viewpoint_var)
 
             def on_an_select():
-                a = self.anchor_var.get()
-                if a != -1 and self.viewpoint_var.get() == a:
-                    self.viewpoint_var.set(-1)
+                clear_conflicting_selection(self.anchor_var)
+
+            def on_ref_select():
+                clear_conflicting_selection(self.reference_var)
 
             for i, p in enumerate(self.outliers):
                 row_frame = tk.Frame(sidebar, bg="#2A2A2A")
@@ -72,9 +81,12 @@ class DispatcherUI(tk.Tk):
 
                 an_radio = tk.Radiobutton(row_frame, variable=self.anchor_var, value=i, bg="#2A2A2A", activebackground="#2A2A2A", command=on_an_select)
                 an_radio.pack(side=tk.LEFT, padx=(5, 10))
+
+                ref_radio = tk.Radiobutton(row_frame, variable=self.reference_var, value=i, bg="#2A2A2A", activebackground="#2A2A2A", command=on_ref_select)
+                ref_radio.pack(side=tk.LEFT, padx=(5, 10))
                 
             clear_btn = tk.Button(sidebar, text="Clear Selections", 
-                                  command=lambda: (self.viewpoint_var.set(-1), self.anchor_var.set(-1)),
+                                  command=lambda: (self.viewpoint_var.set(-1), self.anchor_var.set(-1), self.reference_var.set(-1)),
                                   bg="#555555", fg="white")
             clear_btn.pack(pady=10)
         
@@ -102,10 +114,13 @@ class DispatcherUI(tk.Tk):
         if self.outliers:
             v_idx = self.viewpoint_var.get()
             a_idx = self.anchor_var.get()
+            r_idx = self.reference_var.get()
             if v_idx != -1:
                 self.extra_params['viewpoint'] = self.outliers[v_idx]
             if a_idx != -1:
                 self.extra_params['anchor'] = self.outliers[a_idx]
+            if r_idx != -1:
+                self.extra_params['reference'] = self.outliers[r_idx]
         self.quit()
 
     def cancel(self):
@@ -123,7 +138,7 @@ class DispatcherUI(tk.Tk):
 
         # Delete tkinter Variables while the Tk interpreter is still alive to prevent
         # "main thread is not in main loop" / Tcl_AsyncDelete errors during GC cleanup.
-        for attr in ('viewpoint_var', 'anchor_var'):
+        for attr in ('viewpoint_var', 'anchor_var', 'reference_var'):
             if hasattr(self, attr):
                 delattr(self, attr)
 

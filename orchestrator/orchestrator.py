@@ -227,7 +227,7 @@ class SwarmOrchestrator:
         led_count = drone.get('led_count', 50)
         init_yaw = drone.get('init_yaw', 0)
         ground_test = drone.get('ground_test', False)
-        marker_id = drone.get('marker_id')
+        marker_id = drone.get('marker_id', -1)
         target_id = 0
         if drone_mission.get('relative_anchor'):
             anchor_id = drone_mission['relative_anchor']['id']
@@ -242,6 +242,7 @@ class SwarmOrchestrator:
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud --init-yaw {init_yaw} "
             
         viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        reference_arg = f"--reference {drone['reference'][0]} {drone['reference'][1]} {drone['reference'][2]} " if 'reference' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
         smooth_controller_rate = f"--smooth-controller-rate 100"
@@ -263,6 +264,7 @@ class SwarmOrchestrator:
             f"--target-id {target_id} " if target_id is not None else "",
             f"{viewpoint_arg}",
             f"{anchor_arg}",
+            f"{reference_arg}",
             f"--drone-id {drone['id']} ",
             f"{tracker_arg}",
             f"--led --led-brightness 0.5 --led-count {led_count} " if led_count > 0 else " ",
@@ -270,8 +272,8 @@ class SwarmOrchestrator:
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
             f"--takeoff-altitude {alt} ",
             f"{smooth_controller_rate}",
-            "--enable-tracker-kf  --tracker-encoder-rate 50 --tracker-camera-rate 100",
-            "--velocity-p 2.0",
+            "--enable-tracker-kf  --tracker-encoder-rate 50 --tracker-camera-rate 120 --tracker-res 400",
+            "--velocity-p 1.0",
             "--log ",
             f"--ground-test" if ground_test else "",
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
@@ -667,7 +669,7 @@ class SwarmOrchestrator:
                     args=(self.logger, self.running, self.tag)  #
                 )
             if self.camera_cfg:
-                if not self.args.ground and not self.args.skip_record:
+                if not self.args.skip_record:
                     self._boot_remote_node(self.camera_cfg, self._get_camera_cmd(), "Camera")
             else:
                 self.logger.warning("No camera_node found. Skipping.")
@@ -860,7 +862,7 @@ class SwarmOrchestrator:
         self.running.clear()
 
         # Stop Camera
-        if self.camera_cfg and self.pub_socket and not self.args.ground and not self.args.skip_record:
+        if self.camera_cfg and self.pub_socket and not self.args.skip_record:
             self.logger.info("Stopping Camera...")
             self.pub_socket.send_json({"cmd": "STOP_CAMERA"})
             time.sleep(2)

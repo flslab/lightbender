@@ -118,6 +118,8 @@ def run_dispatch(manifest_drones, mission_data, vicon_host="192.168.1.39", mock=
                 drone['viewpoint'] = [vp[0] + offset_x, vp[1] + offset_y, vp[2] + offset_z]
             if extra_params.get('anchor'):
                 drone['anchor'] = extra_params['anchor']
+            if extra_params.get('reference'):
+                drone['reference'] = extra_params['reference']
         updated_drones.append(drone)
         
     return updated_drones
