@@ -52,7 +52,7 @@ Step 9: Cut two strips of 24 and 26 LEDs from LED strip. When cutting make sure 
 Step 10: Remove the 3-pin connectors from the flight controller. First remove the plastic housing gently using a plier, and then remove the pins using a soldering iron.
 
 <div>
-<img src="../img/fc_remove_connector.jpeg" width="600" />
+<img src="../../img/fc_remove_connector.jpeg" width="600" />
 </div>
 
 Step 11: Desolder the power wires from the FC.
@@ -109,4 +109,3 @@ Step 27: Connect the data pin of the 26-LED strip to the data pin of the 24-LED 
 
 Step 28: Solder the 3-wire female connector to the other ends of the magnet wires. There should be 2 ground wires, 2 5V wires and one data wire. Use heat shring tubings to cover the connections.
 
-## Gearbox Assembly

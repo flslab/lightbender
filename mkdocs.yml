@@ -1,0 +1,4 @@
+site_name: Lightbender Documentation
+site_url: https://flslab.github.io/lightbender
+theme:
+  name: material
