@@ -1058,6 +1058,13 @@ class DroneProperties(bpy.types.PropertyGroup):
         default=""
     )
 
+    import_mission_filepath: StringProperty(
+        name="Mission YAML",
+        description="Path to the mission YAML file to import",
+        subtype="FILE_PATH",
+        default=""
+    )
+
     import_max_width: FloatProperty(
         name="Max Width",
         description="Maximum width for the scaled layout",
@@ -1656,6 +1663,46 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         drone_base.select_set(True)
         context.view_layer.objects.active = drone_base
 
+        return {'FINISHED'}
+
+
+class DRONE_OT_delete_all(bpy.types.Operator):
+    """Delete all LightBenders and their components from the scene"""
+    bl_idname = "drone.delete_all"
+    bl_label = "Delete All LightBenders"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        # Find all LightBenders (bases). They are empty objects with "servo_1" and "servo_2" properties.
+        lbs = [obj for obj in scene.objects if "servo_1" in obj and "servo_2" in obj]
+        to_delete = set()
+        for lb in lbs:
+            def collect_hierarchy(o):
+                to_delete.add(o)
+                for child in o.children:
+                    collect_hierarchy(child)
+            collect_hierarchy(lb)
+
+        if not to_delete:
+            self.report({'INFO'}, "No LightBenders found to delete")
+            return {'FINISHED'}
+
+        # Deselect all
+        bpy.ops.object.select_all(action='DESELECT')
+        # Select all collected objects
+        for obj in to_delete:
+            obj.select_set(True)
+        
+        # Delete them
+        bpy.ops.object.delete()
+        
+        # Trigger redraw of viewports
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+        self.report({'INFO'}, f"Deleted {len(to_delete)} objects (LightBenders and components)")
         return {'FINISHED'}
 
 
@@ -3444,6 +3491,308 @@ class DRONE_OT_force_update(bpy.types.Operator):
                 area.tag_redraw()
         return {'FINISHED'}
 
+# ------------------------------------------------------------------------
+#    Mission Import Helpers
+# ------------------------------------------------------------------------
+
+def parse_pointer_formula(formula, num_pointers):
+    """Parse a compiled pointer formula back into base_color + per-pointer color expressions.
+
+    The formula produced by build_led_formula looks like:
+        (base_color) if i < p0 else (color0) if i < p1 else (color1)
+    This function extracts the base_color and each pointer's color expression.
+
+    Returns:
+        (base_color_str, [color_expr_0, color_expr_1, ...]) or None if parsing fails.
+    """
+    if not formula or num_pointers <= 0:
+        return None
+
+    try:
+        # Pattern: (base_color) if i < p0 else (c0) if i < p1 else (c1) ...
+        # Split on " if i < p" boundaries
+        # First segment: base color
+        parts = re.split(r'\)\s+if\s+i\s*<\s*p\d+\s+else\s+', formula)
+        if len(parts) < 2:
+            return None
+
+        # base_color is the first part, strip leading '('
+        base_color = parts[0].strip()
+        if base_color.startswith('('):
+            base_color = base_color[1:]
+        base_color = base_color.strip()
+
+        # Each subsequent part is a color expression, possibly followed by another condition
+        color_expressions = []
+        for i, part in enumerate(parts[1:]):
+            # The last part has no trailing condition
+            # Middle parts may end with ')' from the parenthesizing
+            expr = part.strip()
+            if expr.endswith(')'):
+                # Check if it's a balanced expression or just trailing paren
+                # For simple cases like ([255, 0, 0]), the paren is part of the expression
+                # For compound cases, we need to balance
+                open_count = expr.count('(')
+                close_count = expr.count(')')
+                if close_count > open_count:
+                    # Remove excess trailing parens
+                    excess = close_count - open_count
+                    expr = expr[:len(expr) - excess]
+            expr = expr.strip()
+            if expr.startswith('('):
+                expr = expr[1:]
+            if expr.endswith(')'):
+                open_count = expr.count('(')
+                close_count = expr.count(')')
+                if close_count > open_count:
+                    excess = close_count - open_count
+                    expr = expr[:len(expr) - excess]
+            color_expressions.append(expr.strip())
+
+        if len(color_expressions) == num_pointers:
+            return (base_color, color_expressions)
+        elif len(color_expressions) > num_pointers:
+            return (base_color, color_expressions[:num_pointers])
+        else:
+            # Pad with last expression if we got fewer than expected
+            while len(color_expressions) < num_pointers:
+                color_expressions.append(color_expressions[-1] if color_expressions else "[255, 255, 255]")
+            return (base_color, color_expressions)
+    except Exception:
+        return None
+
+
+def infer_drone_type_from_servos(s1, s2, manifest_types=None, drone_name=None):
+    """Infer the LightBender type from servo values.
+
+    Args:
+        s1, s2: servo values from the first waypoint
+        manifest_types: optional dict mapping drone id -> type string ('H', 'V', 'RING', 'SEMI_H', 'SEMI_V')
+        drone_name: the drone id from the YAML (e.g. 'lb4')
+
+    Returns:
+        Blender drone type enum string (e.g. 'TYPE_H', 'TYPE_V', 'TYPE_RING')
+    """
+    # Check manifest first if available
+    if manifest_types and drone_name and drone_name in manifest_types:
+        t = manifest_types[drone_name]
+        type_map = {
+            'H': 'TYPE_H', 'V': 'TYPE_V',
+            'SEMI_H': 'TYPE_SEMI_H', 'SEMI_V': 'TYPE_SEMI_V',
+            'RING': 'TYPE_RING',
+        }
+        if t in type_map:
+            return type_map[t]
+
+    # Fallback: infer from servo values
+    if s1 == 0.0 and s2 == 0.0:
+        return 'TYPE_RING'
+    if 0.0 <= s1 <= 180.0 and 180.0 <= s2 <= 360.0:
+        return 'TYPE_H'
+    if 90.0 <= s1 <= 270.0 and 270.0 <= s2 <= 450.0:
+        return 'TYPE_V'
+    return 'TYPE_H'
+
+
+# ------------------------------------------------------------------------
+#    Import Operator
+# ------------------------------------------------------------------------
+
+class IMPORT_OT_mission_yaml(bpy.types.Operator):
+    """Import a mission YAML file and recreate LightBenders with keyframes"""
+    bl_idname = "drone.import_mission_yaml"
+    bl_label = "Import Mission YAML"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+        fps = scene.render.fps
+
+        filepath = bpy.path.abspath(props.import_mission_filepath)
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, "No valid file selected in the Mission YAML field")
+            return {'CANCELLED'}
+
+        # --- Parse YAML via external python (Blender may lack PyYAML) ---
+        def load_yaml_safe(fpath):
+            try:
+                cmd = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{fpath}'"
+                json_str = subprocess.check_output(["/bin/zsh", "-l", "-c", cmd], text=True)
+                return json.loads(json_str)
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to parse YAML: {e}")
+                return None
+
+        mission_data = load_yaml_safe(filepath)
+        if mission_data is None:
+            return {'CANCELLED'}
+
+        drones_dict = mission_data.get('drones')
+        if not drones_dict or not isinstance(drones_dict, dict):
+            self.report({'ERROR'}, "YAML has no 'drones' dictionary")
+            return {'CANCELLED'}
+
+        # --- Load manifest for type inference if available ---
+        manifest_types = {}
+        manifest_path = bpy.path.abspath(props.import_manifest_filepath)
+        if manifest_path and os.path.isfile(manifest_path):
+            manifest_data = load_yaml_safe(manifest_path)
+            if manifest_data:
+                for d in manifest_data.get('drones', []):
+                    drone_id = d.get('id', '')
+                    drone_type = d.get('type', '')
+                    if drone_id and drone_type:
+                        manifest_types[drone_id] = drone_type
+
+        # --- Set mission name ---
+        mission_name = mission_data.get('name', '')
+        if mission_name:
+            props.export_mission_name = mission_name
+
+        # --- Track max frame for timeline ---
+        max_frame = scene.frame_start
+        start_frame = scene.frame_start
+
+        # --- Create each LightBender ---
+        created_count = 0
+        for drone_name, drone_data in drones_dict.items():
+            if not isinstance(drone_data, dict):
+                continue
+
+            # --- Extract data ---
+            target = drone_data.get('target', [0, 0, 0, 0])
+            waypoints = drone_data.get('waypoints', [])
+            delta_t = drone_data.get('delta_t', 0.0)
+            servos_list = drone_data.get('servos', [])
+            pointers_list = drone_data.get('pointers', [])
+            led_data = drone_data.get('led', {})
+            formula = led_data.get('formula', '') if isinstance(led_data, dict) else ''
+
+            # --- Determine drone type ---
+            s1_init = servos_list[0][0] if servos_list and len(servos_list[0]) >= 2 else 0.0
+            s2_init = servos_list[0][1] if servos_list and len(servos_list[0]) >= 2 else 0.0
+            drone_type = infer_drone_type_from_servos(s1_init, s2_init, manifest_types, drone_name)
+
+            # --- Create the LightBender ---
+            bpy.ops.drone.add_drone(drone_type=drone_type)
+            obj = context.active_object
+            obj.name = drone_name
+
+            # --- Set initial position from target ---
+            tx = float(target[0]) if len(target) > 0 else 0.0
+            ty = float(target[1]) if len(target) > 1 else 0.0
+            tz = float(target[2]) if len(target) > 2 else 0.0
+            tyaw = float(target[3]) if len(target) > 3 else 0.0
+
+            obj.location = (tx, ty, tz)
+            obj.rotation_euler.z = tyaw
+
+            # --- Set servo values ---
+            obj["servo_1"] = s1_init
+            obj["servo_2"] = s2_init
+
+            # --- Reconstruct LED Pointers ---
+            num_ptrs = 0
+            if pointers_list and len(pointers_list) > 0:
+                first_pointer_set = pointers_list[0]
+                num_ptrs = len(first_pointer_set) if isinstance(first_pointer_set, list) else 0
+
+            if num_ptrs > 0:
+                obj.drone_props.led_mode = 'POINTERS'
+
+                # Parse the formula to extract color expressions
+                parsed = parse_pointer_formula(formula, num_ptrs)
+
+                if parsed:
+                    base_color, color_exprs = parsed
+                    obj.drone_props.led_base_color = base_color
+                else:
+                    obj.drone_props.led_base_color = "[0, 0, 0]"
+                    color_exprs = ["[255, 255, 255]"] * num_ptrs
+
+                # Create pointer entries
+                obj.drone_props.led_pointers.clear()
+                for p_idx in range(num_ptrs):
+                    ptr = obj.drone_props.led_pointers.add()
+                    ptr.value = float(first_pointer_set[p_idx])
+                    ptr.color_expression = color_exprs[p_idx] if p_idx < len(color_exprs) else "[255, 255, 255]"
+            else:
+                # No pointers — use expression mode
+                obj.drone_props.led_mode = 'EXPRESSION'
+                obj.drone_props.led_formula = formula
+
+            # --- Create Keyframes ---
+            if len(waypoints) > 1:
+                # Determine if this is keyframe mode (delta_t == 0, each wp has a dt element)
+                is_keyframe_mode = (delta_t == 0.0 or delta_t == 0)
+
+                current_time = 0.0  # seconds from start
+
+                for wp_idx, wp in enumerate(waypoints):
+                    if not isinstance(wp, (list, tuple)) or len(wp) < 4:
+                        continue
+
+                    wx, wy, wz, wyaw = float(wp[0]), float(wp[1]), float(wp[2]), float(wp[3])
+
+                    if is_keyframe_mode:
+                        # 5th element is dt (seconds since previous waypoint)
+                        wp_dt = float(wp[4]) if len(wp) > 4 else 0.0
+                        current_time += wp_dt
+                    else:
+                        current_time = wp_idx * delta_t
+
+                    frame = start_frame + round(current_time * fps)
+                    if frame > max_frame:
+                        max_frame = frame
+
+                    scene.frame_set(frame)
+
+                    # Set location and insert keyframe
+                    obj.location = (wx, wy, wz)
+                    obj.keyframe_insert(data_path="location", frame=frame)
+
+                    # Set yaw and insert keyframe
+                    obj.rotation_euler.z = wyaw
+                    obj.keyframe_insert(data_path="rotation_euler", index=2, frame=frame)
+
+                    # Set servos and insert keyframes
+                    if wp_idx < len(servos_list):
+                        s_pair = servos_list[wp_idx]
+                        if isinstance(s_pair, (list, tuple)) and len(s_pair) >= 2:
+                            obj["servo_1"] = float(s_pair[0])
+                            obj["servo_2"] = float(s_pair[1])
+                            obj.keyframe_insert(data_path='["servo_1"]', frame=frame)
+                            obj.keyframe_insert(data_path='["servo_2"]', frame=frame)
+
+                    # Keyframe pointer values
+                    if wp_idx < len(pointers_list) and num_ptrs > 0:
+                        ptr_vals = pointers_list[wp_idx]
+                        if isinstance(ptr_vals, (list, tuple)):
+                            for p_idx, p_val in enumerate(ptr_vals):
+                                if p_idx < len(obj.drone_props.led_pointers):
+                                    obj.drone_props.led_pointers[p_idx].value = float(p_val)
+                                    obj.drone_props.led_pointers[p_idx].keyframe_insert(
+                                        data_path="value", frame=frame)
+
+                # Set keyframe interpolation to linear
+                if obj.animation_data and obj.animation_data.action:
+                    for fcurve in obj.animation_data.action.fcurves:
+                        for kp in fcurve.keyframe_points:
+                            kp.interpolation = 'LINEAR'
+
+            created_count += 1
+
+        # --- Update scene timeline ---
+        if max_frame > scene.frame_end:
+            scene.frame_end = max_frame
+
+        scene.frame_set(start_frame)
+        context.view_layer.update()
+
+        self.report({'INFO'}, f"Imported {created_count} LightBenders from {os.path.basename(filepath)}")
+        return {'FINISHED'}
+
 
 # ------------------------------------------------------------------------
 #    Export Operator
@@ -4664,6 +5013,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             layout.prop(props, "ring_radius")
 
         row.operator("drone.add_drone", text="Create").drone_type = props.drone_type
+        layout.operator("drone.delete_all", text="Delete All LightBenders", icon='TRASH')
 
         layout.separator()
 
@@ -4727,12 +5077,27 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
         scene = context.scene
         props = scene.drone_props
 
+        # --- Shared Swarm Manifest (used by both SVG and Import Mission) ---
+        layout.prop(props, "import_manifest_filepath")
+
+        layout.separator()
+
+        # --- Import Mission YAML ---
+        layout.label(text="Import Mission YAML:", icon='IMPORT')
+        box = layout.box()
+        box.prop(props, "import_mission_filepath")
+        
+        row = box.row()
+        row.enabled = bool(props.import_mission_filepath.strip())
+        row.operator("drone.import_mission_yaml", text="Import Mission", icon='FILE_FOLDER')
+
+        layout.separator()
+
         # --- SVG to Layout ---
         layout.label(text="SVG Transform and Place:", icon='GRAPH')
         box = layout.box()
 
         box.prop(props, "import_svg_filepath")
-        box.prop(props, "import_manifest_filepath")
 
         row = box.row()
         row.prop(props, "import_max_width")
@@ -4746,7 +5111,9 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
         row.prop(props, "import_policy")
         row.prop(props, "import_color")
 
-        box.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
+        row = box.row()
+        row.enabled = bool(props.import_svg_filepath.strip())
+        row.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
 
 
 class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
@@ -5249,6 +5616,8 @@ classes = (
     DRONE_OT_remove_global_color,
     DRONE_OT_preset_colors,
     DRONE_OT_apply_global_expression,
+    IMPORT_OT_mission_yaml,
+    DRONE_OT_delete_all,
     EXPORT_OT_drone_yaml,
     EXPORT_OT_export_and_illuminate,
     DRONE_OT_stop_illuminate,
