@@ -3617,12 +3617,23 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
         # --- Parse YAML via external python (Blender may lack PyYAML) ---
         def load_yaml_safe(fpath):
             try:
-                cmd = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{fpath}'"
-                json_str = subprocess.check_output(["/bin/zsh", "-l", "-c", cmd], text=True)
-                return json.loads(json_str)
-            except Exception as e:
-                self.report({'ERROR'}, f"Failed to parse YAML: {e}")
-                return None
+                import yaml
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f)
+            except ImportError:
+                try:
+                    python_exec = get_controller_python()
+                    cmd = [
+                        python_exec,
+                        "-c",
+                        "import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8'))))",
+                        fpath
+                    ]
+                    json_str = subprocess.check_output(cmd, text=True)
+                    return json.loads(json_str)
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to parse YAML: {e}")
+                    return None
 
         mission_data = load_yaml_safe(filepath)
         if mission_data is None:
