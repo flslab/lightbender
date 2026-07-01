@@ -74,6 +74,8 @@ Select a **Light Element Type** from the drop-down, then click **Create**:
 
 When **Ring** is selected, a **Ring Radius** (m) field appears before the Create button.
 
+Click **Delete All LightBenders** to clear all LightBenders and their associated components from the active viewport.
+
 #### Selected LightBender Controls
 
 These controls appear when a LightBender object (`lb*`) is the active selection.
@@ -98,22 +100,33 @@ These controls appear when a LightBender object (`lb*`) is the active selection.
 
 ### Generative Layouts
 
-Automates swarm placement from an SVG file.
+Automates swarm placement from an SVG file or recreates layouts and animations by importing YAML mission files.
+
+At the very top of this panel, there is a shared **Swarm Manifest** path field. When specified, both the SVG Transform and Import Mission tools will use it to match drone IDs and resolve their hardware types.
+
+#### Import Mission YAML
+
+Recreates the LightBenders, servo angles, LED configurations (expressions or pointers), and keyframe animations from a previously exported YAML mission file.
+
+| Field | Description |
+|---|---|
+| **Mission YAML** | Path to the source mission YAML file to import. |
+
+Click **Import Mission** to parse the YAML and build the animation in the viewport. The button is disabled until a file is selected.
 
 #### SVG Transform and Place
 
-Reads an SVG shape and a swarm manifest and places LightBenders along the shape's strokes.
+Reads an SVG shape and places LightBenders along the shape's strokes using available LightBenders in the manifest. If there are not enough LightBenders in the manifest, it will insert additional LightBenders labeld as extra. 
 
 | Field | Description |
 |---|---|
 | **SVG File** | Path to the source SVG file. |
-| **Swarm Manifest** | Path to the YAML manifest that lists available drones and their types. |
 | **Max Width / Max Height** | Bounding box (m) to scale the SVG layout into. |
 | **Center X / Center Z** | World-space coordinates for the layout center. |
 | **Placement Policy** | **VFG** or **Set Cover** — algorithm used to place drones along the shape's strokes. |
 | **LED Color** | Python RGB list (e.g. `[255, 0, 0]`) applied to all placed drones. |
 
-Click **Transform and Place** to run the placement.
+Click **Transform and Place** to run the placement. The button is disabled until an SVG file is selected.
 
 ---
 
