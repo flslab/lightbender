@@ -3562,11 +3562,11 @@ def parse_pointer_formula(formula, num_pointers):
         return None
 
 
-def infer_drone_type_from_servos(s1, s2, manifest_types=None, drone_name=None):
-    """Infer the LightBender type from servo values.
+def infer_drone_type_from_servos(servos_list, manifest_types=None, drone_name=None):
+    """Infer the LightBender type from servo values across all waypoints.
 
     Args:
-        s1, s2: servo values from the first waypoint
+        servos_list: list of [s1, s2] servo value pairs
         manifest_types: optional dict mapping drone id -> type string ('H', 'V', 'RING', 'SEMI_H', 'SEMI_V')
         drone_name: the drone id from the YAML (e.g. 'lb4')
 
@@ -3584,13 +3584,42 @@ def infer_drone_type_from_servos(s1, s2, manifest_types=None, drone_name=None):
         if t in type_map:
             return type_map[t]
 
-    # Fallback: infer from servo values
-    if s1 == 0.0 and s2 == 0.0:
-        return 'TYPE_RING'
-    if 0.0 <= s1 <= 180.0 and 180.0 <= s2 <= 360.0:
-        return 'TYPE_H'
-    if 90.0 <= s1 <= 270.0 and 270.0 <= s2 <= 450.0:
-        return 'TYPE_V'
+    # Fallback: infer from all servo values
+    possible_types = {'TYPE_RING', 'TYPE_H', 'TYPE_V'}
+    if not servos_list:
+        servos_list = [[0.0, 0.0]]
+        
+    for s_pair in servos_list:
+        s1 = float(s_pair[0]) if len(s_pair) >= 1 else 0.0
+        s2 = float(s_pair[1]) if len(s_pair) >= 2 else 0.0
+        
+        compatible_for_pair = set()
+        if s1 == 0.0 and s2 == 0.0:
+            compatible_for_pair.add('TYPE_RING')
+        if 0.0 <= s1 <= 180.0 and 180.0 <= s2 <= 360.0:
+            compatible_for_pair.add('TYPE_H')
+        if 90.0 <= s1 <= 270.0 and 270.0 <= s2 <= 450.0:
+            compatible_for_pair.add('TYPE_V')
+            
+        possible_types.intersection_update(compatible_for_pair)
+        if not possible_types:
+            break
+            
+    if len(possible_types) == 1:
+        return possible_types.pop()
+    
+    # If decision was not unique fallback to see if there is H or V in the drone name
+    if drone_name:
+        name_upper = drone_name.upper()
+        if 'H' in name_upper and 'V' not in name_upper:
+            return 'TYPE_H'
+        elif 'V' in name_upper and 'H' not in name_upper:
+            return 'TYPE_V'
+        elif 'H' in name_upper:
+            return 'TYPE_H'
+        elif 'V' in name_upper:
+            return 'TYPE_V'
+
     return 'TYPE_H'
 
 
@@ -3683,7 +3712,7 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
             # --- Determine drone type ---
             s1_init = servos_list[0][0] if servos_list and len(servos_list[0]) >= 2 else 0.0
             s2_init = servos_list[0][1] if servos_list and len(servos_list[0]) >= 2 else 0.0
-            drone_type = infer_drone_type_from_servos(s1_init, s2_init, manifest_types, drone_name)
+            drone_type = infer_drone_type_from_servos(servos_list, manifest_types, drone_name)
 
             # --- Create the LightBender ---
             bpy.ops.drone.add_drone(drone_type=drone_type)
@@ -5036,6 +5065,9 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
             layout.label(text=f"Selected: {obj.name}")
             col = layout.column(align=True)
+            
+            drone_type_label = obj_props.drone_type.replace("TYPE_", "")
+            col.label(text=f"Type: {drone_type_label}")
 
             # Hide Actuation controls for Ring types
             if is_ring:
