@@ -4,7 +4,7 @@ bl_info = {
     "version": (1, 17),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
-    "description": "Create light-element LightBenders, animate LEDs with pointers, add position errors, and export YAML",
+    "description": "Create light-element LightBenders, animate LEDs with pointers, add position errors, and export SFL",
     "category": "Animation",
 }
 
@@ -1059,8 +1059,8 @@ class DroneProperties(bpy.types.PropertyGroup):
     )
 
     import_mission_filepath: StringProperty(
-        name="Mission YAML",
-        description="Path to the mission YAML file to import",
+        name="Mission SFL",
+        description="Path to the SFL file to import",
         subtype="FILE_PATH",
         default=""
     )
@@ -3630,7 +3630,7 @@ def infer_drone_type_from_servos(servos_list, manifest_types=None, drone_name=No
 class IMPORT_OT_mission_yaml(bpy.types.Operator):
     """Import a mission YAML file and recreate LightBenders with keyframes"""
     bl_idname = "drone.import_mission_yaml"
-    bl_label = "Import Mission YAML"
+    bl_label = "Import SFL"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -3640,7 +3640,7 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
 
         filepath = bpy.path.abspath(props.import_mission_filepath)
         if not filepath or not os.path.isfile(filepath):
-            self.report({'ERROR'}, "No valid file selected in the Mission YAML field")
+            self.report({'ERROR'}, "No valid file selected in the SFL file field")
             return {'CANCELLED'}
 
         # --- Parse YAML via external python (Blender may lack PyYAML) ---
@@ -3670,7 +3670,7 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
 
         drones_dict = mission_data.get('drones')
         if not drones_dict or not isinstance(drones_dict, dict):
-            self.report({'ERROR'}, "YAML has no 'drones' dictionary")
+            self.report({'ERROR'}, "SFL file has no 'drones' dictionary")
             return {'CANCELLED'}
 
         # --- Load manifest for type inference if available ---
@@ -3841,7 +3841,7 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
 class EXPORT_OT_drone_yaml(bpy.types.Operator):
     """Export LightBender Animation to YAML"""
     bl_idname = "drone.export_yaml"
-    bl_label = "Export YAML"
+    bl_label = "Export SFL"
 
     filepath: StringProperty(subtype="FILE_PATH")
 
@@ -4029,7 +4029,7 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
 
         res = bpy.ops.drone.export_yaml('EXEC_DEFAULT', filepath=target_yaml)
         if 'FINISHED' not in res:
-            self.report({'ERROR'}, "Failed to generate YAML")
+            self.report({'ERROR'}, "Failed to generate SFL")
             return {'CANCELLED'}
 
         python_exec = get_controller_python()
@@ -4086,7 +4086,7 @@ class DRONE_OT_stop_illuminate(bpy.types.Operator):
 class EXPORT_OT_interaction_yaml(bpy.types.Operator):
     """Export static interaction mission to YAML"""
     bl_idname = "drone.export_interaction_yaml"
-    bl_label = "Export Interaction YAML"
+    bl_label = "Export Interaction SFL"
 
     filepath: StringProperty(subtype="FILE_PATH")
 
@@ -4107,7 +4107,7 @@ class EXPORT_OT_interaction_yaml(bpy.types.Operator):
         try:
             with open(self.filepath, 'w', encoding='utf-8') as f:
                 f.write(build_interaction_yaml_text(scene, drones_to_export, include_blender_port=False))
-            self.report({'INFO'}, f"Exported interaction YAML to {self.filepath}")
+            self.report({'INFO'}, f"Exported interaction SFL to {self.filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"File Write Error: {str(e)}")
             return {'CANCELLED'}
@@ -4137,7 +4137,7 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
             with open(target_yaml, 'w', encoding='utf-8') as f:
                 f.write(build_interaction_yaml_text(scene, drones_to_export, include_blender_port=True))
         except Exception as e:
-            self.report({'ERROR'}, f"Failed to generate interaction YAML: {e}")
+            self.report({'ERROR'}, f"Failed to generate interaction SFL: {e}")
             return {'CANCELLED'}
 
         # Open swarm monitor socket before launching so orchestrator can connect
@@ -4179,7 +4179,7 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
             bpy.app.timers.register(static_interaction_timer, first_interval=0.1)
             STATIC_INTERACTION_SESSION["timer_registered"] = True
 
-        self.report({'INFO'}, f"Exported interaction YAML, started orchestrator, listening on port {props.interaction_tcp_port}")
+        self.report({'INFO'}, f"Exported interaction SFL, started orchestrator, listening on port {props.interaction_tcp_port}")
         return {'FINISHED'}
 
 
@@ -5111,7 +5111,7 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "LightBender"
-    bl_label = "Generative Layouts"
+    bl_label = "Layout Tools"
     bl_parent_id = "VIEW3D_PT_drone_swarm"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -5122,17 +5122,6 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
 
         # --- Shared Swarm Manifest (used by both SVG and Import Mission) ---
         layout.prop(props, "import_manifest_filepath")
-
-        layout.separator()
-
-        # --- Import Mission YAML ---
-        layout.label(text="Import Mission YAML:", icon='IMPORT')
-        box = layout.box()
-        box.prop(props, "import_mission_filepath")
-        
-        row = box.row()
-        row.enabled = bool(props.import_mission_filepath.strip())
-        row.operator("drone.import_mission_yaml", text="Import Mission", icon='FILE_FOLDER')
 
         layout.separator()
 
@@ -5157,6 +5146,17 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
         row = box.row()
         row.enabled = bool(props.import_svg_filepath.strip())
         row.operator("drone.transform_and_place", text="Transform and Place", icon='OUTLINER_OB_LIGHT')
+
+        # --- Import Mission YAML ---
+        layout.label(text="Import SFL:", icon='IMPORT')
+        box = layout.box()
+        box.prop(props, "import_mission_filepath")
+        
+        row = box.row()
+        row.enabled = bool(props.import_mission_filepath.strip())
+        row.operator("drone.import_mission_yaml", text="Import", icon='FILE_FOLDER')
+
+        layout.separator()
 
 
 class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
@@ -5396,7 +5396,7 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             if not props.export_at_keyframes:
                 layout.prop(props, "export_rate")
 
-            layout.operator("drone.export_yaml", text="Export YAML", icon='EXPORT')
+            layout.operator("drone.export_yaml", text="Export SFL", icon='EXPORT')
 
             illuminate_row = layout.row()
             illuminate_row.enabled = not props.illuminate_running and props.swarm_logs_fetched
@@ -5432,7 +5432,7 @@ class VIEW3D_PT_lb_export(bpy.types.Panel):
             layout.separator()
 
             # Export YAML
-            layout.operator("drone.export_interaction_yaml", text="Export YAML", icon='EXPORT')
+            layout.operator("drone.export_interaction_yaml", text="Export SFL", icon='EXPORT')
 
             illuminate_row = layout.row()
             illuminate_row.enabled = not props.illuminate_running and props.swarm_logs_fetched
