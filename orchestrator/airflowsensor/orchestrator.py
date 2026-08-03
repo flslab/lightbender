@@ -1,0 +1,1186 @@
+import argparse
+import io
+import os
+import yaml
+import json
+import time
+import zmq
+import threading
+import http.server
+import socketserver
+import sys
+import signal
+import shutil
+import socket
+import logging
+from datetime import datetime
+from functools import partial
+from fabric import Connection
+from invoke.exceptions import CommandTimedOut
+import re
+import concurrent.futures
+
+RUN_TAG_SUFFIX_RE = re.compile(r'_(?P<date>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})$')
+EXP_GROUP_RE = re.compile(r'^(exp\d+)', re.I)
+EXPERIMENT_NUM_RE = re.compile(r'^experiment[_]?(\d+)', re.I)
+
+
+def mission_name_from_tag(tag):
+    if not tag:
+        return None
+    match = RUN_TAG_SUFFIX_RE.search(tag)
+    return tag[:match.start()] if match else None
+
+
+def experiment_group(name):
+    """Map a mission name to a logs folder (e.g. exp1_x100_typeV -> exp1)."""
+    if not name:
+        return None
+    match = EXP_GROUP_RE.match(name)
+    if match:
+        return match.group(1).lower()
+    match = EXPERIMENT_NUM_RE.match(name)
+    if match:
+        return f"exp{match.group(1)}"
+    return name.split('_')[0]
+
+
+def experiment_group_from_tag(tag):
+    return experiment_group(mission_name_from_tag(tag))
+
+
+def resolve_log_subpath(ctrl_cfg, args=None):
+    """Subfolder under logs/<exp>/ — set per run in manifest or CLI (no auto-routing)."""
+    if args is not None and getattr(args, 'log_subpath', None):
+        return str(args.log_subpath).strip() or None
+    for key in ('log_subpath', 'log_session'):
+        value = ctrl_cfg.get(key)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def local_log_dir(tag, experiment=None, log_subpath=None):
+    """Local path for a run's downloaded logs: logs/<exp>/[<subpath>/]<tag>/"""
+    group = experiment or experiment_group_from_tag(tag)
+    parts = ['logs', group]
+    if log_subpath:
+        parts.extend(str(log_subpath).replace('\\', '/').split('/'))
+    parts.append(tag)
+    return os.path.join(*parts)
+
+# Assumed local modules based on your import list
+from logger import setup_logging
+from restart import reboot_crazyflie
+from switch_network import apply_network_mode
+
+# from Interaction.vicon_noise_tracker import run_tracker
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+MANIFEST_FILE = BASE_DIR / 'swarm_manifest.yaml'
+DRONE_SCRIPT = 'controller.py'
+CAMERA_SCRIPT = 'camera_node.py'
+SENSOR_SCRIPT = 'sensor_node.py'
+SENSOR_SCRIPT_LOCAL = BASE_DIR / 'sensor' / 'sensor_node.py'
+DEFAULT_SENSOR_WORK_DIR = '/home/fls/sensor'
+DEFAULT_SENSOR_VENV = '/home/fls/sensor-env'
+
+
+class SwarmOrchestrator:
+    def __init__(self, args):
+        setup_logging()
+        self.logger = logging.getLogger(__name__)
+        self.args = args
+
+        # Configuration State
+        self.manifest = self._load_manifest()
+        self.ctrl_cfg = self.manifest['controller']
+        if args.http_port:
+            self.ctrl_cfg['http_port'] = args.http_port
+        if args.zmq_cmd_port:
+            self.ctrl_cfg['zmq_cmd_port'] = args.zmq_cmd_port
+        if args.zmq_ack_port:
+            self.ctrl_cfg['zmq_ack_port'] = args.zmq_ack_port
+        self.drones = self.manifest.get('drones', [])
+        self.camera_cfg = self.manifest.get('camera_node')
+        self.sensor_cfg = self.manifest.get('sensor_node')
+        self.radio_node = self.manifest.get('radio_node')
+        self.common_cfg = self.manifest['common']
+        self.log_subpath = resolve_log_subpath(self.ctrl_cfg, args)
+        self.missions = self._load_missions()
+        self.mission = self.missions[0] if self.missions else None
+
+        # Runtime State
+        self.tag = None
+        self.running = threading.Event()
+        self.took_off = False
+        self.emergency = False
+        self.pending_downloads = self._load_previous_downloads()
+        self.landed_drones = set()
+        self.ready_ids = set()
+        self.sensor_ready = False
+
+        self.loadcell_thread = None
+        self.vicon_tracker_thread = None
+
+        # Network Resources
+        self.zmq_context = None
+        self.pub_socket = None
+        self.pull_socket = None
+        self.http_server = None
+
+        # Bind signal handlers for graceful exit
+        # signal.signal(signal.SIGINT, self._signal_handler)
+        # signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # Blender monitor socket (pushes status to Blender addon)
+        self._blender_monitor_host = '127.0.0.1'
+        self._blender_monitor_port = 5598
+        if args.blender:
+            parts = args.blender.split(':')
+            if len(parts) == 2:
+                self._blender_monitor_host = parts[0]
+                self._blender_monitor_port = int(parts[1])
+            else:
+                self.logger.warning(f"Invalid --blender format '{args.blender}', expected host:port. Using defaults.")
+        self._blender_monitor_sock = None
+        self._blender_monitor_lock = threading.Lock()
+        self._confirm_launch_event = threading.Event()
+
+    def _load_manifest(self):
+        with open(MANIFEST_FILE) as f:
+            return yaml.safe_load(f)
+
+    def _load_missions(self):
+        missions = []
+        files = self.ctrl_cfg.get('mission_files') or []
+        if not files and 'mission_file' in self.ctrl_cfg:
+            files = [self.ctrl_cfg['mission_file']]
+        
+        self.mission_filepaths = []
+        for file in files:
+            path = os.path.join(self.ctrl_cfg['mission_path'], file)
+            self.mission_filepaths.append(path)
+            with open(path) as f:
+                missions.append(yaml.safe_load(f))
+        return missions
+
+    def _load_previous_downloads(self):
+        try:
+            with open(self.ctrl_cfg['downloads_file']) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _signal_handler(self, sig, frame):
+        self.logger.warning(f"Signal {sig} received. Initiating Emergency Shutdown...")
+        self.emergency_stop()
+
+    def setup_network(self):
+        """Initializes ZMQ sockets and HTTP server."""
+        # HTTP Server
+        port = self.ctrl_cfg['http_port']
+        directory = self.ctrl_cfg['mission_path']
+
+        # Reuse address to prevent 'Address already in use' on quick restarts
+        socketserver.TCPServer.allow_reuse_address = True
+
+        handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
+        self.http_server = socketserver.TCPServer(("", port), handler)
+
+        http_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
+        http_thread.start()
+        self.logger.info(f"HTTP Config Server running on port {port} serving {directory}")
+
+        # ZMQ
+        self.zmq_context = zmq.Context()
+        self.pub_socket = self.zmq_context.socket(zmq.PUB)
+        self.pub_socket.bind(f"tcp://*:{self.ctrl_cfg['zmq_cmd_port']}")
+
+        self.pull_socket = self.zmq_context.socket(zmq.PULL)
+        self.pull_socket.bind(f"tcp://*:{self.ctrl_cfg['zmq_ack_port']}")
+
+        # Set a timeout on receive so we can check for shutdown flags periodically
+        self.pull_socket.setsockopt(zmq.RCVTIMEO, 1000)
+
+        self.logger.info(f"ZMQ Server Online at {self.ctrl_cfg['ip']}")
+
+    def _get_drone_cmd(self, drone):
+        if self.args.interaction:
+            return self._get_drone_cmd_interaction(drone)
+        elif self.args.illumination:
+            return self._get_drone_cmd_illumination(drone)
+        elif self.args.morphing:
+            return self._get_drone_cmd_morphing(drone)
+        else:
+            raise Exception("mode not supported")
+
+    def _get_drone_cmd_interaction(self, drone):
+        alt = self.mission['drones'][drone['id']]['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        led_count = drone.get('led_count', 50)
+        radio_arg = f"--radio {drone['uri']}" if self.args.radio else ""
+        droneless_arg = "--droneless" if self.args.droneless else ""
+        p = drone.get('init_pos', None)
+        obj_name = drone.get('label', None)
+        if p:
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
+        elif obj_name:
+            mocap_args = f"--obj-name {obj_name} --vicon-mode rigidbody "
+
+        extra_markers = self.manifest.get('apparatus', None)
+        extra_marker_args = ""
+        if extra_markers:
+            for m in extra_markers:
+                extra_marker_args += f"--extra-marker {m['id']} "
+                init_pos = m.get("init_pos")
+                if init_pos is not None:
+                    extra_marker_args += f"{' '.join(str(c) for c in m['init_pos'])} "
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && "
+            f"source {self.common_cfg['venv_path']}/bin/activate && "
+            "git pull && "
+            f"nohup python3 {DRONE_SCRIPT} "
+            f"--orchestrated --interaction --tag {self.tag} ",
+            f"--intractable-illumination" if getattr(self.args, 'intractable_illumination', False) else "",
+            f"--ground-test " if self.args.ground else "",
+            f"{radio_arg} "
+            f"{extra_marker_args} "
+            f"--vicon {mocap_args} "
+            f"--drone-id {drone['id']} ",
+            f"--led --led-count {led_count} " if led_count > 0 and not self.args.radio else " ",
+            f"--servo --servo-type {drone.get('type', 'H')} --servo-count {servo_count} " if servo_count > 0 and not self.args.radio else " ",
+            f"--takeoff-altitude {alt} "
+            "--smooth-controller-rate 100 "
+            "--log "
+            f"{droneless_arg} "
+            "--cf-log-period 10 "
+            # "--skip-takeoff --skip-landing "
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+
+        # If a reference object is configured, also launch the noise tracker on the drone.
+        ref_obj = self.common_cfg.get('reference_object')
+        if ref_obj:
+            vicon_log = f"{self.common_cfg['work_dir']}/logs/vicon_{self.tag}.json"
+            cmd.append(
+                f"cd {self.common_cfg['work_dir']} && "
+                f"source {self.common_cfg['venv_path']}/bin/activate && "
+                f"nohup python3 Interaction/vicon_noise_tracker.py "
+                f"--subject {ref_obj} --duration 10 "
+                f"--out {vicon_log} "
+                f"> vicon_noise.log 2>&1 < /dev/null &"
+            )
+
+        return f" ".join(cmd)
+
+    def _get_drone_cmd_illumination(self, drone):
+        drone_mission = self.mission['drones'][drone['id']]
+        alt = drone_mission['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        servo_offsets = drone.get('servo_offsets', [0.0] * servo_count)
+        led_count = drone.get('led_count', 50)
+        init_yaw = drone.get('init_yaw', 0)
+        ground_test = drone.get('ground_test', False)
+        marker_id = drone.get('marker_id', -1)
+        target_id = 0
+        if drone_mission.get('relative_anchor'):
+            anchor_id = drone_mission['relative_anchor']['id']
+            anchor_drone = self._get_drone_by_id(anchor_id)
+            if anchor_drone:
+                target_id = anchor_drone.get('marker_id', 0)
+        
+        if hasattr(drone, "obj_name"):
+            mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
+        else:
+            p = drone['init_pos']
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud --init-yaw {init_yaw} "
+            
+        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        reference_arg = f"--reference {drone['reference'][0]} {drone['reference'][1]} {drone['reference'][2]} " if 'reference' in drone else ""
+        anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
+        tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
+        smooth_controller_rate = f"--smooth-controller-rate 100"
+        if drone.get('flowdeck'):
+            localization_flags = "--check-deck bcFlow2" 
+            if drone.get('save_vicon'):
+                localization_flags += " --save-vicon "
+        else:
+            localization_flags = "--vicon"
+        
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && ",
+            f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            "git pull && ",
+            f"nohup python3 {DRONE_SCRIPT} ",
+            f"--illumination --orchestrated --tag {self.tag} ",
+            "--ground-test " if self.args.ground else f" {localization_flags} {mocap_args} ",
+            f"--marker-id {marker_id} " if marker_id is not None else "",
+            f"--target-id {target_id} " if target_id is not None else "",
+            f"{viewpoint_arg}",
+            f"{anchor_arg}",
+            f"{reference_arg}",
+            f"--drone-id {drone['id']} ",
+            f"{tracker_arg}",
+            f"--led --led-brightness 0.5 --led-count {led_count} " if led_count > 0 else " ",
+            f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
+            f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
+            f"--takeoff-altitude {alt} ",
+            f"{smooth_controller_rate}",
+            "--enable-tracker-kf  --tracker-encoder-rate 50 --tracker-camera-rate 120 --tracker-res 400",
+            "--velocity-p 1.0",
+            "--log ",
+            f"--ground-test" if ground_test else "",
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+
+        return " ".join(cmd)
+
+    def _get_drone_cmd_morphing(self, drone):
+        alt = self.mission['drones'][drone['id']]['target'][2]
+        servo_count = drone.get('servo_count', 2)
+        led_count = drone.get('led_count', 50)
+        if hasattr(drone, "obj_name"):
+            mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
+        else:
+            p = drone['init_pos']
+            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
+            
+        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
+        
+        cmd = [
+            f"cd {self.common_cfg['work_dir']} && ",
+            f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            "git pull && ",
+            f"nohup python3 {DRONE_SCRIPT} ",
+            f"--illumination --morphing --orchestrated --tag {self.tag} ",
+            "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
+            f"{viewpoint_arg}",
+            f"{anchor_arg}",
+            f"--drone-id {drone['id']} ",
+            f"--led --led-count {led_count} " if led_count > 0 else " ",
+            f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
+            f"--takeoff-altitude {alt} ",
+            "--smooth-controller-rate 50 ",
+            "--log ",
+            f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
+        ]
+        return " ".join(cmd)
+
+    
+    def _get_drone_by_id(self, drone_id):
+        for d in self.drones:
+            if d['id'] == drone_id:
+                return d
+        return None
+
+    def _get_camera_cmd(self):
+        camera_params = [
+            "--autofocus-mode", "manual",
+            "--lens-position", "0.5",
+            "--shutter", "35000",
+            "--awb", "indoor",
+        ]
+        if self.args.dark:
+            camera_params += ["--gain", "1.2"]
+        else:
+            camera_params += ["--gain", "0.8"]
+
+        return (
+            f"bash -c 'cd {self.common_cfg['work_dir']} && "
+            f"source {self.common_cfg['venv_path']}/bin/activate && "
+            f"nohup python3 {CAMERA_SCRIPT} {' '.join(camera_params)} > CAM.log 2>&1 < /dev/null &'"
+        )
+
+    def _sensor_marker_pos(self):
+        """Vicon location of marker on sensor rig. Same marker as mission reference in our setup."""
+        for drone in self.drones:
+            ref = drone.get('reference')
+            if ref is not None:
+                return ref[:3]
+        if self.mission:
+            if self.mission.get('sensor'):
+                return self.mission['sensor'][:3]
+            if self.mission.get('reference'):
+                return self.mission['reference'][:3]
+        return None
+
+    def _sensor_work_dir(self):
+        return self.sensor_cfg.get('work_dir', DEFAULT_SENSOR_WORK_DIR)
+
+    def _sensor_venv_path(self):
+        return self.sensor_cfg.get('venv_path', DEFAULT_SENSOR_VENV)
+
+    def _get_sensor_cmd(self):
+        sensor_params = [
+            "--tag", self.tag,
+            "--hz", "1000",
+            "--bus", "1",
+            "--address", "0x21",
+        ]
+        pos = self._sensor_marker_pos()
+        if pos:
+            sensor_params += ["--init-pos", str(pos[0]), str(pos[1]), str(pos[2])]
+        work_dir = self._sensor_work_dir()
+        venv = self._sensor_venv_path()
+        return (
+            f"bash -c 'mkdir -p {work_dir} && cd {work_dir} && "
+            f"source {venv}/bin/activate && "
+            f"nohup python3 {SENSOR_SCRIPT} {' '.join(sensor_params)} > SENSOR.log 2>&1 < /dev/null &'"
+        )
+
+    def _boot_sensor_node(self):
+        work_dir = self._sensor_work_dir()
+        node_id = self.sensor_cfg.get('id', 'SENSOR')
+        self.logger.info(f"Booting Sensor {node_id} at {self.sensor_cfg['ip']}...")
+
+        if not SENSOR_SCRIPT_LOCAL.is_file():
+            self.logger.error(f"Local sensor script not found: {SENSOR_SCRIPT_LOCAL}")
+            return False
+
+        try:
+            conn = Connection(
+                host=self.sensor_cfg['ip'],
+                user=self.sensor_cfg['user'],
+                connect_timeout=5,
+            )
+            conn.run(f"mkdir -p {work_dir}", timeout=10, pty=False)
+            conn.run("pkill -f 'python3 sensor_node.py' || true", timeout=5, pty=False, warn=True)
+            manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
+            conn.put(manifest_buf, remote=f"{work_dir}/swarm_manifest.yaml")
+            conn.put(str(SENSOR_SCRIPT_LOCAL), remote=f"{work_dir}/{SENSOR_SCRIPT}")
+            conn.run(self._get_sensor_cmd(), timeout=2, pty=False)
+            return True
+        except CommandTimedOut:
+            self.logger.info(f"  > Sensor {node_id} started successfully (timed out as expected).")
+            return True
+        except Exception as e:
+            self.logger.error(f"  > Error booting Sensor {node_id}: {e}")
+            return False
+
+    def _boot_remote_node(self, device_cfg, cmd, node_type="Drone"):
+        default_ids = {"Camera": "CAM", "Sensor": "SENSOR"}
+        node_id = device_cfg.get('id', default_ids.get(node_type, node_type))
+        self.logger.info(f"Booting {node_type} {node_id} at {device_cfg['ip']}...")
+
+        try:
+            conn = Connection(host=device_cfg['ip'], user=device_cfg['user'], connect_timeout=5)
+            # Push manifest from in-memory state (reflects any arg overrides) without touching local file
+            manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
+            conn.put(manifest_buf, remote=f"{self.common_cfg['work_dir']}/swarm_manifest.yaml")
+            # Run command (detach)
+            conn.run(cmd, timeout=2, pty=False)
+            return True
+        except CommandTimedOut:
+            self.logger.info(f"  > {node_type} {node_id} started successfully (timed out as expected).")
+            return True
+        except Exception as e:
+            self.logger.error(f"  > Error booting {node_type} {node_id}: {e}")
+            return False
+
+    def _download_file(self, device_cfg, remote_path, local_path, description):
+        self.logger.info(f"Downloading {description} from {device_cfg.get('id', 'CAM')}...")
+        try:
+            conn = Connection(host=device_cfg['ip'], user=device_cfg['user'], connect_timeout=10)
+            conn.get(remote_path, local_path)
+            self.logger.info(f"Saved: {local_path}")
+            return True
+        except FileNotFoundError:
+            if not self.emergency:
+                self.logger.info(f"File not found, it will be removed from list.")
+                return True
+            else:
+                self.logger.info(f"File not found, retry next time.")
+                return False
+        except Exception as e:
+            self.logger.error(f"Failed to download {description}: {e}")
+            return False
+
+    def _apply_network_mode(self):
+        """
+        If the manifest specifies a non-wifi network mode, SSH into every drone
+        to schedule the interface switch, print operator instructions, wait for
+        the operator to reconnect, then update self.manifest / self.drones /
+        self.ctrl_cfg so that all subsequent SSH and ZMQ connections use the
+        correct (adhoc / bluetooth) IPs.
+        """
+        mode = self.manifest.get("network", {}).get("mode", "wifi")
+        if mode == "wifi":
+            return   # nothing to do
+
+        self.logger.info(f"Network mode: {mode} — initiating switch...")
+        updated = apply_network_mode(self.manifest, mode)
+
+        # Propagate updated IPs into live state
+        self.manifest   = updated
+        self.ctrl_cfg   = updated["controller"]
+        self.drones     = updated.get("drones", [])
+        self.camera_cfg = updated.get("camera_node")
+        self.sensor_cfg = updated.get("sensor_node")
+        self.radio_node = updated.get("radio_node")
+        self.logger.info(f"Network switch complete. Controller IP: {self.ctrl_cfg['ip']}")
+
+    def shutdown_nodes(self, target_ids=None):
+        """Sends sudo shutdown command to all drones."""
+        drones_to_target = self.drones
+        if target_ids:
+            drones_to_target = [d for d in self.drones if d['id'] in target_ids]
+            
+        for drone in drones_to_target:
+            self.logger.info(f"Shutting down Drone {drone['id']}...")
+            try:
+                conn = Connection(host=drone['ip'], user=drone['user'])
+                conn.run("sudo shutdown now", pty=False, timeout=2, warn=True)
+            except Exception:
+                pass
+
+    def kill_processes(self, target_ids=None):
+        """Kills python processes on all drones."""
+        drones_to_target = self.drones
+        if target_ids:
+            drones_to_target = [d for d in self.drones if d['id'] in target_ids]
+            
+        for drone in drones_to_target:
+            self.logger.info(f"Killing processes on Drone {drone['id']}...")
+            try:
+                conn = Connection(host=drone['ip'], user=drone['user'])
+                conn.run("pkill python3", pty=False, timeout=2, warn=True)
+            except Exception:
+                pass
+
+    def reboot_flight_controllers(self, remote=False):
+        """
+        Reboots flight controllers.
+        If remote=True, sends a command to the Radio Node to perform the reboot.
+        If remote=False, attempts to reboot locally using cflib.
+        """
+        uris = [d['uri'] for d in self.drones]
+
+        if self.args.radio or self.args.droneless:
+            return
+
+        if remote:
+            if not self.radio_node:
+                print("[Orchestrator] Cannot perform remote reboot: No 'radio_node' in manifest.")
+                return
+
+            print(f"[Orchestrator] Sending REMOTE REBOOT request to Radio Node ({len(uris)} drones)...")
+            
+            env = self.common_cfg['venv_path']
+            work_dir = self.common_cfg['work_dir']
+            uris_str = " ".join(uris)
+            
+            user = self.radio_node.get('user', 'fls')
+            ip = self.radio_node['ip']
+            
+            cmd = f"source {env}/bin/activate && cd {work_dir} && python3 restart.py {uris_str}"
+            self.logger.info(f"Executing: ssh {user}@{ip} \"{cmd}\"")
+            
+            try:
+                conn = Connection(host=ip, user=user, connect_timeout=5)
+                # Run the restart command via SSH
+                conn.run(cmd, pty=False)
+                self.logger.info("Remote reboot issued successfully.")
+            except Exception as e:
+                self.logger.error(f"Failed to issue remote reboot: {e}")
+                return
+        else:
+            for drone in self.drones:
+                reboot_crazyflie(drone['uri'])
+        time.sleep(5)  # Wait for reboot
+
+    def _compute_init_positions(self):
+        """Replace each drone's init_pos with target XY from mission + default_height Z from manifest."""
+        if not self.mission or 'drones' not in self.mission:
+            return
+        default_height = self.manifest.get('common', {}).get('default_height',
+                         self.manifest.get('mission', {}).get('default_height', 0.24))
+        for drone in self.drones:
+            drone_mission = self.mission['drones'].get(drone['id'])
+            if drone_mission and 'target' in drone_mission:
+                target = drone_mission['target']
+                drone['init_pos'] = [target[0], target[1], default_height]
+                self.logger.info(
+                    f"Drone {drone['id']} init_pos set to target XY + default_height: {drone['init_pos']}")
+
+    def _connect_to_blender_monitor(self):
+        """Try to connect to Blender's monitor socket on localhost."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((self._blender_monitor_host, self._blender_monitor_port))
+            sock.setblocking(True)
+            self._blender_monitor_sock = sock
+            self.logger.info(f"Connected to Blender monitor on {self._blender_monitor_host}:{self._blender_monitor_port}")
+
+            # Start a reader thread for messages from Blender (e.g. confirm_launch)
+            reader = threading.Thread(target=self._blender_monitor_reader, daemon=True)
+            reader.start()
+            return True
+        except Exception as e:
+            self.logger.error(f"Could not connect to Blender monitor at {self._blender_monitor_host}:{self._blender_monitor_port}: {e}")
+            self._blender_monitor_sock = None
+            return False
+
+    def _blender_monitor_reader(self):
+        """Read commands from Blender over the monitor socket."""
+        sock = self._blender_monitor_sock
+        if not sock:
+            return
+        buf = ""
+        while self.running.is_set():
+            try:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                buf += data.decode('utf-8', errors='ignore')
+                while '\n' in buf:
+                    line, buf = buf.split('\n', 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get('cmd') == 'confirm_launch':
+                        self.logger.info("Received confirm_launch from Blender.")
+                        self._confirm_launch_event.set()
+                    elif msg.get('cmd') == 'stop':
+                        self.logger.info("Received stop from Blender monitor.")
+                        self.emergency_stop()
+                        break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def _blender_notify(self, msg_dict):
+        """Send a JSON message to Blender over the monitor socket."""
+        with self._blender_monitor_lock:
+            sock = self._blender_monitor_sock
+            if sock is None:
+                return
+            try:
+                payload = json.dumps(msg_dict) + '\n'
+                sock.sendall(payload.encode('utf-8'))
+            except (BrokenPipeError, OSError) as e:
+                self.logger.warning(f"Blender monitor send failed: {e}")
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                self._blender_monitor_sock = None
+
+    def run(self):
+        if self.args.off is not None:
+            self.shutdown_nodes(self.args.off)
+            return
+        if self.args.kill is not None:
+            self.kill_processes(self.args.kill)
+            return
+
+        date_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.date_tag = date_tag
+        self.experiment_group = experiment_group(self.mission['name'])
+        self.tag = f"{self.mission['name']}_{date_tag}"
+        log_path = f"logs/{self.experiment_group}/"
+        if self.log_subpath:
+            log_path += f"{self.log_subpath}/"
+        log_path += "<tag>"
+        self.logger.info(f"Mission Tag: {self.tag} (logs → {log_path})")
+
+        self.setup_network()
+        self.running.set()               # set BEFORE starting listeners
+
+        try:
+            # Connect to Blender monitor FIRST THING
+            if self.args.blender:
+                connected = self._connect_to_blender_monitor()
+                if not connected:
+                    self.logger.error("Failed to connect to Blender. Cannot continue.")
+                    self.running.clear()
+                    return
+
+                # Send initial swarm info immediately so the UI is populated
+                battery_threshold = self.manifest.get('mission', {}).get('battery_threshold', 3.9)
+                
+                # Filter drones to only those referenced in the mission file
+                if self.mission and 'drones' in self.mission:
+                    mission_ids = set(self.mission['drones'].keys())
+                    self.drones = [d for d in self.drones if d['id'] in mission_ids]
+                
+                # Compute init_pos from mission target + default_height
+                self._compute_init_positions()
+
+                self._blender_notify({
+                    "cmd": "swarm_info",
+                    "battery_threshold": battery_threshold,
+                    "drones": [
+                        {
+                            "id": d['id'],
+                            "ip": d.get('ip', ''),
+                            "init_pos": d.get('init_pos', [0, 0, 0]),
+                            "status": "idle"
+                        }
+                        for d in self.drones
+                    ]
+                })
+
+            # Switch drones to adhoc/bluetooth if configured, update IPs
+            self._apply_network_mode()
+            if not self.running.is_set():
+                return
+
+            # Process Pending Downloads from previous runs
+            self._process_pending_downloads()
+            if not self.running.is_set():
+                return
+
+            self.pub_socket.send_json({"cmd": "_"})
+            time.sleep(2)
+            if not self.running.is_set():
+                return
+
+            if not self.args.record:
+                # Filter and compute logic has already been done if Blender is connected,
+                # but we still need to do it if running without Blender
+                if not self.args.blender:
+                    # Filter drones to only those referenced in the mission file
+                    if self.mission and 'drones' in self.mission:
+                        mission_ids = set(self.mission['drones'].keys())
+                        self.drones = [d for d in self.drones if d['id'] in mission_ids]
+                        self.logger.info(f"Filtered to {len(self.drones)} mission drones: {[d['id'] for d in self.drones]}")
+
+                    # Compute init_pos from mission target + default_height
+                    self._compute_init_positions()
+
+                if not self.args.skip_dispatcher:
+                    from dispatcher import run_dispatch
+                    is_mock = self.args.ground or self.args.droneless
+                    self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
+                    self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
+                    self.manifest['drones'] = self.drones
+                    if not self.running.is_set():
+                        return
+
+                if self.args.sensor:
+                    pos = self._sensor_marker_pos()
+                    if pos:
+                        self.logger.info(
+                            f"Sensor marker location (reference marker on sensor rig): {pos}"
+                        )
+                    else:
+                        self.logger.warning(
+                            "--sensor enabled but no reference/sensor position found. "
+                            "Assign Reference in the dispatcher or set reference: in mission YAML."
+                        )
+
+                if not self.args.skip_reboot:
+                    self.reboot_flight_controllers(remote=bool(self.radio_node))
+                    if not self.running.is_set():
+                        return
+
+                def boot_drone(drone):
+                    self._blender_notify({"cmd": "drone_status", "id": drone['id'], "status": "booting"})
+                    cmd = self._get_drone_cmd(drone)
+                    if self._boot_remote_node(drone, cmd, "Drone"):
+                        entry = {'drone': drone, 'tag': self.tag, 'experiment': self.experiment_group}
+                        if self.args.interaction and self.common_cfg.get('reference_object'):
+                            entry['vicon_log'] = True  # also download vicon_{tag}.json
+                        return entry
+                    return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(boot_drone, d) for d in self.drones]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            entry = future.result()
+                            if entry:
+                                self.pending_downloads.append(entry)
+                        except Exception as e:
+                            self.logger.error(f"Error booting drone: {e}")
+
+            if self.args.loadcell:
+                from Interaction.loadcell_worker import loadcell_worker
+                self.loadcell_thread = threading.Thread(
+                    target=loadcell_worker,
+                    args=(self.logger, self.running, self.tag)  #
+                )
+            if self.camera_cfg:
+                if not self.args.skip_record:
+                    self._boot_remote_node(self.camera_cfg, self._get_camera_cmd(), "Camera")
+            else:
+                self.logger.warning("No camera_node found. Skipping.")
+
+            if self.args.sensor:
+                if self.sensor_cfg:
+                    self._boot_sensor_node()
+                else:
+                    self.logger.warning("--sensor requested but no sensor_node in manifest.")
+
+            if self.loadcell_thread:
+                self.loadcell_thread.start()
+
+            self._wait_for_ready()
+
+            if not self.args.skip_confirm:
+                if self._blender_monitor_sock:
+                    self.logger.info(">>> All Green. Waiting for Blender confirm_launch...")
+                    # Wait for Blender to send confirm_launch (check every second)
+                    while not self._confirm_launch_event.is_set() and self.running.is_set():
+                        self._confirm_launch_event.wait(timeout=1.0)
+                    if not self.running.is_set():
+                        raise KeyboardInterrupt("Stopped while waiting for confirm_launch")
+                else:
+                    input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
+                    # time.sleep(10)
+            self.logger.info("Broadcasting START...")
+            self.pub_socket.send_json({"cmd": "START"})
+            self.took_off = True
+
+            if self.manifest['mission']['require_handshake']:
+                for i, mission in enumerate(self.missions):
+                    self.ready_ids = set()
+                    self._wait_for_ready()
+                    if not self.args.skip_confirm:
+                        if self._blender_monitor_sock:
+                            self._confirm_launch_event.clear()
+                            self._blender_notify({"cmd": "request_mission_confirm"})
+                            self.logger.info(f">>> Mission {i+1}/{len(self.missions)}: Waiting for Blender confirm...")
+                            while not self._confirm_launch_event.is_set() and self.running.is_set():
+                                self._confirm_launch_event.wait(timeout=1.0)
+                        else:
+                            input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
+                    if i == 0:
+                        # time.sleep(5)
+                        pass
+                    self.logger.info(f"Broadcasting START for Mission {i+1}...")
+                    self.pub_socket.send_json({"cmd": "START"})
+
+            self._monitor_flight()
+
+        except KeyboardInterrupt:
+            self.logger.info("Keyboard Interrupt detected in main loop.")
+            self.emergency_stop()
+        except Exception as e:
+            self.logger.exception(f"Unexpected error: {e}")
+            self.emergency_stop()
+        finally:
+            self.cleanup()
+
+    def _process_pending_downloads(self):
+        if not self.pending_downloads:
+            return
+
+        self.logger.info(f"Processing {len(self.pending_downloads)} pending downloads (concurrently)...")
+
+        def process_item(item):
+            drone = item['drone']
+            tag = item['tag']
+            work = self.common_cfg['work_dir']
+
+            local_dir = local_log_dir(
+                tag,
+                item.get('experiment') or experiment_group_from_tag(tag),
+                log_subpath=self.log_subpath,
+            )
+            os.makedirs(local_dir, exist_ok=True)
+
+            # Main controller log
+            remote = f"{work}/logs/{tag}.json"
+            local = f"{local_dir}/{drone['id']}_{tag}.json"
+            success = self._download_file(drone, remote, local, "Log")
+
+            # Tracker video and log (only if tracker was launched)
+            if drone.get("tracker"):
+                tr = f"{work}/logs/video.mp4"
+                tl = f"{local_dir}/{drone['id']}_tracker_{tag}.mp4"
+                success = success and self._download_file(drone, tr, tl, "Tracker")
+                tr = f"{work}/logs/tracker_{tag}.json"
+                tl = f"{local_dir}/{drone['id']}_tracker_{tag}.json"
+                success = success and self._download_file(drone, tr, tl, "Tracker")
+
+            # Vicon noise log
+            if item.get('vicon_log'):
+                vr = f"{work}/logs/vicon_{tag}.json"
+                vl = f"{local_dir}/vicon_{tag}.json"
+                v_ok = self._download_file(drone, vr, vl, "Vicon Noise Log")
+                success = success and v_ok
+
+            return success
+
+        remaining = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_item = {executor.submit(process_item, item): item for item in self.pending_downloads}
+            for future in concurrent.futures.as_completed(future_to_item):
+                item = future_to_item[future]
+                try:
+                    success = future.result()
+                    if not success:
+                        remaining.append(item)
+                except Exception as e:
+                    self.logger.error(f"Error processing pending download for Drone {item['drone'].get('id', 'Unknown')}: {e}")
+                    remaining.append(item)
+
+        self.pending_downloads = remaining
+
+    def _sensor_required(self):
+        return self.args.sensor and bool(self.sensor_cfg)
+
+    def _wait_for_ready(self):
+        self.logger.info("Waiting for swarm readiness...")
+        total_drones = len(self.drones)
+
+        while self.running.is_set():
+            drones_ready = len(self.ready_ids) >= total_drones
+            sensor_ready = not self._sensor_required() or self.sensor_ready
+            if drones_ready and sensor_ready:
+                break
+
+            try:
+                msg = self.pull_socket.recv_json()
+                sender_id = msg.get('id')
+                status = msg.get('status')
+
+                if sender_id == 'CAM' and status == 'READY':
+                    self.logger.info("Camera Node Ready.")
+                    if self.args.record:
+                        return
+                elif sender_id == 'SENSOR' and status == 'READY' and not self.sensor_ready:
+                    self.sensor_ready = True
+                    self.logger.info("Sensor Node Ready.")
+                elif "lb" in sender_id:
+                    if status == 'READY' and sender_id not in self.ready_ids:
+                        self.ready_ids.add(sender_id)
+                        self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
+                        battery = msg.get('battery')
+                        self._blender_notify({
+                            "cmd": "drone_status",
+                            "id": sender_id,
+                            "status": "ready",
+                            "battery": battery
+                        })
+            except zmq.Again:
+                continue  # Timeout, loop back to check self.running
+
+    def _monitor_flight(self):
+        launched_drones = len(self.ready_ids)
+
+        if self.args.record:
+            while self.running.is_set():
+                time.sleep(1)
+        while len(self.landed_drones) < launched_drones and self.running.is_set():
+            try:
+                msg = self.pull_socket.recv_json()
+                if msg.get('status') == 'LANDED':
+                    self._handle_landed_msg(msg)
+            except zmq.Again:
+                continue
+
+    def _handle_landed_msg(self, msg):
+        d_id = msg['id']
+        if d_id not in self.landed_drones:
+            self.landed_drones.add(d_id)
+            batt = msg.get('battery', 'N/A')
+            elapsed = msg.get('flight_duration', 'N/A')
+            self.logger.info(f"Drone {d_id} LANDED. Batt: {batt} Time: {elapsed}s")
+            self._blender_notify({
+                "cmd": "drone_status",
+                "id": d_id,
+                "status": "landed",
+                "battery": batt
+            })
+
+    def emergency_stop(self):
+        """Broadcasts emergency command and waits for landing confirmations."""
+        self.emergency = True
+        self.logger.info("!!! TRIGGERING EMERGENCY LANDING !!!")
+
+        if self.pub_socket:
+            self.pub_socket.send_json({"cmd": "EMERGENCY"})
+
+        time.sleep(1)
+        self.logger.info("Waiting for drones to land... (Press Ctrl+C to force exit)")
+        launched_drones = len(self.ready_ids)
+        try:
+            # Loop indefinitely until bypass
+            while len(self.landed_drones) < launched_drones:
+                try:
+                    msg = self.pull_socket.recv_json()
+                    if msg.get('status') == 'LANDED':
+                        self._handle_landed_msg(msg)
+                except zmq.Again:
+                    continue
+        except KeyboardInterrupt:
+            self.logger.warning("Emergency landing wait forcibly aborted by user.")
+
+        self.running.clear()  # Stop inner loops now
+
+    def _wait_for_sensor_log_saved(self, timeout=120.0):
+        """Block until the sensor Pi finishes writing sensor_log.json."""
+        self.logger.info("Waiting for sensor LOG_SAVED ack...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                msg = self.pull_socket.recv_json()
+            except zmq.Again:
+                continue
+
+            if msg.get('id') != 'SENSOR':
+                continue
+            status = msg.get('status')
+            if status == 'LOG_SAVED':
+                self.logger.info(
+                    "Sensor log saved on Pi (%s samples).",
+                    msg.get('samples', '?'),
+                )
+                return True
+            if status == 'LOG_SAVE_FAILED':
+                self.logger.error(
+                    "Sensor log save failed on Pi: %s",
+                    msg.get('error', 'unknown error'),
+                )
+                return False
+
+        self.logger.warning(
+            "Timed out after %.0fs waiting for sensor LOG_SAVED ack.", timeout,
+        )
+        return False
+
+    def cleanup(self):
+        self.logger.info("Running cleanup sequence...")
+        self.running.clear()
+
+        # Stop Camera
+        if self.camera_cfg and self.pub_socket and not self.args.skip_record:
+            self.logger.info("Stopping Camera...")
+            self.pub_socket.send_json({"cmd": "STOP_CAMERA"})
+            time.sleep(2)
+
+            # Download Video
+            if self.took_off:
+                remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
+                local_dir = local_log_dir(self.tag, self.experiment_group, log_subpath=self.log_subpath)
+                os.makedirs(local_dir, exist_ok=True)
+                local = f"{local_dir}/{self.tag}.mp4"
+                self._download_file(self.camera_cfg, remote, local, "Mission Video")
+
+        # Stop Sensor
+        if self.args.sensor and self.sensor_cfg and self.pub_socket:
+            self.logger.info("Stopping Sensor...")
+            self.pub_socket.send_json({"cmd": "STOP_SENSOR"})
+            log_ready = self._wait_for_sensor_log_saved()
+
+            if self.took_off:
+                if log_ready:
+                    remote = f"{self._sensor_work_dir()}/sensor_log.json"
+                    local_dir = local_log_dir(self.tag, self.experiment_group, log_subpath=self.log_subpath)
+                    os.makedirs(local_dir, exist_ok=True)
+                    local = f"{local_dir}/sensor_{self.tag}.json"
+                    self._download_file(self.sensor_cfg, remote, local, "Sensor Log")
+                else:
+                    self.logger.warning("Skipping sensor log download (save not confirmed).")
+
+        # Retry Pending Downloads (Logs)
+        if self.took_off:
+            self._process_pending_downloads()
+
+            # Copy mission files to logs
+            if hasattr(self, 'mission_filepaths') and self.tag:
+                self.logger.info("Copying mission files to logs...")
+                local_dir = local_log_dir(self.tag, self.experiment_group, log_subpath=self.log_subpath)
+                os.makedirs(local_dir, exist_ok=True)
+                for path in self.mission_filepaths:
+                    try:
+                        basename = os.path.basename(path)
+                        name_part, ext = os.path.splitext(basename)
+                        new_filename = f"{name_part}_{self.tag}{ext}"
+                        dest_path = os.path.join(local_dir, new_filename)
+                        shutil.copy(path, dest_path)
+                        self.logger.info(f"Copied {basename} to {dest_path}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to copy mission file {path}: {e}")
+
+            # Save unfinished state
+            if self.pending_downloads:
+                self.logger.warning(f"Saving {len(self.pending_downloads)} unfinished downloads to file.")
+                with open(self.ctrl_cfg['downloads_file'], 'w') as f:
+                    json.dump(self.pending_downloads, f)
+
+        # Notify Blender that logs have been fetched
+        self._blender_notify({"cmd": "logs_fetched"})
+        self._blender_notify({"cmd": "all_stopped"})
+
+        # Close Blender monitor socket
+        if self._blender_monitor_sock:
+            try:
+                self._blender_monitor_sock.close()
+            except OSError:
+                pass
+            self._blender_monitor_sock = None
+
+        # Close Sockets
+        if self.http_server:
+            self.http_server.shutdown()
+            self.http_server.server_close()
+        #
+        # if self.zmq_context:
+        #     self.zmq_context.term()
+
+        self.logger.info("Orchestrator cleanup complete.")
+
+        # Trigger Upload
+        if hasattr(self, 'tag') and getattr(self, 'date_tag', None) and self.tag:
+            target_dir = local_log_dir(self.tag, self.experiment_group, log_subpath=self.log_subpath)
+            if os.path.isdir(target_dir) and os.listdir(target_dir):
+                self.logger.info(f"Triggering upload for {target_dir}...")
+                import subprocess
+                exp_type = "illumination"
+                if args.interaction or args.intractable_illumination:
+                    exp_type = "interaction"
+                abs_target_dir = os.path.abspath(target_dir)
+                orchestrator_dir = os.path.dirname(os.path.abspath(__file__))
+                cmd = [sys.executable, "-m", "uploader.upload", "--experiment", abs_target_dir, "--type", exp_type, "--datetime", self.date_tag]
+                upload_log_path = os.path.join(abs_target_dir, "upload.log")
+                try:
+                    with open(upload_log_path, "w") as upload_log:
+                        subprocess.Popen(cmd, cwd=orchestrator_dir, stdout=upload_log, stderr=upload_log)
+                    self.logger.info(f"Upload triggered successfully: {' '.join(cmd)} (output → {upload_log_path})")
+                except Exception as e:
+                    self.logger.error(f"Failed to trigger upload command: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
+    parser.add_argument("--interaction", action="store_true", help="interaction application")
+    parser.add_argument("--intractable-illumination", action="store_true",
+                        help="interaction application with illumination")
+    parser.add_argument("--morphing", action="store_true", help="illumination application with morphing emulator")
+    parser.add_argument("--off", nargs="*", default=None, help="shutdown the raspberry pis. Optionally provide a list of drone IDs.")
+    parser.add_argument("--kill", nargs="*", default=None, help="stop the controller. Optionally provide a list of drone IDs.")
+    parser.add_argument("--ground", action="store_true", help="ground test")
+    parser.add_argument("--dark", action="store_true", help="recording in darkness")
+    parser.add_argument("--record", action="store_true", help="run the camera only to record")
+    parser.add_argument("--skip-record", action="store_true", help="run without the camera")
+    parser.add_argument("--sensor", action="store_true", help="run with SDP31 pressure sensor node")
+    parser.add_argument("--radio", action="store_true", help="run mission with CrazyRadio")
+    parser.add_argument("--loadcell", action="store_true", help="run with loadcell")
+    parser.add_argument("--skip-confirm", action="store_true", help="run without pressing enter")
+    parser.add_argument("--skip-reboot", action="store_true", help="skip drone reboot process")
+    parser.add_argument("--skip-dispatcher", action="store_true", help="skip the dispatcher logic and UI")
+    parser.add_argument("--http-port", type=int, default=None, help="override manifest http_port")
+    parser.add_argument("--zmq-cmd-port", type=int, default=None, help="override manifest zmq_cmd_port")
+    parser.add_argument("--zmq-ack-port", type=int, default=None, help="override manifest zmq_ack_port")
+    parser.add_argument("--droneless", action="store_true", help="Run without FC conneced")
+    parser.add_argument("--log-subpath", default="", metavar="PATH",
+                        help="Subfolder under logs/<exp>/ for this run (overrides manifest log_subpath)")
+    parser.add_argument("--blender", type=str, default="", help="Connect to Blender monitor via IP:PORT")
+
+    args = parser.parse_args()
+
+    orchestrator = SwarmOrchestrator(args)
+    orchestrator.run()
