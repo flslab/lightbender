@@ -23,6 +23,11 @@ import concurrent.futures
 from logger import setup_logging
 from restart import reboot_crazyflie
 from switch_network import apply_network_mode
+from interaction_launch import (
+    interaction_application_flag,
+    interaction_mocap_args,
+    validate_interaction_modes,
+)
 
 # from Interaction.vicon_noise_tracker import run_tracker
 from pathlib import Path
@@ -151,7 +156,12 @@ class SwarmOrchestrator:
         self.logger.info(f"ZMQ Server Online at {self.ctrl_cfg['ip']}")
 
     def _get_drone_cmd(self, drone):
-        if self.args.interaction:
+        if (
+            self.args.interaction
+            or getattr(self.args, 'calibrate', False)
+            or getattr(self.args, 'braking_test', False)
+            or getattr(self.args, 'sense', False)
+        ):
             return self._get_drone_cmd_interaction(drone)
         elif self.args.illumination:
             return self._get_drone_cmd_illumination(drone)
@@ -166,12 +176,24 @@ class SwarmOrchestrator:
         led_count = drone.get('led_count', 50)
         radio_arg = f"--radio {drone['uri']}" if self.args.radio else ""
         droneless_arg = "--droneless" if self.args.droneless else ""
-        p = drone.get('init_pos', None)
-        obj_name = drone.get('label', None)
-        if p:
-            mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
-        elif obj_name:
-            mocap_args = f"--obj-name {obj_name} --vicon-mode rigidbody "
+        translation_config = (
+            self.mission.get('Interaction', {}).get('config', {})
+        )
+        wrench_config = translation_config.get('wrench_interaction')
+        detection_method = translation_config.get('detection_method')
+        if detection_method is None:
+            detection_method = (
+                (
+                    'momentum_impulse'
+                    if wrench_config.get('state_source') == 'onboard'
+                    else 'mocap_wrench'
+                )
+                if wrench_config is not None else 'velocity'
+            )
+        wrench_mode = detection_method in ('momentum_impulse', 'mocap_wrench')
+        mocap_args = interaction_mocap_args(drone, wrench_mode=wrench_mode)
+        application_flag = interaction_application_flag(self.args)
+        sense_arg = "--sense" if getattr(self.args, 'sense', False) else ""
 
         extra_markers = self.manifest.get('apparatus', None)
         extra_marker_args = ""
@@ -186,7 +208,7 @@ class SwarmOrchestrator:
             f"source {self.common_cfg['venv_path']}/bin/activate && "
             "git pull && "
             f"nohup python3 {DRONE_SCRIPT} "
-            f"--orchestrated --interaction --tag {self.tag} ",
+            f"--orchestrated {application_flag} {sense_arg} --tag {self.tag} ",
             f"--intractable-illumination" if getattr(self.args, 'intractable_illumination', False) else "",
             f"--ground-test " if self.args.ground else "",
             f"{radio_arg} "
@@ -647,7 +669,14 @@ class SwarmOrchestrator:
                     cmd = self._get_drone_cmd(drone)
                     if self._boot_remote_node(drone, cmd, "Drone"):
                         entry = {'drone': drone, 'tag': self.tag}
-                        if self.args.interaction and self.common_cfg.get('reference_object'):
+                        if (
+                            (
+                                self.args.interaction
+                                or getattr(self.args, 'calibrate', False)
+                                or getattr(self.args, 'braking_test', False)
+                            )
+                            and self.common_cfg.get('reference_object')
+                        ):
                             entry['vicon_log'] = True  # also download vicon_{tag}.json
                         return entry
                     return None
@@ -930,7 +959,12 @@ class SwarmOrchestrator:
                 self.logger.info(f"Triggering upload for {target_dir}...")
                 import subprocess
                 exp_type = "illumination"
-                if args.interaction or args.intractable_illumination:
+                if (
+                    self.args.interaction
+                    or getattr(self.args, 'calibrate', False)
+                    or getattr(self.args, 'braking_test', False)
+                    or self.args.intractable_illumination
+                ):
                     exp_type = "interaction"
                 abs_target_dir = os.path.abspath(target_dir)
                 orchestrator_dir = os.path.dirname(os.path.abspath(__file__))
@@ -947,6 +981,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
     parser.add_argument("--interaction", action="store_true", help="interaction application")
+    parser.add_argument(
+        "--sense", action="store_true",
+        help=(
+            "record Arduino potentiometer force and enable configured "
+            "potentiometer-release coasting"
+        ),
+    )
+    parser.add_argument(
+        "--calibrate", action="store_true",
+        help="run contact-free wrench model calibration and save it on each drone",
+    )
+    parser.add_argument(
+        "--braking-test", action="store_true",
+        help=(
+            "run six standalone 20-degree, 0.24 s attitude pulse repeat trials "
+            "without XYZ excitation or changing the saved calibration; no --sense"
+        ),
+    )
     parser.add_argument("--intractable-illumination", action="store_true",
                         help="interaction application with illumination")
     parser.add_argument("--morphing", action="store_true", help="illumination application with morphing emulator")
@@ -968,6 +1020,10 @@ if __name__ == "__main__":
     parser.add_argument("--blender", type=str, default="", help="Connect to Blender monitor via IP:PORT")
 
     args = parser.parse_args()
+    try:
+        validate_interaction_modes(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     orchestrator = SwarmOrchestrator(args)
     orchestrator.run()

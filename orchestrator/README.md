@@ -48,6 +48,12 @@ python orchestrator.py [OPTIONS]
 ### Important Runtime Flags:
 - **`--illumination`**: Run an illumination application mission.
 - **`--interaction`**: Run an interaction application mission.
+- **`--calibrate`**: Run the contact-free XYZ wrench-model calibration. This
+  saves per-drone parameters to `Interaction/wrench_calibration.json`; use it
+  separately from `--interaction`.
+- **`--braking-test`**: Run only the six attitude-braking repeat trials described
+  below. It skips XYZ excitation and preserves the saved calibration. Do not
+  combine it with `--interaction`, `--calibrate`, or `--sense`.
 - **`--morphing`**: Run the mission with morphing algorithms enabled.
 - **`--radio`**: Connect to drones over CrazyRadio (commands forwarded via the radio node).
 - **`--ground`**: Perform a ground test without making the drones take off (useful for testing LED interactions or servos).
@@ -73,6 +79,37 @@ When executed, the orchestrator will:
 4. Prompt you (if not skipped) to launch the swarm.
 5. Manage flight state logic and await "LANDED" confirmations.
 6. Gather logs locally and trigger the `uploader` to save them seamlessly to Google Drive.
+
+## Standalone attitude-braking repeat test
+
+Use a controller checkout that supports `--braking-test`. In
+`swarm_manifest.yaml`, keep `controller.mission_path: ../Interaction/SFL` and
+`controller.mission_file: translation_inertia.yaml`. From the LightBender repo:
+
+```bash
+cd orchestrator
+python3 orchestrator.py --braking-test --skip-record
+```
+
+This is a **real flight command**, with the normal launch confirmation. It
+automatically forwards `--log --smooth-controller-rate 100 --cf-log-period 10`.
+No potentiometer/Arduino input is needed; omit `--sense`. Omit `--skip-record`
+only when video recording is also wanted and the camera node is available.
+
+The controller uses the calibration nominal hover position and performs six
+contact-free trials, alternating **-Y, +Y, -Y, +Y, -Y, +Y**. Each uses a 20-degree
+acceleration pulse for 0.24 s, level for 0.20 s, opposite 20-degree braking for
+0.24 s, then 0.65 s of level observation before position recovery. Trial
+readiness and existing flight boundary/localization protections remain active.
+Confirm the same clear test volume used for calibration before launching.
+
+Unlike `--calibrate`, this repeat test does not run the XYZ excitation, fit a
+replacement flight calibration, or overwrite `Interaction/wrench_calibration.json`.
+Raw trial data and the exact overridden protocol are logged for independent
+offline validation. The mission YAML itself is not rewritten. Downloaded logs
+remain under `orchestrator/logs/translation_inertia_<timestamp>/`; use the test
+mode/protocol recorded inside the flight log to distinguish them from normal
+interaction and full-calibration runs.
 
 ## Mock Blender Flow
 
