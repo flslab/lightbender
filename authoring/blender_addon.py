@@ -816,6 +816,79 @@ class DrawEraseGroup(bpy.types.PropertyGroup):
     )
 
 
+class ShortRangeTileTiming(bpy.types.PropertyGroup):
+    """Render timing for one short-range marker tile."""
+    tile_i: IntProperty(name="i", default=0, min=0)
+    tile_j: IntProperty(name="j", default=0, min=0)
+    off_time: FloatProperty(
+        name="Off (s)",
+        description="Time after takeoff when this tile turns off",
+        default=2.0,
+        min=0.0,
+    )
+    on_time: FloatProperty(
+        name="On (s)",
+        description="Time before landing when this tile turns back on",
+        default=8.0,
+        min=0.0,
+    )
+
+
+class MarkerGridProperties(bpy.types.PropertyGroup):
+    map_filepath: StringProperty(
+        name="Map File",
+        description="Path to marker_grid.json",
+        subtype="FILE_PATH",
+        default="orchestrator/marker_grid.json"
+    )
+    marker_size: FloatProperty(
+        name="Marker Size",
+        description="Diameter of the sphere markers",
+        default=0.05,
+        min=0.001
+    )
+    short_range_marker_size: FloatProperty(
+        name="Short Marker Size Override",
+        description="Diameter of short-range markers; 0 uses marker_size from the map",
+        default=0.0,
+        min=0.0,
+    )
+    short_range_timings: CollectionProperty(type=ShortRangeTileTiming)
+    short_range_active_timing_index: IntProperty(default=0)
+    min_brightness: FloatProperty(
+        name="Dark Intensity",
+        description="Marker intensity for 0 bits; use a nonzero value to keep dark markers visible for tracking",
+        default=0.0,
+        min=0.0,
+        max=0.79
+    )
+    max_brightness: FloatProperty(
+        name="Max Brightness",
+        description="Brightness for 1 bits",
+        default=1.0,
+        min=0.0,
+        max=1.0
+    )
+    fps: FloatProperty(
+        name="Blinking FPS",
+        description="Blinking rate in frames per second",
+        default=50.0,
+        min=1.0
+    )
+    payload_size: IntProperty(
+        name="Payload Size",
+        description="Number of payload bits for marker ID",
+        default=4,
+        min=1
+    )
+    render_output_dir: StringProperty(
+        name="Render Output",
+        description="Directory to save rendered videos",
+        subtype="DIR_PATH",
+        default="//renders/"
+    )
+
+
 class DroneProperties(bpy.types.PropertyGroup):
     drone_type: EnumProperty(
         name="Type",
@@ -1658,6 +1731,22 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             var.targets[0].data_path = '["servo_2"]'
             d.driver.expression = "-radians(angle)"
 
+        # 4. Attach Downward-Facing Camera
+        cam_data = bpy.data.cameras.new(name="Drone_Camera_Data")
+        cam_data.type = 'PERSP'
+        cam_data.lens = 2.85
+        cam_data.sensor_fit = 'VERTICAL'
+        cam_data.sensor_width = 3.84
+        cam_data.sensor_height = 2.4
+        cam_data.clip_start = 0.001
+        cam_data.clip_end = 10.0
+
+        cam_obj = bpy.data.objects.new("Drone_Camera", cam_data)
+        context.collection.objects.link(cam_obj)
+        cam_obj.parent = drone_base
+        cam_obj.location = (0, 0, 0)
+        cam_obj.rotation_euler = (0, 0, math.radians(-90.0))
+
         # Select Base
         bpy.ops.object.select_all(action='DESELECT')
         drone_base.select_set(True)
@@ -1755,6 +1844,45 @@ class UL_DronePointerList(bpy.types.UIList):
         split = layout.split(factor=0.3)
         split.prop(item, "value", text="", emboss=False)  # Editable number
         split.prop(item, "color_expression", text="", emboss=False)
+
+
+# ------------------------------------------------------------------------
+#    Short-Range Marker Timing UI
+# ------------------------------------------------------------------------
+
+class DRONE_OT_add_short_range_timing(bpy.types.Operator):
+    bl_idname = "drone.add_short_range_timing"
+    bl_label = "Add Short-Range Tile Timing"
+
+    def execute(self, context):
+        props = context.scene.marker_grid_props
+        props.short_range_timings.add()
+        props.short_range_active_timing_index = len(props.short_range_timings) - 1
+        return {'FINISHED'}
+
+
+class DRONE_OT_remove_short_range_timing(bpy.types.Operator):
+    bl_idname = "drone.remove_short_range_timing"
+    bl_label = "Remove Short-Range Tile Timing"
+
+    def execute(self, context):
+        props = context.scene.marker_grid_props
+        idx = props.short_range_active_timing_index
+        if 0 <= idx < len(props.short_range_timings):
+            props.short_range_timings.remove(idx)
+            props.short_range_active_timing_index = min(
+                idx, max(0, len(props.short_range_timings) - 1))
+        return {'FINISHED'}
+
+
+class MARKER_UL_short_range_tile_timings(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, "tile_i", text="i")
+        row.prop(item, "tile_j", text="j")
+        row.prop(item, "off_time", text="Off")
+        row.prop(item, "on_time", text="On")
 
 
 # ------------------------------------------------------------------------
@@ -4315,6 +4443,303 @@ class DRONE_OT_select_lb_in_scene(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DRONE_OT_generate_marker_grid(bpy.types.Operator):
+    """Generate the relative localization map grid"""
+    bl_idname = "drone.generate_marker_grid"
+    bl_label = "Generate Marker Grid"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.marker_grid_props
+
+        json_path = bpy.path.abspath(props.map_filepath)
+        if not os.path.exists(json_path):
+            json_path = os.path.join(get_repo_dir(), props.map_filepath)
+            if not os.path.exists(json_path):
+                self.report({'ERROR'}, f"Marker map not found: {props.map_filepath}")
+                return {'CANCELLED'}
+
+        import json
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+
+        markers = data.get("markers", [])
+        short_range = data.get("short_range") or {}
+        payload_limit = 1 << props.payload_size
+
+        try:
+            # Marker-map coordinates already use the Blender/world FLU frame:
+            # +X forward, +Y left, +Z up. The coordinator is the source of
+            # truth for both main- and short-range marker placement.
+            marker_specs = []
+            for marker in markers:
+                location = (
+                    float(marker["global_x"]),
+                    float(marker["global_y"]),
+                    float(marker["global_z"]),
+                )
+                marker_id = marker["id"]
+                if (isinstance(marker_id, bool) or
+                        not isinstance(marker_id, int) or
+                        not all(math.isfinite(value) for value in location) or
+                        not 0 <= marker_id < payload_limit):
+                    raise ValueError
+                marker_specs.append((
+                    int(marker["i"]), int(marker["j"]), marker_id, location))
+
+            short_marker_specs = []
+            short_tile_keys = set()
+            for tile in short_range.get("tiles", []):
+                tile_i = int(tile["i"])
+                tile_j = int(tile["j"])
+                tile_key = (tile_i, tile_j)
+                if tile_key in short_tile_keys:
+                    raise ValueError
+                short_tile_keys.add(tile_key)
+
+                local_keys = set()
+                for marker in tile.get("markers", []):
+                    local_i = int(marker["local_i"])
+                    local_j = int(marker["local_j"])
+                    local_key = (local_i, local_j)
+                    marker_id = marker["id"]
+                    location = (
+                        float(marker["global_x"]),
+                        float(marker["global_y"]),
+                        float(marker["global_z"]),
+                    )
+                    if (isinstance(marker_id, bool) or
+                            not isinstance(marker_id, int) or
+                            local_key in local_keys or
+                            not all(math.isfinite(value) for value in location) or
+                            not 0 <= marker_id < payload_limit):
+                        raise ValueError
+                    local_keys.add(local_key)
+                    short_marker_specs.append((
+                        tile_i, tile_j, local_i, local_j, marker_id, location))
+
+            map_short_marker_size = float(
+                short_range.get("marker_size", props.marker_size))
+            short_marker_size = (
+                props.short_range_marker_size or map_short_marker_size)
+            if short_marker_specs and (
+                    not math.isfinite(short_marker_size) or
+                    short_marker_size <= 0.0):
+                raise ValueError
+        except (AttributeError, KeyError, TypeError, ValueError):
+            self.report(
+                {'ERROR'},
+                "Marker map contains invalid coordinates, IDs, or short-range metadata")
+            return {'CANCELLED'}
+
+        timings_by_tile = {}
+        if short_tile_keys:
+            for timing in props.short_range_timings:
+                tile_key = (timing.tile_i, timing.tile_j)
+                if (tile_key not in short_tile_keys or
+                        tile_key in timings_by_tile or
+                        not math.isfinite(timing.off_time) or
+                        not math.isfinite(timing.on_time) or
+                        timing.on_time < timing.off_time):
+                    self.report(
+                        {'ERROR'},
+                        "Short-range timing must reference one map tile and turn off before turning on")
+                    return {'CANCELLED'}
+                timings_by_tile[tile_key] = timing
+
+        # Delete existing markers only after the replacement map is valid.
+        existing = [
+            obj for obj in scene.objects
+            if obj.name.startswith(("GridMarker_", "ShortRangeMarker_"))
+        ]
+        for obj in existing:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+        # We need a shared material using Object Color
+        mat = bpy.data.materials.get("GridMarker_Material")
+        if mat:
+            bpy.data.materials.remove(mat)
+
+        mat = bpy.data.materials.new(name="GridMarker_Material")
+        mat.use_nodes = True
+        mat.node_tree.nodes.clear()
+        node_out = mat.node_tree.nodes.new('ShaderNodeOutputMaterial')
+        node_emit = mat.node_tree.nodes.new('ShaderNodeEmission')
+        node_obj = mat.node_tree.nodes.new('ShaderNodeObjectInfo')
+        mat.node_tree.links.new(node_obj.outputs['Color'], node_emit.inputs['Color'])
+        node_emit.inputs['Strength'].default_value = 5.0
+
+        # Re-link material output
+        mat.node_tree.links.new(node_emit.outputs['Emission'], node_out.inputs['Surface'])
+
+        # Force scene fps to 120 as required for export
+        scene.render.fps = 120
+
+        fps = props.fps
+        bit_duration_ms = 1000.0 / fps
+        frames_per_bit = (bit_duration_ms / 1000.0) * scene.render.fps
+
+        generated_objs = []
+        short_objects_by_tile = {}
+
+        def create_marker(name, marker_id, location, marker_size):
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                radius=marker_size / 2.0, location=location)
+            obj = context.active_object
+            obj.name = name
+            obj.data.materials.append(mat)
+
+            if marker_id == 0:
+                obj.color = (props.max_brightness, props.max_brightness, props.max_brightness, 1.0)
+            else:
+                packet = [1, 0]
+                for bit_idx in range(props.payload_size - 1, -1, -1):
+                    packet.append((marker_id >> bit_idx) & 1)
+                packet.extend([1, 1, 1, 1])
+
+                for step, bit in enumerate(packet):
+                    val = props.max_brightness if bit == 1 else props.min_brightness
+                    obj.color = (val, val, val, 1.0)
+                    obj.keyframe_insert(data_path="color", frame=1 + step * frames_per_bit)
+
+                # Dummy keyframe at the exact end of the packet so the cycle modifier knows the true length of the loop
+                obj.color = (val, val, val, 1.0) # Keeps the last value
+                obj.keyframe_insert(data_path="color", frame=1 + len(packet) * frames_per_bit)
+
+                # Set interpolation to CONSTANT and add CYCLES modifier
+                action = obj.animation_data.action
+                action.name = f"Blink_{obj.name}"
+                for fc in action.fcurves:
+                    if fc.data_path == "color":
+                        for kp in fc.keyframe_points:
+                            kp.interpolation = 'CONSTANT'
+                        fc.modifiers.new('CYCLES')
+
+            generated_objs.append(obj)
+            return obj
+
+        for i, j, marker_id, location in marker_specs:
+            create_marker(
+                f"GridMarker_{marker_id}_{i}_{j}",
+                marker_id,
+                location,
+                props.marker_size,
+            )
+
+        for (tile_i, tile_j, local_i, local_j,
+             marker_id, location) in short_marker_specs:
+            obj = create_marker(
+                (f"ShortRangeMarker_{tile_i}_{tile_j}_"
+                 f"{local_i}_{local_j}_{marker_id}"),
+                marker_id,
+                location,
+                short_marker_size,
+            )
+            obj.hide_render = True
+            obj["marker_grid"] = "short_range"
+            obj["tile_i"] = tile_i
+            obj["tile_j"] = tile_j
+            obj["local_i"] = local_i
+            obj["local_j"] = local_j
+            obj["marker_id"] = marker_id
+            short_objects_by_tile.setdefault((tile_i, tile_j), []).append(obj)
+
+        # Tiles are on for takeoff, off during cruise, and back on for landing.
+        timeline_fps = scene.render.fps / scene.render.fps_base
+        for tile_key, timing in timings_by_tile.items():
+            off_frame = scene.frame_start + timing.off_time * timeline_fps
+            on_frame = scene.frame_start + timing.on_time * timeline_fps
+            for obj in short_objects_by_tile.get(tile_key, []):
+                for data_path in ("hide_render", "hide_viewport"):
+                    setattr(obj, data_path, False)
+                    obj.keyframe_insert(data_path=data_path, frame=scene.frame_start)
+                    setattr(obj, data_path, True)
+                    obj.keyframe_insert(data_path=data_path, frame=off_frame)
+                    setattr(obj, data_path, False)
+                    obj.keyframe_insert(data_path=data_path, frame=on_frame)
+
+                action = obj.animation_data.action
+                if not action.name.startswith("Blink_"):
+                    action.name = f"Visibility_{obj.name}"
+                for fc in action.fcurves:
+                    if fc.data_path in {"hide_render", "hide_viewport"}:
+                        for kp in fc.keyframe_points:
+                            kp.interpolation = 'CONSTANT'
+
+        context.view_layer.update()
+        selectable_objs = [obj for obj in generated_objs
+                           if not obj.hide_viewport]
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in selectable_objs:
+            obj.select_set(True)
+        if selectable_objs:
+            context.view_layer.objects.active = selectable_objs[-1]
+
+        self.report(
+            {'INFO'},
+            (f"Generated {len(marker_specs)} main and "
+             f"{len(short_marker_specs)} short-range markers."))
+        return {'FINISHED'}
+
+
+class DRONE_OT_render_drone_cameras(bpy.types.Operator):
+    """Render videos from the cameras of selected LightBenders in the background"""
+    bl_idname = "drone.render_drone_cameras"
+    bl_label = "Render Selected Cameras"
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.marker_grid_props
+
+        if not bpy.data.filepath:
+            self.report({'ERROR'}, "Please save the Blend file first.")
+            return {'CANCELLED'}
+
+        bpy.ops.wm.save_mainfile()
+
+        selected_drones = [obj for obj in context.selected_objects if "servo_1" in obj]
+        if not selected_drones:
+            self.report({'WARNING'}, "No LightBenders selected.")
+            return {'CANCELLED'}
+
+        import subprocess
+        import tempfile
+        import os
+
+        output_dir = bpy.path.abspath(props.render_output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        for drone in selected_drones:
+            cam = next((child for child in drone.children if child.name.startswith("Drone_Camera")), None)
+            if not cam:
+                self.report({'WARNING'}, f"No camera found on {drone.name}")
+                continue
+
+            out_path = os.path.join(output_dir, f"render_{drone.name}.mp4")
+
+            script = f'''import bpy
+scene = bpy.context.scene
+scene.camera = bpy.data.objects.get("{cam.name}")
+scene.render.resolution_x = 640
+scene.render.resolution_y = 400
+scene.render.fps = 120
+scene.render.image_settings.file_format = "FFMPEG"
+scene.render.ffmpeg.format = "MPEG4"
+scene.render.filepath = "{out_path}"
+bpy.ops.render.render(animation=True, write_still=False)
+'''
+            fd, script_path = tempfile.mkstemp(suffix=".py", text=True)
+            with os.fdopen(fd, 'w') as f:
+                f.write(script)
+
+            cmd = [bpy.app.binary_path, "-b", bpy.data.filepath, "-P", script_path]
+            subprocess.Popen(cmd)
+
+        self.report({'INFO'}, f"Started background rendering for {len(selected_drones)} cameras.")
+        return {'FINISHED'}
+
+
 class DRONE_OT_transform_and_place(bpy.types.Operator):
     """Convert SVG to LightBender layout and create LightBenders"""
     bl_idname = "drone.transform_and_place"
@@ -5615,12 +6040,62 @@ class VIEW3D_PT_lb_swarm_monitor(bpy.types.Panel):
             else:
                 detail_box.label(text="No LightBender selected", icon='INFO')
 
+class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LightBender"
+    bl_label = "Marker Grid & Tracking"
+    bl_parent_id = "VIEW3D_PT_drone_swarm"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.marker_grid_props
+
+        layout.label(text="Grid Generation:", icon='GRID')
+        box = layout.box()
+        box.prop(props, "map_filepath")
+
+        row = box.row(align=True)
+        row.prop(props, "marker_size")
+        row.prop(props, "short_range_marker_size")
+
+        row = box.row(align=True)
+        row.prop(props, "min_brightness")
+        row.prop(props, "max_brightness")
+
+        row = box.row(align=True)
+        row.prop(props, "fps")
+        row.prop(props, "payload_size")
+
+        box.label(text="Short-Range Tile Timing (seconds):")
+        row = box.row()
+        row.template_list(
+            "MARKER_UL_short_range_tile_timings", "", props,
+            "short_range_timings",
+            props, "short_range_active_timing_index", rows=3)
+        col = row.column(align=True)
+        col.operator("drone.add_short_range_timing", icon='ADD', text="")
+        col.operator("drone.remove_short_range_timing", icon='REMOVE', text="")
+
+        box.operator("drone.generate_marker_grid", text="Generate Marker Grid")
+
+        layout.separator()
+        layout.label(text="Camera Rendering:", icon='CAMERA_DATA')
+        box = layout.box()
+        box.prop(props, "render_output_dir")
+        box.operator("drone.render_drone_cameras", text="Render Selected Cameras", icon='RENDER_ANIMATION')
+
+
 # ------------------------------------------------------------------------
 #    Registration
 # ------------------------------------------------------------------------
 
 classes = (
     LightBenderAddonPreferences,
+    ShortRangeTileTiming,
+    MarkerGridProperties,
     LEDPointer,
     ColorItem,
     SwarmDroneItem,
@@ -5631,6 +6106,9 @@ classes = (
     DRONE_OT_add_pointer,
     DRONE_OT_remove_pointer,
     UL_DronePointerList,
+    DRONE_OT_add_short_range_timing,
+    DRONE_OT_remove_short_range_timing,
+    MARKER_UL_short_range_tile_timings,
     UL_GlobalColorList,
     UL_SwarmDroneList,
     UL_DrawEraseGroups,
@@ -5653,6 +6131,8 @@ classes = (
     DRONE_OT_reset_drift,
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
+    DRONE_OT_generate_marker_grid,
+    DRONE_OT_render_drone_cameras,
     DRONE_OT_transform_and_place,
     DRONE_OT_generate_morph,
     DRONE_OT_add_global_color,
@@ -5678,6 +6158,7 @@ classes = (
     VIEW3D_PT_lb_simulators,
     VIEW3D_PT_lb_export,
     VIEW3D_PT_lb_swarm_monitor,
+    VIEW3D_PT_lb_marker_grid,
 )
 
 @persistent
@@ -5701,6 +6182,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    bpy.types.Scene.marker_grid_props = PointerProperty(type=MarkerGridProperties)
     bpy.types.Scene.drone_props = PointerProperty(type=DroneProperties)
     bpy.types.Object.drone_props = PointerProperty(type=DroneProperties)
 
@@ -5720,6 +6202,7 @@ def unregister():
     if on_load_reset_properties in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(on_load_reset_properties)
 
+    del bpy.types.Scene.marker_grid_props
     del bpy.types.Scene.drone_props
     del bpy.types.Object.drone_props
 
