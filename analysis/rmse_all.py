@@ -8,10 +8,28 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.widgets import Slider, Button
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
 import glob
 import os
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOGS_ROOT = os.path.join(REPO_ROOT, 'orchestrator', 'logs')
+MIN_ACTUAL_FRAME_GAP_S = 0.05
+ACTUAL_FRAME_GAP_FACTOR = 5.0
+
+
+def get_time_range_pairs(data):
+    """Return logged start/stop pairs, closing an unfinished final range."""
+    start_times = data['start_times']
+    stop_times = data['stop_times']
+
+    if len(stop_times) == len(start_times) - 1:
+        stop_times = [*stop_times, data['frames'][-1]['time']]
+
+    return list(zip(start_times, stop_times))
 
 
 # ==========================================
@@ -83,6 +101,18 @@ def transform_points(points_body, drone_pos, drone_rpy_rad):
     return points_world
 
 
+def marker_position_to_body_origin(
+        marker_position_world, marker_position_body, drone_rpy_rad):
+    """Recover the drone body origin from an offset mocap marker.
+
+    All positions use metres. Both the world and drone body frames are FLU,
+    and ``drone_rpy_rad`` describes the body-to-world rotation.
+    """
+    body_to_world = R.from_euler('xyz', drone_rpy_rad, degrees=False)
+    marker_offset_world = body_to_world.apply(marker_position_body)
+    return np.asarray(marker_position_world) - marker_offset_world
+
+
 def set_axes_equal(ax, points):
     """
     Sets the 3D axes to have equal aspect ratio based on the data bounds.
@@ -111,7 +141,11 @@ def set_axes_equal(ax, points):
 # ==========================================
 
 class DroneProcessor:
-    def __init__(self, drone_id, yaml_config, json_path=None, act_yaml_config=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, visualize_only=False, time_range_index=None):
+    def __init__(
+            self, drone_id, yaml_config, json_path=None, act_yaml_config=None,
+            use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0,
+            max_s=10.0, ignore_rpy=False, visualize_only=False,
+            time_range_index=None, mocap_marker_position=None):
         self.drone_id = drone_id
         self.yaml_config = yaml_config
         self.json_path = json_path
@@ -124,6 +158,13 @@ class DroneProcessor:
         self.ignore_rpy = ignore_rpy
         self.visualize_only = visualize_only
         self.time_range_index = time_range_index
+        self.mocap_marker_position = np.asarray(
+            [0.0, 0.0, 0.0]
+            if mocap_marker_position is None else mocap_marker_position,
+            dtype=float,
+        )
+        if self.mocap_marker_position.shape != (3,):
+            raise ValueError("mocap_marker_position must contain x, y, and z")
 
         # Load Interpolators
         self._load_gt()
@@ -396,7 +437,7 @@ class DroneProcessor:
             data = json.load(f)
 
         if 'start_times' in data and 'stop_times' in data:
-            pairs = list(zip(data['start_times'], data['stop_times']))
+            pairs = get_time_range_pairs(data)
             self.start_time = pairs[self.time_range_index][0]
             self.stop_time = pairs[self.time_range_index][1]
         else:
@@ -434,6 +475,24 @@ class DroneProcessor:
 
         # Convert Vicon to interpolator for easy synchronization relative to start_time
         rel_times = vicon_times - self.start_time
+        frame_intervals = np.diff(rel_times)
+        positive_intervals = frame_intervals[frame_intervals > 0.0]
+        nominal_frame_interval = (
+            float(np.median(positive_intervals))
+            if len(positive_intervals) > 0 else MIN_ACTUAL_FRAME_GAP_S
+        )
+        self.max_actual_frame_gap = max(
+            MIN_ACTUAL_FRAME_GAP_S,
+            ACTUAL_FRAME_GAP_FACTOR * nominal_frame_interval,
+        )
+        self.actual_frame_times = rel_times
+        missing_frame_gaps = frame_intervals > self.max_actual_frame_gap
+        if np.any(missing_frame_gaps):
+            print(
+                f"WARNING: {self.drone_id}: excluding "
+                f"{np.count_nonzero(missing_frame_gaps)} actual-frame gap(s); "
+                f"longest gap is {np.max(frame_intervals[missing_frame_gaps]):.3f}s."
+            )
         self.act_pos_fn = interp1d(rel_times, vicon_pos, axis=0, kind='linear', fill_value="extrapolate",
                                    bounds_error=False)
 
@@ -454,17 +513,71 @@ class DroneProcessor:
 
         self.act_max_rel_time = rel_times[-1]
 
+    def _has_actual_frame_coverage(self, t_rel):
+        """Return whether actual frames safely bracket this relative time."""
+        index = np.searchsorted(self.actual_frame_times, t_rel)
+        if (
+                index < len(self.actual_frame_times)
+                and np.isclose(
+                    self.actual_frame_times[index], t_rel, rtol=0.0, atol=1e-9
+                )):
+            return True
+        if index == 0 or index == len(self.actual_frame_times):
+            return False
+        return bool(
+            self.actual_frame_times[index] - self.actual_frame_times[index - 1]
+            <= self.max_actual_frame_gap
+        )
+
+    def get_positions_at_relative_time(self, t_rel):
+        """Returns (GT_Position, Actual_Position, Valid_Bool)."""
+        if t_rel < 0 or t_rel > self.gt_duration or t_rel > self.act_max_rel_time:
+            return None, None, False
+
+        gt_pos = np.asarray(self.gt_pos_fn(t_rel), dtype=float)
+        if not np.all(np.isfinite(gt_pos)):
+            return None, None, False
+
+        if self.visualize_only:
+            return gt_pos, None, True
+
+        if not self.act_yaml_config and not self._has_actual_frame_coverage(t_rel):
+            return None, None, False
+
+        act_pos = np.asarray(self.act_pos_fn(t_rel), dtype=float)
+        if not np.all(np.isfinite(act_pos)):
+            return None, None, False
+
+        # A mocap tvec locates the tracked marker. Convert it to the body
+        # origin by rotating the body-frame marker position into world FLU.
+        # This applies only to logs; YAML trajectories already describe the
+        # drone body origin.
+        if (
+                not self.act_yaml_config
+                and np.any(self.mocap_marker_position != 0.0)):
+            actual_rpy = np.asarray([
+                self.act_r_fn(t_rel),
+                self.act_p_fn(t_rel),
+                self.act_y_fn(t_rel),
+            ], dtype=float)
+            if not np.all(np.isfinite(actual_rpy)):
+                return None, None, False
+            act_pos = marker_position_to_body_origin(
+                act_pos, self.mocap_marker_position, actual_rpy
+            )
+
+        return gt_pos, act_pos, True
+
     def get_state_at_relative_time(self, t_rel):
         """
         Returns (GT_LEDs, Act_LEDs, Valid_Bool)
         t_rel: Time in seconds relative to the mission start (yaml t=0, json t=start_time)
         """
-        # Validity check: Must be within GT definition and have actual data
-        if t_rel < 0 or t_rel > self.gt_duration or t_rel > self.act_max_rel_time:
+        g_pos, a_pos, valid = self.get_positions_at_relative_time(t_rel)
+        if not valid:
             return None, None, False
 
         # --- Ground Truth State ---
-        g_pos = self.gt_pos_fn(t_rel)
         g_yaw = self.gt_yaw_fn(t_rel)  # radians
         g_servos = self.gt_servo_fn(t_rel)  # degrees
         g_rpy = [0.0, 0.0, float(g_yaw) * 180 / np.pi]
@@ -478,7 +591,6 @@ class DroneProcessor:
 
         # --- Actual State ---
         if self.act_yaml_config:
-            a_pos = self.act_pos_fn(t_rel)
             if self.ignore_rpy:
                 a_rpy = [0.0, 0.0, 0.0]
             else:
@@ -493,9 +605,6 @@ class DroneProcessor:
             
             return leds_gt_world, leds_act_world, True
         else:
-            a_pos = self.act_pos_fn(t_rel)
-            if np.any(np.isnan(a_pos)): return None, None, False
-
             if self.ignore_rpy:
                 a_rpy = [0.0, 0.0, 0.0]
             else:
@@ -515,7 +624,198 @@ class DroneProcessor:
 # 3. MAIN ANALYSIS LOGIC
 # ==========================================
 
-def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0, max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False, lit_only=False, trim_start=0.0, trim_end=0.0):
+def resolve_yaml_file(yaml_file, tag):
+    """Resolve the mission YAML explicitly or from a run's tag directory."""
+    if yaml_file:
+        yaml_path = os.path.abspath(os.path.expanduser(yaml_file))
+        if not os.path.isfile(yaml_path):
+            raise FileNotFoundError(f"YAML file not found: {yaml_path}")
+        return yaml_path
+
+    if not tag:
+        raise ValueError("Provide either --tag or --yaml.")
+
+    tag_directories = []
+    for root, directory_names, _ in os.walk(LOGS_ROOT):
+        if tag in directory_names:
+            tag_directories.append(os.path.join(root, tag))
+
+    if not tag_directories:
+        raise FileNotFoundError(
+            f"No log directory found for tag '{tag}' under {LOGS_ROOT}"
+        )
+    if len(tag_directories) > 1:
+        locations = ', '.join(sorted(tag_directories))
+        raise ValueError(
+            f"Multiple log directories found for tag '{tag}': {locations}. "
+            "Provide --yaml explicitly."
+        )
+
+    tag_directory = tag_directories[0]
+    yaml_files = sorted(
+        os.path.join(tag_directory, filename)
+        for filename in os.listdir(tag_directory)
+        if filename.lower().endswith(('.yaml', '.yml'))
+        and os.path.isfile(os.path.join(tag_directory, filename))
+    )
+
+    if not yaml_files:
+        raise FileNotFoundError(
+            f"No YAML file found in the tag directory: {tag_directory}"
+        )
+    if len(yaml_files) > 1:
+        filenames = ', '.join(os.path.basename(path) for path in yaml_files)
+        raise ValueError(
+            f"Multiple YAML files found in {tag_directory}: {filenames}. "
+            "Provide --yaml explicitly."
+        )
+
+    return yaml_files[0]
+
+
+def get_position_mean_alignment(processors, timestamps):
+    """Return the constant translation that aligns the GT and actual means."""
+    gt_positions = []
+    act_positions = []
+
+    for t in timestamps:
+        for p in processors:
+            gt_pos, act_pos, valid = p.get_positions_at_relative_time(t)
+            if valid and act_pos is not None:
+                gt_positions.append(gt_pos)
+                act_positions.append(act_pos)
+
+    if not gt_positions:
+        return np.zeros(3), None, None
+
+    gt_mean = np.mean(gt_positions, axis=0)
+    act_mean = np.mean(act_positions, axis=0)
+    return act_mean - gt_mean, gt_mean, act_mean
+
+
+def get_trajectory_positions(processor, timestamps, gt_translation=None):
+    """Return matching valid GT and actual position samples for one drone."""
+    if gt_translation is None:
+        gt_translation = np.zeros(3)
+
+    gt_positions = []
+    act_positions = []
+    for t in timestamps:
+        gt_pos, act_pos, valid = processor.get_positions_at_relative_time(t)
+        if valid and act_pos is not None:
+            gt_positions.append(gt_pos + gt_translation)
+            act_positions.append(act_pos)
+
+    if not gt_positions:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    return np.asarray(gt_positions), np.asarray(act_positions)
+
+
+def calculate_trajectory_rmse(processors, timestamps, gt_translation=None):
+    """Calculate symmetric nearest-neighbor position RMSE without time pairing."""
+    metrics = {'combined_rmse_mm': None, 'drones': {}}
+    combined_sse = 0.0
+    combined_count = 0
+
+    for p in processors:
+        gt_positions, act_positions = get_trajectory_positions(
+            p, timestamps, gt_translation
+        )
+
+        if len(gt_positions) == 0:
+            metrics['drones'][p.drone_id] = {
+                'rmse_mm': None,
+                'gt_samples': 0,
+                'actual_samples': 0,
+            }
+            continue
+
+        gt_to_act = cKDTree(act_positions).query(gt_positions)[0]
+        act_to_gt = cKDTree(gt_positions).query(act_positions)[0]
+        sse = np.sum(gt_to_act ** 2) + np.sum(act_to_gt ** 2)
+        count = len(gt_to_act) + len(act_to_gt)
+        rmse_mm = np.sqrt(sse / count) * 1000.0
+
+        metrics['drones'][p.drone_id] = {
+            'rmse_mm': float(rmse_mm),
+            'gt_samples': len(gt_positions),
+            'actual_samples': len(act_positions),
+        }
+        combined_sse += sse
+        combined_count += count
+
+    if combined_count > 0:
+        metrics['combined_rmse_mm'] = float(
+            np.sqrt(combined_sse / combined_count) * 1000.0
+        )
+
+    return metrics
+
+
+def calculate_segmented_trajectory_rmse(
+        processors, timestamps, segment_duration, analysis_start, analysis_end,
+        gt_translation=None, accumulative=False):
+    """Calculate trajectory RMSE in fixed or accumulative time segments."""
+    if segment_duration <= 0.0:
+        raise ValueError("trajectory RMSE segment duration must be positive")
+
+    result = {
+        'segment_duration_s': float(segment_duration),
+        'accumulative': bool(accumulative),
+        'segments': [],
+    }
+    segment_start = analysis_start
+    while segment_start < analysis_end:
+        segment_end = min(segment_start + segment_duration, analysis_end)
+        interval_start = analysis_start if accumulative else segment_start
+        first_index = np.searchsorted(timestamps, interval_start, side='left')
+        last_index = np.searchsorted(timestamps, segment_end, side='left')
+        segment_timestamps = timestamps[first_index:last_index]
+        metrics = calculate_trajectory_rmse(
+            processors, segment_timestamps, gt_translation
+        )
+        result['segments'].append({
+            'start_time_s': float(interval_start),
+            'end_time_s': float(segment_end),
+            'time_s': float(
+                segment_end if accumulative
+                else (segment_start + segment_end) / 2.0
+            ),
+            **metrics,
+        })
+        segment_start = segment_end
+
+    return result
+
+
+def calculate_rmse(
+        yaml_file, tag, compare_yaml=None, use_kinematics=False, max_v=2.0,
+        max_a=1.0, max_j=2.0, max_s=10.0, ignore_rpy=False,
+        lit_only=False, trim_start=0.0, trim_end=0.0,
+        align_position_means=False, position_only=False,
+        trajectory_rmse=False, trajectory_rmse_segment_duration=None,
+        trajectory_rmse_accumulative=False, mocap_marker_position=None):
+    if lit_only and position_only:
+        raise ValueError("lit_only and position_only cannot be enabled together")
+    if (
+            trajectory_rmse_segment_duration is not None
+            and trajectory_rmse_segment_duration <= 0.0):
+        raise ValueError("trajectory RMSE segment duration must be positive")
+    if (
+            trajectory_rmse_accumulative
+            and trajectory_rmse_segment_duration is None):
+        raise ValueError(
+            "accumulative trajectory RMSE requires a segment duration"
+        )
+    mocap_marker_position = np.asarray(
+        [0.0, 0.0, 0.0]
+        if mocap_marker_position is None else mocap_marker_position,
+        dtype=float,
+    )
+    if mocap_marker_position.shape != (3,):
+        raise ValueError("mocap_marker_position must contain x, y, and z")
+
     print(f"Loading Configuration from {yaml_file}...")
     with open(yaml_file, 'r') as f:
         yaml_data = yaml.safe_load(f)
@@ -543,7 +843,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
                 with open(files[0], 'r') as f:
                     d = json.load(f)
                 if 'start_times' in d and 'stop_times' in d:
-                    sample_pairs = list(zip(d['start_times'], d['stop_times']))
+                    sample_pairs = get_time_range_pairs(d)
                     break
         if sample_pairs is not None:
             print("\nMultiple time ranges found in log files:")
@@ -555,7 +855,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     for drone_id, config in drones_config.items():
         if visualize_only:
             try:
-                p = DroneProcessor(drone_id, config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy, visualize_only=True)
+                p = DroneProcessor(drone_id, config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy, visualize_only=True, mocap_marker_position=mocap_marker_position)
                 processors.append(p)
             except Exception as e:
                 print(f"Error loading data for {drone_id}: {e}")
@@ -567,7 +867,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
                 print(f"WARNING: Drone '{drone_id}' not found in {compare_yaml}. Skipping.")
                 continue
             try:
-                p = DroneProcessor(drone_id, config, json_path=None, act_yaml_config=act_config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy)
+                p = DroneProcessor(drone_id, config, json_path=None, act_yaml_config=act_config, use_kinematics=use_kinematics, max_v=max_v, max_a=max_a, max_j=max_j, max_s=max_s, ignore_rpy=ignore_rpy, mocap_marker_position=mocap_marker_position)
                 processors.append(p)
             except Exception as e:
                 print(f"Error loading data for {drone_id}: {e}")
@@ -591,7 +891,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         print(f"Found log for {drone_id}: {json_file}")
 
         try:
-            p = DroneProcessor(drone_id, config, json_file, compare_yaml, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy, time_range_index=time_range_index)
+            p = DroneProcessor(drone_id, config, json_file, compare_yaml, use_kinematics, max_v, max_a, max_j, max_s, ignore_rpy, time_range_index=time_range_index, mocap_marker_position=mocap_marker_position)
             processors.append(p)
         except Exception as e:
             print(f"Error loading data for {drone_id}: {e}")
@@ -605,11 +905,29 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     max_duration = max([p.gt_duration for p in processors])
 
     if trim_end > 0.0:
-        max_duration = max(0.0, max_duration - trim_end)
+        max_duration = min(max_duration, trim_end)
 
     # Sampling rate for analysis (100Hz)
     dt_analysis = 0.01
     timestamps = np.arange(trim_start, max_duration, dt_analysis)
+
+    position_alignment = np.zeros(3)
+    gt_position_mean = None
+    act_position_mean = None
+    if align_position_means:
+        if visualize_only:
+            print("WARNING: --align-position-means requires actual data; alignment is disabled in YAML-only visualization mode.")
+        else:
+            position_alignment, gt_position_mean, act_position_mean = get_position_mean_alignment(processors, timestamps)
+            if gt_position_mean is None:
+                print("WARNING: No matching finite GT and actual positions were found; position-mean alignment was not applied.")
+            else:
+                print(
+                    "Aligning mean GT position "
+                    f"{np.round(gt_position_mean, 5).tolist()} with mean actual position "
+                    f"{np.round(act_position_mean, 5).tolist()}; translating GT by "
+                    f"{np.round(position_alignment, 5).tolist()} m."
+                )
 
     results = {
         'timestamps': timestamps,
@@ -626,10 +944,19 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 
         # Iterate over all drones for this specific time step
         for p in processors:
-            gt_leds, act_leds, valid = p.get_state_at_relative_time(t)
+            if position_only:
+                gt_pos, act_pos, valid = p.get_positions_at_relative_time(t)
+                gt_leds = None if gt_pos is None else np.atleast_2d(gt_pos)
+                act_leds = None if act_pos is None else np.atleast_2d(act_pos)
+            else:
+                gt_leds, act_leds, valid = p.get_state_at_relative_time(t)
 
             if valid:
-                if lit_only:
+                gt_leds = gt_leds + position_alignment
+
+                if position_only:
+                    gt_leds_f, act_leds_f, count = gt_leds, act_leds, 1
+                elif lit_only:
                     mask = p.get_lit_mask(t)
 
                     if mask is not None:
@@ -700,30 +1027,88 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
             mean_d = np.nanmean(d_rmse)
             print(f"Drone {p.drone_id}: Max RMSE {max_d:.2f} mm, Mean RMSE {mean_d:.2f} mm")
 
+    trajectory_metrics = None
+    if trajectory_rmse:
+        trajectory_metrics = calculate_trajectory_rmse(
+            processors, timestamps, position_alignment
+        )
+        print("\n=== TIME-INDEPENDENT TRAJECTORY RMSE ===")
+        combined_trajectory_rmse = trajectory_metrics['combined_rmse_mm']
+        if combined_trajectory_rmse is None:
+            print("COMBINED: No flight data provided.")
+        else:
+            print(
+                "COMBINED (All Drones): Trajectory RMSE "
+                f"{combined_trajectory_rmse:.2f} mm"
+            )
+        for p in processors:
+            drone_trajectory_rmse = trajectory_metrics['drones'][p.drone_id]['rmse_mm']
+            if drone_trajectory_rmse is not None:
+                print(
+                    f"Drone {p.drone_id}: Trajectory RMSE "
+                    f"{drone_trajectory_rmse:.2f} mm"
+                )
+
+    segmented_trajectory_metrics = None
+    if trajectory_rmse_segment_duration is not None:
+        segmented_trajectory_metrics = calculate_segmented_trajectory_rmse(
+            processors,
+            timestamps,
+            trajectory_rmse_segment_duration,
+            trim_start,
+            max_duration,
+            position_alignment,
+            trajectory_rmse_accumulative,
+        )
+        segments = segmented_trajectory_metrics['segments']
+        valid_segments = sum(
+            segment['combined_rmse_mm'] is not None for segment in segments
+        )
+        print(
+            "\n=== TRAJECTORY RMSE OVER TIME ===\n"
+            f"Computed {valid_segments}/{len(segments)} valid "
+            f"{trajectory_rmse_segment_duration:g}s "
+            f"{'accumulative interval(s)' if trajectory_rmse_accumulative else 'segment(s)'}."
+        )
+
     if not visualize_only:
         # ==========================================
         # 5. EXPORT DATA TO JSON
         # ==========================================
-        if args.lit_only:
+        if position_only:
+            output_filename = f"{tag}_position_rmse.json"
+        elif lit_only:
             output_filename = f"{tag}_absolute_rmse_lit_only.json"
         else:
             output_filename = f"{tag}_absolute_rmse.json"
+        if align_position_means:
+            output_filename = output_filename.replace(".json", "_position_aligned.json")
         print(f"\nExporting raw data to {output_filename}...")
 
         # Structure data for export (handle numpy types)
         export_data = {
             "timestamps": results['timestamps'].tolist(),
             "combined_rmse_mm": [None if np.isnan(x) else float(x) for x in results['combined_rmse']],
+            "metric": "drone_position" if position_only else "led_position",
+            "mocap_marker_position_body_m": mocap_marker_position.tolist(),
+            "time_independent_trajectory": trajectory_metrics,
+            "trajectory_rmse_over_time": segmented_trajectory_metrics,
+            "position_mean_alignment": {
+                "enabled": bool(align_position_means and gt_position_mean is not None),
+                "gt_mean_m": None if gt_position_mean is None else gt_position_mean.tolist(),
+                "actual_mean_m": None if act_position_mean is None else act_position_mean.tolist(),
+                "gt_translation_m": position_alignment.tolist()
+            },
             "drones": {}
         }
 
         for p in processors:
             d_data = results['drones'][p.drone_id]
 
-            # Helper to clean numpy arrays in LED lists
-            def clean_leds(led_list):
+            # Helper to clean numpy point arrays for JSON output
+            def clean_points(point_list):
                 cleaned = []
-                for item in led_list:
+                for item in point_list:
                     if item is None:
                         cleaned.append(None)
                     else:
@@ -731,12 +1116,16 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
                         cleaned.append(np.round(item, 5).tolist())
                 return cleaned
 
-            export_data["drones"][p.drone_id] = {
-                "rmse_mm": [None if np.isnan(x) else float(x) for x in d_data['rmse']],
-                # These are subsampled (every 10th frame relative to timestamp index)
-                "subsampled_gt_leds": clean_leds(d_data['leds_gt']),
-                "subsampled_act_leds": clean_leds(d_data['leds_act'])
+            drone_export = {
+                "rmse_mm": [None if np.isnan(x) else float(x) for x in d_data['rmse']]
             }
+            if position_only:
+                drone_export["subsampled_gt_positions"] = clean_points(d_data['leds_gt'])
+                drone_export["subsampled_actual_positions"] = clean_points(d_data['leds_act'])
+            else:
+                drone_export["subsampled_gt_leds"] = clean_points(d_data['leds_gt'])
+                drone_export["subsampled_act_leds"] = clean_points(d_data['leds_act'])
+            export_data["drones"][p.drone_id] = drone_export
 
         with open(output_filename, 'w') as f:
             json.dump(export_data, f, indent=4)
@@ -754,29 +1143,89 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
     
     left_texts = {}
     time_lines = {}
+    colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
 
     if not visualize_only:
-        # Plot 1: RMSE over Time
         ax1 = fig.add_subplot(gs[:, 0])
 
-        # Plot Combined
-        ax1.plot(timestamps, results['combined_rmse'], 'k-', linewidth=3, alpha=0.8, label='All Drones (Combined)')
-        if np.any(valid_comb):
-            ax1.axhline(overall_comb_rmse, color='r', linestyle='--', label=f'Overall: {overall_comb_rmse:.3f}mm')
+        if segmented_trajectory_metrics is not None:
+            segments = segmented_trajectory_metrics['segments']
+            segment_times = [segment['time_s'] for segment in segments]
+            combined_segment_rmse = [
+                np.nan if segment['combined_rmse_mm'] is None
+                else segment['combined_rmse_mm']
+                for segment in segments
+            ]
+            ax1.plot(
+                segment_times,
+                combined_segment_rmse,
+                'ko-',
+                linewidth=3,
+                alpha=0.8,
+                label='All Drones (Combined)',
+            )
+            for i, p in enumerate(processors):
+                drone_segment_rmse = [
+                    np.nan if segment['drones'][p.drone_id]['rmse_mm'] is None
+                    else segment['drones'][p.drone_id]['rmse_mm']
+                    for segment in segments
+                ]
+                ax1.plot(
+                    segment_times,
+                    drone_segment_rmse,
+                    marker='o',
+                    color=colors[i],
+                    linewidth=1.5,
+                    label=p.drone_id,
+                )
+            duration = segmented_trajectory_metrics['segment_duration_s']
+            interval_label = (
+                'accumulative intervals'
+                if segmented_trajectory_metrics['accumulative'] else 'segments'
+            )
+            ax1.set_title(
+                f'Trajectory RMSE over Time ({duration:g}s {interval_label})'
+            )
+        else:
+            ax1.plot(timestamps, results['combined_rmse'], 'k-', linewidth=3, alpha=0.8, label='All Drones (Combined)')
+            if np.any(valid_comb):
+                ax1.axhline(overall_comb_rmse, color='r', linestyle='--', label=f'Overall: {overall_comb_rmse:.3f}mm')
 
-        # Plot Individuals
-        colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
-        for i, p in enumerate(processors):
-            rmse_data = results['drones'][p.drone_id]['rmse']
-            ax1.plot(timestamps, rmse_data, color=colors[i], linewidth=1, label=f'{p.drone_id}')
+            for i, p in enumerate(processors):
+                rmse_data = results['drones'][p.drone_id]['rmse']
+                ax1.plot(timestamps, rmse_data, color=colors[i], linewidth=1, label=f'{p.drone_id}')
 
-        ax1.set_title('RMSE over Time (mm)')
+            metric_label = 'Drone Position' if position_only else 'LED Position'
+            ax1.set_title(f'{metric_label} RMSE over Time (mm)')
+
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Error (mm)')
+
+        if trajectory_metrics is not None:
+            trajectory_value = trajectory_metrics['combined_rmse_mm']
+            if trajectory_value is not None:
+                ax1.axhline(
+                    trajectory_value,
+                    color='purple',
+                    linestyle=':',
+                    linewidth=2.5,
+                    label=f'Trajectory RMSE: {trajectory_value:.2f} mm',
+                )
+                ax1.annotate(
+                    f'Trajectory RMSE: {trajectory_value:.2f} mm',
+                    xy=(1.0, trajectory_value),
+                    xycoords=ax1.get_yaxis_transform(),
+                    xytext=(-8, 5),
+                    textcoords='offset points',
+                    ha='right',
+                    va='bottom',
+                    color='purple',
+                    fontsize=9,
+                )
+
         ax1.legend()
         ax1.grid(True)
     else:
-        colors = plt.cm.jet(np.linspace(0, 1, len(processors)))
         for i, p in enumerate(processors):
             ax = fig.add_subplot(gs[i, 0])
             pos_data = p.gt_pos_fn(timestamps)
@@ -804,6 +1253,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 
     # Collect all valid points to set global bounds
     all_vis_pts = []
+    trajectory_paths = {}
     for p in processors:
         gts = results['drones'][p.drone_id]['leds_gt']
         acts = results['drones'][p.drone_id]['leds_act']
@@ -811,13 +1261,41 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
         if valid_pts:
             all_vis_pts.append(np.vstack(valid_pts))
 
+        if trajectory_rmse or segmented_trajectory_metrics is not None:
+            gt_path, act_path = get_trajectory_positions(
+                p, timestamps, position_alignment
+            )
+            if len(gt_path) > 0:
+                trajectory_paths[p.drone_id] = (gt_path, act_path)
+                all_vis_pts.extend([gt_path, act_path])
+
     if all_vis_pts:
         set_axes_equal(ax_3d, np.vstack(all_vis_pts))
 
     ax_3d.set_xlabel('X (m)')
     ax_3d.set_ylabel('Y (m)')
     ax_3d.set_zlabel('Z (m)')
-    ax_3d.set_title('Multi-Drone Replay')
+    replay_label = 'Position' if position_only else 'LED'
+    replay_title = f'Multi-Drone {replay_label} Replay'
+    if trajectory_rmse or segmented_trajectory_metrics is not None:
+        replay_title += ' with Trajectories'
+    ax_3d.set_title(replay_title)
+
+    # Draw the complete center-position paths behind the animated markers.
+    for i, p in enumerate(processors):
+        if p.drone_id not in trajectory_paths:
+            continue
+        gt_path, act_path = trajectory_paths[p.drone_id]
+        ax_3d.plot(
+            gt_path[:, 0], gt_path[:, 1], gt_path[:, 2],
+            color=colors[i], linewidth=1.0, linestyle='-', alpha=0.5,
+            label=f'{p.drone_id} GT trajectory',
+        )
+        ax_3d.plot(
+            act_path[:, 0], act_path[:, 1], act_path[:, 2],
+            color=colors[i], linewidth=1.0, linestyle='--', alpha=0.9,
+            label=f'{p.drone_id} Act trajectory',
+        )
 
     # Create Scatter Objects
     scatters = {}
@@ -847,7 +1325,7 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 
         # Approximate time for display (since we subsampled by 10)
         t_disp = timestamps[min(idx * 10, len(timestamps) - 1)]
-        ax_3d.set_title(f"Multi-Drone Replay t={t_disp:.2f}s")
+        ax_3d.set_title(f"{replay_title} t={t_disp:.2f}s")
         
         if visualize_only:
             for p in processors:
@@ -911,8 +1389,8 @@ def calculate_rmse(yaml_file, tag, compare_yaml=None, use_kinematics=False, max_
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="RMSE Analysis Toolkit")
-    parser.add_argument('--yaml', type=str, default='/Users/hamed/Documents/Holodeck/fls-cf-offboard-controller/mission/reversing_arrow_blender.yaml', help='Path to mission yaml')
-    parser.add_argument('--tag', type=str, default=None, help='Log file tag (if omitted, visualizes YAML only)')
+    parser.add_argument('--yaml', type=str, default=None, help='Path to mission YAML (automatically resolved from the tag directory when omitted)')
+    parser.add_argument('--tag', type=str, default=None, help='Log file tag; may be used without --yaml')
     parser.add_argument('--compare_yaml', type=str, default=None, help='Compare two yaml files directly without JSON logs')
     parser.add_argument('--kinematics', action='store_true', help='Enable kinematic modeling of ground truth')
     parser.add_argument('--max_v', type=float, default=1.0, help='Maximum velocity (m/s)')
@@ -920,10 +1398,76 @@ if __name__ == "__main__":
     parser.add_argument('--max_j', type=float, default=17.0, help='Maximum jerk (m/s^3)')
     parser.add_argument('--max_s', type=float, default=550.0, help='Maximum snap (m/s^4)')
     parser.add_argument('--trim-start', type=float, default=0.0, help='Trim start of data (seconds)')
-    parser.add_argument('--trim-end', type=float, default=0.0, help='Trim end of data (seconds)')
+    parser.add_argument('--trim-end', type=float, default=0.0, help='End analysis at this relative time in seconds')
     parser.add_argument('--ignore-rpy', action='store_true', dest='ignore_rpy', help='Ignore actual roll, pitch, and yaw data')
-    parser.add_argument('--lit-only', action='store_true', dest='lit_only', help='Only include lit (non-black) LEDs in RMSE computation and visualization')
+    parser.add_argument(
+        '--mocap-marker-position',
+        type=float,
+        nargs=3,
+        metavar=('X', 'Y', 'Z'),
+        default=(0.0, 0.0, 0.0),
+        help=(
+            'Mocap marker position in the drone body FLU frame, in metres; '
+            'used with actual attitude to recover the body origin '
+            '(default: 0 0 0)'
+        ),
+    )
+    metric_group = parser.add_mutually_exclusive_group()
+    metric_group.add_argument('--lit-only', action='store_true', dest='lit_only', help='Only include lit (non-black) LEDs in RMSE computation and visualization')
+    metric_group.add_argument('--position-only', action='store_true', help='Compute RMSE from drone center positions instead of LED positions')
+    parser.add_argument('--align-position-means', action='store_true', help='Translate all GT positions by one constant offset so their mean matches the mean actual position')
+    parser.add_argument('--trajectory-rmse', action='store_true', help='Report symmetric nearest-path position RMSE without matching samples by time')
+    parser.add_argument(
+        '--trajectory-rmse-over-time',
+        type=float,
+        metavar='SECONDS',
+        help='Plot trajectory RMSE for consecutive segments of this duration',
+    )
+    parser.add_argument(
+        '--trajectory-rmse-over-time-accumulative',
+        '--trajectory-rmse-over-time-cumulative',
+        action='store_true',
+        dest='trajectory_rmse_over_time_accumulative',
+        help=(
+            'Make each trajectory-RMSE interval run from the analysis start '
+            'through the end of the current segment'
+        ),
+    )
 
     args = parser.parse_args()
 
-    calculate_rmse(args.yaml, args.tag, args.compare_yaml, args.kinematics, args.max_v, args.max_a, args.max_j, args.max_s, args.ignore_rpy, args.lit_only, args.trim_start, args.trim_end)
+    if (
+            args.trajectory_rmse_over_time_accumulative
+            and args.trajectory_rmse_over_time is None):
+        parser.error(
+            '--trajectory-rmse-over-time-accumulative requires '
+            '--trajectory-rmse-over-time SECONDS'
+        )
+
+    try:
+        yaml_file = resolve_yaml_file(args.yaml, args.tag)
+    except (FileNotFoundError, ValueError) as error:
+        parser.error(str(error))
+
+    calculate_rmse(
+        yaml_file,
+        args.tag,
+        args.compare_yaml,
+        args.kinematics,
+        args.max_v,
+        args.max_a,
+        args.max_j,
+        args.max_s,
+        args.ignore_rpy,
+        args.lit_only,
+        args.trim_start,
+        args.trim_end,
+        align_position_means=args.align_position_means,
+        position_only=args.position_only,
+        trajectory_rmse=args.trajectory_rmse,
+        trajectory_rmse_segment_duration=args.trajectory_rmse_over_time,
+        trajectory_rmse_accumulative=(
+            args.trajectory_rmse_over_time_accumulative
+        ),
+        mocap_marker_position=args.mocap_marker_position,
+    )
