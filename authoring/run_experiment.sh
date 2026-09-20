@@ -1,13 +1,14 @@
 #!/bin/bash
 
-if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <place_script.py> [input_file.svg ...]"
-    echo "Example: $0 place.py svg/c.svg"
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 <place_script.py> <base_results_dir> [input_file.svg ...]"
+    echo "Example: $0 place.py results/gurobi/a-z svg/c.svg"
     exit 1
 fi
 
 PLACE_SCRIPT=$1
-shift
+BASE_RESULTS_DIR=$2
+shift 2
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
 # Default Input files
@@ -19,12 +20,15 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/gurobi"
-mkdir -p "$BASE_RESULTS_DIR"
+mkdir -p -- "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
-TRANSFORM_MAX_WIDTH=2.0
-TRANSFORM_MAX_HEIGHT=1.0
+# Each entry is "max_width max_height".
+TRANSFORM_MAX_SIZE_PAIRS=(
+    "2.0 1.0"
+    "1.0 0.5"
+    "0.5 0.25"
+)
 
 # --- Placement Parameters ---
 MAX_LENGTH=0.16
@@ -76,6 +80,8 @@ else
     MAX_LENGTH_REPORT="LB Lengths               : $MAX_LENGTHS"
 fi
 
+printf -v TRANSFORM_SIZE_PAIRS_REPORT '  - %s\n' "${TRANSFORM_MAX_SIZE_PAIRS[@]}"
+
 # --- Generate Configuration Report ---
 REPORT_FILE="$BASE_RESULTS_DIR/experiment_config.txt"
 cat <<EOF > "$REPORT_FILE"
@@ -89,8 +95,8 @@ Git Hash  : $(git rev-parse HEAD 2>/dev/null || echo 'N/A')
 Inputs: ${INPUT_FILES[*]}
 ----------------------------------------
 Transform
-Max Width                : $TRANSFORM_MAX_WIDTH
-Max Height               : $TRANSFORM_MAX_HEIGHT
+Max Width/Height Pairs:
+$TRANSFORM_SIZE_PAIRS_REPORT
 ----------------------------------------
 Placement ($PLACE_SCRIPT)
 $MAX_LENGTH_REPORT
@@ -121,7 +127,22 @@ echo "Generated configuration report: $REPORT_FILE"
 
 # --- Execution ---
 
-for input_file in "${INPUT_FILES[@]}"; do
+for transform_size_pair in "${TRANSFORM_MAX_SIZE_PAIRS[@]}"; do
+    read -r TRANSFORM_MAX_WIDTH TRANSFORM_MAX_HEIGHT extra_dimension <<< "$transform_size_pair"
+    if [ -z "$TRANSFORM_MAX_WIDTH" ] || [ -z "$TRANSFORM_MAX_HEIGHT" ] || [ -n "$extra_dimension" ]; then
+        echo "Error: Invalid transform size pair '$transform_size_pair'. Expected: \"max_width max_height\"."
+        exit 1
+    fi
+
+    TRANSFORM_ID="width_${TRANSFORM_MAX_WIDTH}_height_${TRANSFORM_MAX_HEIGHT}"
+    TRANSFORM_RESULTS_DIR="$BASE_RESULTS_DIR/$TRANSFORM_ID"
+    mkdir -p "$TRANSFORM_RESULTS_DIR"
+
+    echo "========================================"
+    echo "Transform size: width=$TRANSFORM_MAX_WIDTH, height=$TRANSFORM_MAX_HEIGHT"
+    echo "========================================"
+
+    for input_file in "${INPUT_FILES[@]}"; do
     if [ ! -f "$input_file" ]; then
         echo "Warning: Input file '$input_file' not found. Skipping."
         continue
@@ -135,11 +156,11 @@ for input_file in "${INPUT_FILES[@]}"; do
     echo "========================================"
 
     # Setup base directory for this input file
-    FILE_DIR="$BASE_RESULTS_DIR/$FILE_BASENAME"
+    FILE_DIR="$TRANSFORM_RESULTS_DIR/$FILE_BASENAME"
     mkdir -p "$FILE_DIR/yaml"
 
     # Initialize CSV for this file
-    CSV_FILE="$FILE_DIR/${FILE_BASENAME}.csv"
+    CSV_FILE="$FILE_DIR/${FILE_BASENAME}_${TRANSFORM_ID}.csv"
     echo "$CSV_HEADER" > "$CSV_FILE"
 
     # ---------------------------------------------------------
@@ -353,31 +374,32 @@ for input_file in "${INPUT_FILES[@]}"; do
         done
     done
 
-    echo "  Results saved to $CSV_FILE"
+        echo "  Results saved to $CSV_FILE"
+    done
+
+    # ---------------------------------------------------------
+    # STEP 5: COMBINE THIS TRANSFORM PAIR INTO A MASTER CSV
+    # ---------------------------------------------------------
+    if [ "$PLACE_SCRIPT" == "place.py" ]; then
+        MASTER_CSV="$BASE_RESULTS_DIR/master_results_${TRANSFORM_ID}.csv"
+    else
+        MASTER_CSV="$BASE_RESULTS_DIR/master_results_multi_type_${TRANSFORM_ID}.csv"
+    fi
+    echo "========================================"
+    echo "Compiling master CSV for width=$TRANSFORM_MAX_WIDTH, height=$TRANSFORM_MAX_HEIGHT..."
+
+    # Check if any per-input CSVs were generated for this transform pair.
+    if find "$TRANSFORM_RESULTS_DIR" -mindepth 2 -name "*.csv" -print -quit | grep -q .; then
+        # Write the header to the master file.
+        echo "$CSV_HEADER" > "$MASTER_CSV"
+
+        # Append all CSV rows for this pair, skipping their header rows.
+        find "$TRANSFORM_RESULTS_DIR" -mindepth 2 -name "*.csv" -exec tail -q -n +2 {} + >> "$MASTER_CSV"
+        echo "Master CSV successfully generated at: $MASTER_CSV"
+    else
+        echo "Warning: No individual CSV files found for $TRANSFORM_ID."
+    fi
 done
-
-# ---------------------------------------------------------
-# STEP 5: COMBINE INTO MASTER CSV
-# ---------------------------------------------------------
-if [ "$PLACE_SCRIPT" == "place.py" ]; then
-    MASTER_CSV="$BASE_RESULTS_DIR/master_results_${TRANSFORM_MAX_HEIGHT}.csv"
-else
-    MASTER_CSV="$BASE_RESULTS_DIR/master_results_multi_type_${TRANSFORM_MAX_HEIGHT}.csv"
-fi
-echo "========================================"
-echo "Compiling Master CSV..."
-
-# Check if any CSVs were generated
-if find "$BASE_RESULTS_DIR" -mindepth 2 -name "*.csv" -print -quit | grep -q .; then
-    # Write the header to the master file
-    echo "$CSV_HEADER" > "$MASTER_CSV"
-
-    # Append all CSV rows (skipping the header row) quietly
-    find "$BASE_RESULTS_DIR" -mindepth 2 -name "*.csv" | xargs tail -q -n +2 >> "$MASTER_CSV"
-    echo "Master CSV successfully generated at: $MASTER_CSV"
-else
-    echo "Warning: No individual CSV files found to combine."
-fi
 
 echo "========================================"
 echo "Experiment Completed."
