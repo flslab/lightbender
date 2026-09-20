@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 20),
+    "version": (1, 21),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create and animate LightBenders, export SFL, and export ground-truth trajectories",
@@ -1467,6 +1467,16 @@ class DroneProperties(bpy.types.PropertyGroup):
             ('SC', "Set Cover", "")
         ],
         default='VFG'
+    )
+
+    import_set_cover_solver: EnumProperty(
+        name="Set Cover Solver",
+        description="Optimization backend used by the Set Cover placement policy",
+        items=[
+            ('bnb', "Built-in B&B", "Use the dependency-free branch-and-bound solver"),
+            ('gurobi', "Gurobi", "Use Gurobi's exact lexicographic MIP solver")
+        ],
+        default='bnb'
     )
 
     import_color: StringProperty(
@@ -5603,6 +5613,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
             "--input", f"'{target_graph_yaml}'",
             "--output", f"'{target_layout_yaml}'",
             "--policy", props.import_policy,
+            "--set_cover_solver", props.import_set_cover_solver,
             "--max_len", "0.16",
             "--no_viz"
         ]
@@ -6148,7 +6159,9 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
         cmd_place = [
             "python3", f"'{os.path.join(addon_dir, 'place.py')}'",
             "--input", f"'{target_graph_yaml}'", "--output", f"'{target_layout_yaml}'",
-            "--policy", props.import_policy, "--max_len", "0.16", "--no_viz"
+            "--policy", props.import_policy,
+            "--set_cover_solver", props.import_set_cover_solver,
+            "--max_len", "0.16", "--no_viz"
         ]
         res2 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_place)], capture_output=True, text=True)
         if res2.returncode != 0 or not os.path.exists(target_layout_yaml):
@@ -6462,6 +6475,9 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
         row = box.row()
         row.prop(props, "import_policy")
         row.prop(props, "import_color")
+
+        if props.import_policy == 'SC':
+            box.prop(props, "import_set_cover_solver")
 
         row = box.row()
         row.enabled = bool(props.import_svg_filepath.strip())

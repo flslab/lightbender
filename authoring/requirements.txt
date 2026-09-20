@@ -4,3 +4,4 @@ pyyaml
 svg.path
 scipy
 seaborn
+gurobipy

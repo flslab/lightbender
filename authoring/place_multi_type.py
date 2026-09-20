@@ -12,6 +12,12 @@ from typing import List, Dict, Tuple, Optional, Set
 from abc import ABC, abstractmethod
 import matplotlib
 
+from set_cover_gurobi import (
+    GurobiUnavailableError,
+    SetCoverInfeasibleError,
+    solve_set_cover_gurobi,
+)
+
 matplotlib.use('macosx')
 
 
@@ -333,6 +339,13 @@ class SetCoverStrategy(PlacementStrategy):
     and Tertiary Objective to minimize sum of utilized max_lengths.
     """
 
+    def __init__(self, solver: str = "bnb", gurobi_time_limit: Optional[float] = None,
+                 gurobi_mip_gap: float = 0.0, gurobi_log: bool = False):
+        self.solver = solver
+        self.gurobi_time_limit = gurobi_time_limit
+        self.gurobi_mip_gap = gurobi_mip_gap
+        self.gurobi_log = gurobi_log
+
     def _generate_sliding_edge_candidates(self, L: float, max_length: float, duplicate_thresh: float) -> List[float]:
         """Original implementation: Slides candidates from both endpoints inward."""
         edge_d_candidates = []
@@ -523,7 +536,9 @@ class SetCoverStrategy(PlacementStrategy):
         chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
 
         if chosen_indices is None:
-            return self.vfg_lbs
+            if hasattr(self, 'vfg_lbs'):
+                return self.vfg_lbs
+            raise RuntimeError("Set-cover solver did not find a feasible placement")
 
         # 4.5 Resolve physical overlaps among chosen candidates
         edge_intervals = {e_idx: [] for e_idx in range(len(edge_data))}
@@ -586,6 +601,55 @@ class SetCoverStrategy(PlacementStrategy):
         return lightbenders
 
     def _solve_set_cover(self, candidates, num_chunks):
+        if self.solver == "gurobi":
+            result = solve_set_cover_gurobi(
+                [candidate.get('covered', set()) for candidate in candidates],
+                [float(candidate['ml']) for candidate in candidates],
+                num_chunks,
+                time_limit=self.gurobi_time_limit,
+                mip_gap=self.gurobi_mip_gap,
+                output_flag=self.gurobi_log,
+            )
+            selected_indices = result.selected_indices
+            selected_overlap = result.overlap
+            is_better_than_greedy = result.better_than_greedy
+            if hasattr(self, 'vfg_lbs'):
+                vfg_objective = (
+                    len(self.vfg_lbs),
+                    0,
+                    sum(lb.max_length_limit for lb in self.vfg_lbs),
+                )
+                gurobi_objective = (
+                    len(result.selected_indices), result.overlap, result.length_sum
+                )
+                if vfg_objective <= gurobi_objective:
+                    selected_indices = None
+                    selected_overlap = 0
+                    greedy_objective = (
+                        result.greedy_size,
+                        result.greedy_overlap,
+                        result.greedy_length_sum,
+                    )
+                    is_better_than_greedy = vfg_objective < greedy_objective
+
+            better_than_greedy = "Yes" if is_better_than_greedy else "No"
+            if getattr(args, 'csv', False):
+                print(
+                    f"gurobi,{result.status},{result.candidate_count},{result.chunk_count},"
+                    f"{result.node_count},{result.greedy_size},{result.greedy_overlap},"
+                    f"{selected_overlap},{better_than_greedy}"
+                )
+            else:
+                print("Set Cover Solver:   Gurobi")
+                print(f"Solver Status:      {result.status}")
+                print(f"Total Candidates:   {result.candidate_count}")
+                print(f"Total Chunks:       {result.chunk_count}")
+                print(f"Branch-and-Cut Nodes: {result.node_count}")
+                print(f"Greedy Solution:    {result.greedy_size}")
+                print(f"Greedy Overlap:     {result.greedy_overlap}")
+                print(f"Selected Overlap:   {selected_overlap}")
+            return selected_indices
+
         target_mask = (1 << num_chunks) - 1
 
         cand_masks = []
@@ -611,6 +675,13 @@ class SetCoverStrategy(PlacementStrategy):
         valid_indices = list(unique_masks.values())
         filtered_masks = [cand_masks[i] for i in valid_indices]
 
+        available_mask = 0
+        for mask in filtered_masks:
+            available_mask |= mask
+        if available_mask != target_mask:
+            missing = [i for i in range(num_chunks) if not available_mask & (1 << i)]
+            raise SetCoverInfeasibleError(f"set-cover instance has uncovered chunks: {missing}")
+
         # Initial Greedy Bound
         greedy_sol = []
         greedy_covered = 0
@@ -630,7 +701,8 @@ class SetCoverStrategy(PlacementStrategy):
                     if candidates[valid_indices[i]]['ml'] < candidates[valid_indices[best_idx]]['ml']:
                         best_idx = i
 
-            if best_idx == -1: break
+            if best_idx == -1 or best_gain <= 0:
+                raise SetCoverInfeasibleError("greedy initialization could not cover every chunk")
             greedy_sol.append(best_idx)
             greedy_overlap += bin(temp_masks[best_idx] & greedy_covered).count('1')
             greedy_covered |= temp_masks[best_idx]
@@ -666,15 +738,17 @@ class SetCoverStrategy(PlacementStrategy):
         MAX_ITERS = 1000000
         start_bb_time = time.perf_counter()
         timeout_seconds = 0.4 if hasattr(self, 'vfg_lbs') else None
+        timed_out = False
 
         def backtrack(cand_idx, current_mask, current_solution, current_overlap, current_len_sum):
-            nonlocal best_solution, best_size, best_overlap, best_len_sum, iters, better_than_greedy
+            nonlocal best_solution, best_size, best_overlap, best_len_sum, iters, better_than_greedy, timed_out
 
             if iters >= MAX_ITERS:
                 return
 
             if timeout_seconds and (iters % 100 == 0):
                 if time.perf_counter() - start_bb_time > timeout_seconds:
+                    timed_out = True
                     return
 
             iters += 1
@@ -741,9 +815,12 @@ class SetCoverStrategy(PlacementStrategy):
 
         backtrack(0, 0, [], 0, 0)
 
+        solver_status = "TIME_LIMIT" if timed_out else ("ITERATION_LIMIT" if iters >= MAX_ITERS else "OPTIMAL")
         if args.csv:
-            print(f"{len(cand_order)},{num_chunks},{iters},{len(greedy_sol)},{greedy_overlap},{best_overlap},{better_than_greedy}")
+            print(f"bnb,{solver_status},{len(cand_order)},{num_chunks},{iters},{len(greedy_sol)},{greedy_overlap},{best_overlap},{better_than_greedy}")
         else:
+            print("Set Cover Solver:   Built-in B&B")
+            print(f"Solver Status:      {solver_status}")
             print(f"Total Candidates:   {len(cand_order)}")
             print(f"Total Chunks:       {num_chunks}")
             print(f"Total Iterations:   {iters}")
@@ -764,8 +841,22 @@ class HYBStrategy(SetCoverStrategy):
 # --- Placement Processor ---
 
 class Allocator:
-    def __init__(self, max_lengths: List[float]):
+    def __init__(self, max_lengths: List[float], set_cover_solver: str = "bnb",
+                 gurobi_time_limit: Optional[float] = None, gurobi_mip_gap: float = 0.0,
+                 gurobi_log: bool = False):
         self.max_lengths = max_lengths
+        self.set_cover_solver = set_cover_solver
+        self.gurobi_time_limit = gurobi_time_limit
+        self.gurobi_mip_gap = gurobi_mip_gap
+        self.gurobi_log = gurobi_log
+
+    def _set_cover_strategy(self, strategy_type=SetCoverStrategy):
+        return strategy_type(
+            solver=self.set_cover_solver,
+            gurobi_time_limit=self.gurobi_time_limit,
+            gurobi_mip_gap=self.gurobi_mip_gap,
+            gurobi_log=self.gurobi_log,
+        )
 
     def run(self, graph: TargetGraph, policy: str) -> List[Point3D]:
         if policy.upper() == "MIDPOINT":
@@ -773,9 +864,9 @@ class Allocator:
         elif policy.upper() == "VFG":
             strategy = VFGStrategy()
         elif policy.upper() == "SC":
-            strategy = SetCoverStrategy()
+            strategy = self._set_cover_strategy()
         elif policy.upper() == "HYB":
-            strategy = HYBStrategy()
+            strategy = self._set_cover_strategy(HYBStrategy)
         else:
             raise ValueError(f"Unknown Placement policy: {policy}")
 
@@ -901,14 +992,34 @@ if __name__ == "__main__":
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
     parser.add_argument("--set_cover_log", type=str, default="set_cover_log.json",
                         help="Set-cover chunk/candidate log (SC and HYB policies only)")
+    parser.add_argument("--set_cover_solver", type=str.lower, choices=['bnb', 'gurobi'], default='bnb',
+                        help="Solver used by the SC and HYB policies (default: bnb)")
+    parser.add_argument("--gurobi_time_limit", type=float, default=None,
+                        help="Optional Gurobi time limit in seconds")
+    parser.add_argument("--gurobi_mip_gap", type=float, default=0.0,
+                        help="Gurobi relative MIP gap (default: 0 for an exact solve)")
+    parser.add_argument("--gurobi_log", action="store_true", help="Show the Gurobi solver log")
 
     args = parser.parse_args()
+    if args.gurobi_time_limit is not None and args.gurobi_time_limit <= 0:
+        parser.error("--gurobi_time_limit must be positive")
+    if args.gurobi_mip_gap < 0:
+        parser.error("--gurobi_mip_gap must be non-negative")
 
     graph = TargetGraph(args.input)
 
-    allocator = Allocator(max_lengths=args.max_lens)
+    allocator = Allocator(
+        max_lengths=args.max_lens,
+        set_cover_solver=args.set_cover_solver,
+        gurobi_time_limit=args.gurobi_time_limit,
+        gurobi_mip_gap=args.gurobi_mip_gap,
+        gurobi_log=args.gurobi_log,
+    )
     start_time = time.time()
-    lightbenders = allocator.run(graph, args.policy)
+    try:
+        lightbenders = allocator.run(graph, args.policy)
+    except (GurobiUnavailableError, SetCoverInfeasibleError) as exc:
+        parser.error(str(exc))
     end_time = time.time()
 
     # Metrics
