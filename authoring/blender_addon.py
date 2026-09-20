@@ -1,10 +1,10 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 17),
+    "version": (1, 20),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
-    "description": "Create light-element LightBenders, animate LEDs with pointers, add position errors, and export SFL",
+    "description": "Create and animate LightBenders, export SFL, and export ground-truth trajectories",
     "category": "Animation",
 }
 
@@ -22,6 +22,10 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
     CollectionProperty, FloatVectorProperty 
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
+
+DRONE_CAMERA_RENDER_FPS = 120
+MARKER_CYLINDER_HEIGHT_M = 0.001
+GRAVITY_M_S2 = 9.80665
 
 class LightBenderAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
@@ -50,6 +54,166 @@ def get_authoring_dir():
 
 def get_orchestrator_dir():
     return os.path.abspath(os.path.join(get_repo_dir(), "orchestrator"))
+
+
+def resolve_marker_map_path(filepath):
+    """Resolve Blender-relative paths, then repository-relative paths."""
+    resolved = bpy.path.abspath(filepath)
+    if os.path.isfile(resolved):
+        return resolved
+    repository_path = os.path.join(get_repo_dir(), filepath)
+    if os.path.isfile(repository_path):
+        return repository_path
+    raise FileNotFoundError(filepath)
+
+
+def marker_map_file_values(data):
+    """Validate and extract the marker-map values exposed in the panel."""
+    def positive(value, name):
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be positive and finite")
+        return value
+
+    def origin_from(value):
+        origin = tuple(float(component) for component in value)
+        if len(origin) != 3 or not all(math.isfinite(component) for component in origin):
+            raise ValueError("grid_origin must contain finite XYZ values")
+        return origin
+
+    if not isinstance(data, dict):
+        raise ValueError("the JSON root must be an object")
+
+    if data.get("schema") == "fls-marker-grid":
+        if data.get("schema_version") != 1:
+            raise ValueError("only fls-marker-grid schema version 1 is supported")
+        hypergrid = data["hypergrid"]
+        mygrid = data["mygrid"]
+        encoding = data["encoding"]
+        blender = data.get("blender") or {}
+        tiles = mygrid["tiles"]
+        if not isinstance(tiles, list):
+            raise ValueError("mygrid.tiles must be an array")
+
+        payload_size = int(encoding["payload_bits"])
+        delimiter_size = int(encoding["delimiter_bits"])
+        if payload_size < 1 or delimiter_size < 1:
+            raise ValueError("encoding bit sizes must be positive")
+        min_brightness = float(blender.get("min_brightness", 0.0))
+        max_brightness = float(blender.get("max_brightness", 1.0))
+        if (not math.isfinite(min_brightness) or
+                not math.isfinite(max_brightness) or
+                not 0.0 <= min_brightness <= max_brightness <= 1.0):
+            raise ValueError("brightness values must satisfy 0 <= min <= max <= 1")
+
+        events = []
+        for tile in tiles:
+            tile_i = int(tile["i"])
+            tile_j = int(tile["j"])
+            animation = tile.get("blender_animation")
+            if animation is None:
+                continue
+            if (not isinstance(animation, dict) or
+                    animation.get("initial_state", "off") != "off" or
+                    not isinstance(animation.get("events"), list)):
+                raise ValueError("invalid blender_animation block")
+            for event in animation["events"]:
+                time_s = float(event["time_s"])
+                state = event["state"]
+                if (not math.isfinite(time_s) or time_s < 0.0 or
+                        state not in {"on", "off", "static", "blinking"}):
+                    raise ValueError("invalid MyGrid animation event")
+                events.append((tile_i, tile_j, time_s, state))
+
+        return {
+            "loaded_grid_format": f"fls-marker-grid v{data['schema_version']}",
+            "loaded_tile_count": len(tiles),
+            "grid_origin": origin_from(data["grid_origin"]),
+            "hypergrid_spacing": positive(
+                hypergrid["marker_spacing"], "HyperGrid spacing"),
+            "tile_size": positive(hypergrid["tile_size"], "tile size"),
+            "mygrid_spacing": positive(mygrid["marker_spacing"], "MyGrid spacing"),
+            "marker_size": positive(
+                hypergrid["marker_diameter"], "HyperGrid marker diameter"),
+            "short_range_marker_size": positive(
+                mygrid["marker_diameter"], "MyGrid marker diameter"),
+            "min_brightness": min_brightness,
+            "max_brightness": max_brightness,
+            "fps": positive(
+                encoding.get("blink_frequency_hz", encoding.get("bit_frequency_hz")),
+                "blink frequency"),
+            "payload_size": payload_size,
+            "delimiter_size": delimiter_size,
+            "animation_events": events,
+        }
+
+    short_range = data.get("short_range") or {}
+    values = {
+        "loaded_grid_format": "Legacy HyperGrid/MyGrid map",
+        "loaded_tile_count": len(short_range.get("tiles", [])),
+        "animation_events": [],
+    }
+    if "grid_origin" in data:
+        values["grid_origin"] = origin_from(data["grid_origin"])
+    if "cell_spacing" in data:
+        values["hypergrid_spacing"] = positive(
+            data["cell_spacing"], "HyperGrid spacing")
+    if "marker_size" in data:
+        values["marker_size"] = positive(
+            data["marker_size"], "HyperGrid marker diameter")
+    if "cell_spacing" in short_range:
+        values["mygrid_spacing"] = positive(
+            short_range["cell_spacing"], "MyGrid spacing")
+    if "marker_size" in short_range:
+        values["short_range_marker_size"] = positive(
+            short_range["marker_size"], "MyGrid marker diameter")
+
+    marker_ids = [
+        marker.get("id")
+        for marker in data.get("markers", [])
+    ] + [
+        marker.get("id")
+        for tile in short_range.get("tiles", [])
+        for marker in tile.get("markers", [])
+    ]
+    valid_ids = [marker_id for marker_id in marker_ids
+                 if isinstance(marker_id, int) and not isinstance(marker_id, bool)
+                 and marker_id >= 0]
+    if valid_ids:
+        values["payload_size"] = max(1, max(valid_ids).bit_length())
+    return values
+
+
+def load_marker_map_properties(props):
+    """Read the selected file and restore every file-backed panel value."""
+    map_path = resolve_marker_map_path(props.map_filepath)
+    with open(map_path, 'r', encoding='utf-8') as map_file:
+        values = marker_map_file_values(json.load(map_file))
+
+    for name, value in values.items():
+        if name != "animation_events":
+            setattr(props, name, value)
+    props.animation_events.clear()
+    for tile_i, tile_j, time_s, state in values["animation_events"]:
+        item = props.animation_events.add()
+        item.tile_i = tile_i
+        item.tile_j = tile_j
+        item.time_s = time_s
+        item.state = state
+    props.map_load_error = ""
+    return map_path
+
+
+def update_marker_map_filepath(props, _context):
+    """Populate the UI as soon as Blender commits a file selection."""
+    try:
+        load_marker_map_properties(props)
+    except (OSError, UnicodeError, json.JSONDecodeError,
+            KeyError, TypeError, ValueError) as exc:
+        props.loaded_grid_format = "No valid marker map loaded"
+        props.loaded_tile_count = 0
+        props.animation_events.clear()
+        props.map_load_error = str(exc)
 
 # ---------------------------------------------------------------------------
 #    Illuminate / Interaction Session State
@@ -178,6 +342,92 @@ def parse_interaction_ips(raw_ips):
 
 def get_lb_scene_objects(scene):
     return [obj for obj in scene.objects if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj]
+
+
+def get_location_fcurves(obj):
+    """Return the active action's location curves indexed by XYZ axis."""
+    animation_data = obj.animation_data
+    action = animation_data.action if animation_data else None
+    if action is None:
+        return {}
+    return {
+        fcurve.array_index: fcurve
+        for fcurve in action.fcurves
+        if fcurve.data_path == "location" and 0 <= fcurve.array_index < 3
+    }
+
+
+def get_location_keyframe_range(location_fcurves):
+    """Return the inclusive integer range covered by location keyframes."""
+    keyframes = [
+        point.co.x
+        for fcurve in location_fcurves.values()
+        for point in fcurve.keyframe_points
+    ]
+    if len(set(keyframes)) < 2:
+        return None
+    return math.floor(min(keyframes)), math.ceil(max(keyframes))
+
+
+def sample_flight_accelerations(obj, location_fcurves, first_frame,
+                                last_frame, fps, smoothing_frames):
+    """Estimate smoothed local-space acceleration for each animation frame."""
+    base_location = obj.location.copy()
+    positions = []
+    for frame in range(first_frame, last_frame + 1):
+        positions.append(Vector(tuple(
+            location_fcurves[axis].evaluate(frame)
+            if axis in location_fcurves else base_location[axis]
+            for axis in range(3)
+        )))
+
+    velocities = [
+        (positions[index + 1] - positions[index]) * fps
+        for index in range(len(positions) - 1)
+    ]
+    accelerations = []
+    for index in range(len(positions)):
+        incoming = velocities[index - 1] if index > 0 else Vector((0.0, 0.0, 0.0))
+        outgoing = velocities[index] if index < len(velocities) else Vector((0.0, 0.0, 0.0))
+        accelerations.append((outgoing - incoming) * fps)
+
+    if smoothing_frames <= 0:
+        return accelerations
+
+    # A fixed-width window treats samples outside the keyed range as hovering.
+    # Besides reducing Bezier noise, this spreads instantaneous velocity changes
+    # from linear position curves into a visible acceleration/deceleration lean.
+    window_size = smoothing_frames * 2 + 1
+    smoothed = []
+    for index in range(len(accelerations)):
+        total = Vector((0.0, 0.0, 0.0))
+        start = max(0, index - smoothing_frames)
+        stop = min(len(accelerations), index + smoothing_frames + 1)
+        for sample in accelerations[start:stop]:
+            total += sample
+        smoothed.append(total / window_size)
+    return smoothed
+
+
+def flight_attitude_from_acceleration(acceleration, yaw, max_tilt):
+    """Convert world acceleration into Blender XYZ roll/pitch at a fixed yaw."""
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    body_x = cos_yaw * acceleration.x + sin_yaw * acceleration.y
+    body_y = -sin_yaw * acceleration.x + cos_yaw * acceleration.y
+    thrust_z = max(1e-6, GRAVITY_M_S2 + acceleration.z)
+
+    horizontal = math.hypot(body_x, body_y)
+    max_horizontal = thrust_z * math.tan(max_tilt)
+    if horizontal > max_horizontal and horizontal > 0.0:
+        scale = max_horizontal / horizontal
+        body_x *= scale
+        body_y *= scale
+
+    thrust_length = math.sqrt(body_x * body_x + body_y * body_y + thrust_z * thrust_z)
+    roll = math.asin(max(-1.0, min(1.0, -body_y / thrust_length)))
+    pitch = math.atan2(body_x, thrust_z)
+    return roll, pitch
 
 
 def show_popup(context, title, lines, icon='INFO'):
@@ -817,7 +1067,7 @@ class DrawEraseGroup(bpy.types.PropertyGroup):
 
 
 class ShortRangeTileTiming(bpy.types.PropertyGroup):
-    """Render timing for one short-range marker tile."""
+    """Render timing for one MyGrid marker tile."""
     tile_i: IntProperty(name="i", default=0, min=0)
     tile_j: IntProperty(name="j", default=0, min=0)
     off_time: FloatProperty(
@@ -834,27 +1084,66 @@ class ShortRangeTileTiming(bpy.types.PropertyGroup):
     )
 
 
+class MarkerGridAnimationEvent(bpy.types.PropertyGroup):
+    """One imported state change for a web-authored MyGrid tile."""
+    tile_i: IntProperty(name="Tile X", default=0)
+    tile_j: IntProperty(name="Tile Y", default=0)
+    time_s: FloatProperty(name="Time (s)", default=0.0, min=0.0)
+    state: EnumProperty(
+        name="State",
+        items=[
+            ('on', "On", "Power on the MyGrid using its current mode; blinking by default"),
+            ('off', "Off", "Hide every MyGrid marker in this tile"),
+            ('static', "Static", "Show every MyGrid marker continuously"),
+            ('blinking', "Blinking", "Show markers broadcasting their IDs"),
+        ],
+        default='off',
+    )
+
+
 class MarkerGridProperties(bpy.types.PropertyGroup):
     map_filepath: StringProperty(
         name="Map File",
-        description="Path to marker_grid.json",
+        description="Path to a MyGrid/HyperGrid JSON file",
         subtype="FILE_PATH",
-        default="orchestrator/marker_grid.json"
+        default="orchestrator/marker_grid.json",
+        update=update_marker_map_filepath,
+    )
+    marker_shape: EnumProperty(
+        name="Marker Shape",
+        description="Geometry used for both HyperGrid and MyGrid markers",
+        items=[
+            ('SPHERE', "Sphere", "Generate spherical markers"),
+            ('CYLINDER', "Cylinder", "Generate 1 mm-high cylindrical markers"),
+        ],
+        default='SPHERE',
     )
     marker_size: FloatProperty(
-        name="Marker Size",
-        description="Diameter of the sphere markers",
+        name="HyperGrid Diameter",
+        description="Diameter of HyperGrid markers",
         default=0.05,
         min=0.001
     )
     short_range_marker_size: FloatProperty(
-        name="Short Marker Size Override",
-        description="Diameter of short-range markers; 0 uses marker_size from the map",
+        name="MyGrid Diameter",
+        description="Diameter of MyGrid markers; 0 uses the value from a legacy map",
         default=0.0,
         min=0.0,
     )
     short_range_timings: CollectionProperty(type=ShortRangeTileTiming)
     short_range_active_timing_index: IntProperty(default=0)
+    animation_events: CollectionProperty(type=MarkerGridAnimationEvent)
+    animation_active_event_index: IntProperty(default=0)
+    loaded_grid_format: StringProperty(
+        name="Format", default="No marker map loaded")
+    loaded_tile_count: IntProperty(name="Selected Tiles", default=0, min=0)
+    map_load_error: StringProperty(name="Map Load Error", default="")
+    grid_origin: FloatVectorProperty(name="Grid Origin", size=3, default=(0.0, 0.0, 0.0))
+    hypergrid_spacing: FloatProperty(name="HyperGrid Spacing", default=0.155, min=0.000001)
+    tile_size: FloatProperty(
+        name="HyperGrid Tile Size", default=0.31, min=0.000001)
+    mygrid_spacing: FloatProperty(name="MyGrid Spacing", default=0.024, min=0.000001)
+    delimiter_size: IntProperty(name="Delimiter Ones", default=5, min=1)
     min_brightness: FloatProperty(
         name="Dark Intensity",
         description="Marker intensity for 0 bits; use a nonzero value to keep dark markers visible for tracking",
@@ -886,6 +1175,14 @@ class MarkerGridProperties(bpy.types.PropertyGroup):
         description="Directory to save rendered videos",
         subtype="DIR_PATH",
         default="//renders/"
+    )
+    render_in_background: BoolProperty(
+        name="Background Render",
+        description=(
+            "Render in separate Blender processes so this Blender session "
+            "remains usable; disable to render sequentially in this session"
+        ),
+        default=True,
     )
 
 
@@ -1235,6 +1532,24 @@ class DroneProperties(bpy.types.PropertyGroup):
     flyin_outward_duration: FloatProperty(name="Outward Duration(s)", default=2.0, min=0.1)
     flyin_hold_duration: FloatProperty(name="Hold Duration(s)", default=0.5, min=0.0)
     flyin_inward_duration: FloatProperty(name="Inward Duration(s)", default=3.0, min=0.1)
+
+    # Flight Attitude
+    flight_attitude_max_tilt: FloatProperty(
+        name="Max Tilt",
+        description="Maximum combined roll/pitch generated from horizontal acceleration",
+        default=math.radians(25.0),
+        min=0.0,
+        max=math.radians(89.0),
+        subtype='ANGLE',
+        unit='ROTATION',
+    )
+    flight_attitude_smoothing_frames: IntProperty(
+        name="Smoothing",
+        description="Frames on each side used to smooth acceleration and braking attitude",
+        default=5,
+        min=0,
+        max=120,
+    )
 
     # Fold Animation Settings
     fold_angle: FloatProperty(
@@ -1847,12 +2162,12 @@ class UL_DronePointerList(bpy.types.UIList):
 
 
 # ------------------------------------------------------------------------
-#    Short-Range Marker Timing UI
+#    MyGrid Marker Timing UI
 # ------------------------------------------------------------------------
 
 class DRONE_OT_add_short_range_timing(bpy.types.Operator):
     bl_idname = "drone.add_short_range_timing"
-    bl_label = "Add Short-Range Tile Timing"
+    bl_label = "Add MyGrid Tile Timing"
 
     def execute(self, context):
         props = context.scene.marker_grid_props
@@ -1863,7 +2178,7 @@ class DRONE_OT_add_short_range_timing(bpy.types.Operator):
 
 class DRONE_OT_remove_short_range_timing(bpy.types.Operator):
     bl_idname = "drone.remove_short_range_timing"
-    bl_label = "Remove Short-Range Tile Timing"
+    bl_label = "Remove MyGrid Tile Timing"
 
     def execute(self, context):
         props = context.scene.marker_grid_props
@@ -1875,6 +2190,24 @@ class DRONE_OT_remove_short_range_timing(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DRONE_OT_reset_marker_map_values(bpy.types.Operator):
+    """Restore editable marker settings from the selected map file"""
+    bl_idname = "drone.reset_marker_map_values"
+    bl_label = "Reset to File Values"
+
+    def execute(self, context):
+        props = context.scene.marker_grid_props
+        try:
+            map_path = load_marker_map_properties(props)
+        except (OSError, UnicodeError, json.JSONDecodeError,
+                KeyError, TypeError, ValueError) as exc:
+            props.map_load_error = str(exc)
+            self.report({'ERROR'}, f"Could not load marker map: {exc}")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Restored marker settings from {map_path}")
+        return {'FINISHED'}
+
+
 class MARKER_UL_short_range_tile_timings(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon,
                   active_data, active_propname, index):
@@ -1883,6 +2216,15 @@ class MARKER_UL_short_range_tile_timings(bpy.types.UIList):
         row.prop(item, "tile_j", text="j")
         row.prop(item, "off_time", text="Off")
         row.prop(item, "on_time", text="On")
+
+
+class MARKER_UL_grid_animation_events(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.label(text=f"({item.tile_i}, {item.tile_j})")
+        row.prop(item, "time_s", text="")
+        row.prop(item, "state", text="")
 
 
 # ------------------------------------------------------------------------
@@ -3966,6 +4308,101 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
 #    Export Operator
 # ------------------------------------------------------------------------
 
+class EXPORT_OT_drone_trajectory(bpy.types.Operator):
+    """Export one selected drone's evaluated world pose for every render frame"""
+    bl_idname = "drone.export_trajectory"
+    bl_label = "Export Drone Trajectory"
+
+    filepath: StringProperty(subtype="FILE_PATH")
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+
+    @staticmethod
+    def selected_drone(context):
+        drones = [obj for obj in context.selected_objects if "servo_1" in obj]
+        return drones[0] if len(drones) == 1 else None
+
+    def invoke(self, context, event):
+        drone = self.selected_drone(context)
+        if drone is None:
+            self.report({'ERROR'}, "Select exactly one LightBender")
+            return {'CANCELLED'}
+        output_dir = bpy.path.abspath(context.scene.marker_grid_props.render_output_dir)
+        self.filepath = os.path.join(output_dir, f"render_{drone.name}_trajectory.json")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        drone = self.selected_drone(context)
+        if drone is None:
+            self.report({'ERROR'}, "Select exactly one LightBender")
+            return {'CANCELLED'}
+
+        fps = float(DRONE_CAMERA_RENDER_FPS)
+
+        start_frame = int(scene.frame_start)
+        end_frame = int(scene.frame_end)
+        original_frame = scene.frame_current
+        frames = []
+        try:
+            depsgraph = context.evaluated_depsgraph_get()
+            for video_frame, frame in enumerate(range(start_frame, end_frame + 1)):
+                scene.frame_set(frame)
+                context.view_layer.update()
+                evaluated = drone.evaluated_get(depsgraph)
+                matrix = evaluated.matrix_world
+                position = matrix.translation
+                quaternion = matrix.to_quaternion().normalized()
+                frames.append({
+                    "video_frame": video_frame,
+                    "frame": frame,
+                    "time": video_frame / fps,
+                    "position": [position.x, position.y, position.z],
+                    "quaternion_xyzw": [
+                        quaternion.x, quaternion.y, quaternion.z, quaternion.w
+                    ],
+                })
+        finally:
+            scene.frame_set(original_frame)
+            context.view_layer.update()
+
+        trajectory = {
+            "schema": "fls-drone-trajectory",
+            "version": 1,
+            "coordinate_frame": "world_FLU",
+            "quaternion_order": "xyzw",
+            "drone": drone.name,
+            "fps": fps,
+            "frame_start": start_frame,
+            "frame_end": end_frame,
+            "frame_count": len(frames),
+            "frames": frames,
+        }
+
+        output_path = bpy.path.abspath(self.filepath)
+        output_dir = os.path.dirname(output_path)
+        temporary_path = output_path + ".tmp"
+        try:
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            with open(temporary_path, 'w', encoding='utf-8') as output:
+                json.dump(trajectory, output, separators=(',', ':'))
+                output.write('\n')
+            os.replace(temporary_path, output_path)
+        except Exception as error:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+            self.report({'ERROR'}, f"Trajectory export failed: {error}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Exported {len(frames)} trajectory frames to {output_path}")
+        return {'FINISHED'}
+
+
 class EXPORT_OT_drone_yaml(bpy.types.Operator):
     """Export LightBender Animation to YAML"""
     bl_idname = "drone.export_yaml"
@@ -4446,23 +4883,337 @@ class DRONE_OT_select_lb_in_scene(bpy.types.Operator):
 class DRONE_OT_generate_marker_grid(bpy.types.Operator):
     """Generate the relative localization map grid"""
     bl_idname = "drone.generate_marker_grid"
-    bl_label = "Generate Marker Grid"
+    bl_label = "Generate MyGrid / HyperGrid"
     bl_options = {'REGISTER', 'UNDO'}
+
+    def generate_web_grid(self, context, data):
+        """Generate a sparse HyperGrid/MyGrid scene exported by Pose Scope."""
+        scene = context.scene
+        props = scene.marker_grid_props
+
+        def positive(value, name):
+            value = float(value)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be positive and finite")
+            return value
+
+        try:
+            if data.get("schema_version") != 1:
+                raise ValueError("only fls-marker-grid schema version 1 is supported")
+            hypergrid = data["hypergrid"]
+            mygrid = data["mygrid"]
+            blender = data.get("blender") or {}
+            if (hypergrid.get("layout") != "centered_2x2" or
+                    int(hypergrid.get("markers_per_tile", 0)) != 4 or
+                    mygrid.get("layout") != "centered_2x2" or
+                    int(mygrid.get("markers_per_tile", 0)) != 4):
+                raise ValueError("only centered 2x2 HyperGrid and MyGrid layouts are supported")
+            origin = tuple(float(value) for value in props.grid_origin)
+            if len(origin) != 3 or not all(math.isfinite(value) for value in origin):
+                raise ValueError("grid_origin must contain finite XYZ values")
+            hyper_spacing = positive(props.hypergrid_spacing, "HyperGrid spacing")
+            tile_size = positive(props.tile_size, "tile size")
+            my_spacing = positive(props.mygrid_spacing, "MyGrid spacing")
+            hyper_size = positive(props.marker_size, "HyperGrid marker diameter")
+            my_size = positive(props.short_range_marker_size, "MyGrid marker diameter")
+            payload_size = int(props.payload_size)
+            delimiter_size = int(props.delimiter_size)
+            if payload_size < 1 or delimiter_size < 1:
+                raise ValueError("encoding bit sizes must be positive")
+            payload_limit = 1 << payload_size
+            blink_frequency = positive(props.fps, "blink frequency")
+            scene_fps = int(blender.get("scene_fps", 120))
+            if scene_fps < 1:
+                raise ValueError("scene_fps must be positive")
+            min_brightness = float(props.min_brightness)
+            max_brightness = float(props.max_brightness)
+            emission_strength = positive(blender.get("emission_strength", 5.0),
+                                         "emission strength")
+            if (not math.isfinite(min_brightness) or
+                    not math.isfinite(max_brightness) or
+                    not 0.0 <= min_brightness <= max_brightness <= 1.0):
+                raise ValueError("brightness values must satisfy 0 <= min <= max <= 1")
+
+            tiles = mygrid["tiles"]
+            if not isinstance(tiles, list):
+                raise ValueError("mygrid.tiles must be an array")
+            tile_specs = []
+            hyper_marker_specs = []
+            my_marker_specs = []
+            events_by_tile = {}
+            tile_keys = set()
+            local_order = ((0, 0), (0, 1), (1, 1), (1, 0))
+            for tile in tiles:
+                tile_i = int(tile["i"])
+                tile_j = int(tile["j"])
+                tile_key = (tile_i, tile_j)
+                if tile_key in tile_keys:
+                    raise ValueError("duplicate MyGrid tile")
+                tile_keys.add(tile_key)
+                center = (
+                    origin[0] + tile_i * tile_size,
+                    origin[1] + tile_j * tile_size,
+                    origin[2],
+                )
+                tile_specs.append((tile_i, tile_j, center))
+
+                for local_row, local_col in local_order:
+                    grid_x = tile_i * 2 + local_col - 1
+                    grid_y = tile_j * 2 - local_row
+                    location = (
+                        center[0] + (local_col - 0.5) * hyper_spacing,
+                        center[1] + (0.5 - local_row) * hyper_spacing,
+                        center[2],
+                    )
+                    hyper_marker_specs.append((
+                        tile_i, tile_j, local_row, local_col,
+                        grid_x, grid_y, location))
+
+                tile_markers = tile["markers"]
+                if not isinstance(tile_markers, list) or len(tile_markers) != 4:
+                    raise ValueError("each MyGrid tile must contain four markers")
+                local_keys = set()
+                for marker in tile_markers:
+                    local_row = int(marker["local_row"])
+                    local_col = int(marker["local_col"])
+                    local_key = (local_row, local_col)
+                    marker_id = marker["id"]
+                    if (local_key not in local_order or local_key in local_keys or
+                            isinstance(marker_id, bool) or
+                            not isinstance(marker_id, int) or
+                            not 0 <= marker_id < payload_limit):
+                        raise ValueError("invalid MyGrid local coordinate or ID")
+                    local_keys.add(local_key)
+                    marker_location = (
+                        center[0] + (local_col - 0.5) * my_spacing,
+                        center[1] + (0.5 - local_row) * my_spacing,
+                        center[2],
+                    )
+                    my_marker_specs.append((
+                        tile_i, tile_j, local_row, local_col,
+                        marker_id, marker_location))
+                events_by_tile[tile_key] = []
+
+            seen_event_times = {tile_key: set() for tile_key in tile_keys}
+            for event in props.animation_events:
+                tile_key = (event.tile_i, event.tile_j)
+                time_s = float(event.time_s)
+                state = event.state
+                if (tile_key not in tile_keys or
+                        not math.isfinite(time_s) or time_s < 0.0 or
+                        state not in {"on", "off", "static", "blinking"} or
+                        time_s in seen_event_times[tile_key]):
+                    raise ValueError("invalid or duplicate MyGrid animation event")
+                seen_event_times[tile_key].add(time_s)
+                events_by_tile[tile_key].append((time_s, state))
+            for events in events_by_tile.values():
+                events.sort(key=lambda event: event[0])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            self.report({'ERROR'}, f"Invalid fls-marker-grid file: {exc}")
+            return {'CANCELLED'}
+
+        # Keep format metadata current without overwriting the user's edits.
+        props.loaded_grid_format = f"fls-marker-grid v{data.get('schema_version', 1)}"
+        props.loaded_tile_count = len(tile_specs)
+
+        # Delete existing generated geometry only after the new file validates.
+        prefixes = ("GridMarker_", "ShortRangeMarker_", "HyperGridMarker_",
+                    "MyGridMarker_", "MarkerTile_")
+        for obj in [obj for obj in scene.objects if obj.name.startswith(prefixes)]:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+        marker_mat = bpy.data.materials.get("GridMarker_Material")
+        if marker_mat:
+            bpy.data.materials.remove(marker_mat)
+        marker_mat = bpy.data.materials.new(name="GridMarker_Material")
+        marker_mat.use_nodes = True
+        marker_mat.node_tree.nodes.clear()
+        node_out = marker_mat.node_tree.nodes.new('ShaderNodeOutputMaterial')
+        node_emit = marker_mat.node_tree.nodes.new('ShaderNodeEmission')
+        node_obj = marker_mat.node_tree.nodes.new('ShaderNodeObjectInfo')
+        marker_mat.node_tree.links.new(node_obj.outputs['Color'], node_emit.inputs['Color'])
+        marker_mat.node_tree.links.new(node_emit.outputs['Emission'], node_out.inputs['Surface'])
+        node_emit.inputs['Strength'].default_value = emission_strength
+
+        tile_mat = bpy.data.materials.get("MarkerTile_Material")
+        if tile_mat:
+            bpy.data.materials.remove(tile_mat)
+        tile_mat = bpy.data.materials.new(name="MarkerTile_Material")
+        tile_mat.diffuse_color = (0.025, 0.08, 0.06, 1.0)
+        tile_mat.roughness = 0.9
+
+        scene.render.fps = scene_fps
+        timeline_fps = scene.render.fps / scene.render.fps_base
+        frames_per_bit = scene.render.fps / blink_frequency
+        packet_cache = {}
+        generated_objs = []
+        my_objects_by_tile = {}
+
+        def create_marker(name, location, marker_size, brightness):
+            if props.marker_shape == 'CYLINDER':
+                bpy.ops.mesh.primitive_cylinder_add(
+                    vertices=32, radius=marker_size / 2.0,
+                    depth=MARKER_CYLINDER_HEIGHT_M, location=location)
+            else:
+                bpy.ops.mesh.primitive_uv_sphere_add(
+                    radius=marker_size / 2.0, location=location)
+            obj = context.active_object
+            obj.name = name
+            obj.data.materials.append(marker_mat)
+            obj.color = (brightness, brightness, brightness, 1.0)
+            generated_objs.append(obj)
+            return obj
+
+        for tile_i, tile_j, center in tile_specs:
+            tile_location = (center[0], center[1],
+                             center[2] - max(hyper_size, my_size) * 0.51)
+            bpy.ops.mesh.primitive_plane_add(size=tile_size, location=tile_location)
+            tile_obj = context.active_object
+            tile_obj.name = f"MarkerTile_{tile_i}_{tile_j}"
+            tile_obj.data.materials.append(tile_mat)
+            tile_obj.hide_render = True
+            tile_obj["marker_grid"] = "tile"
+            tile_obj["tile_i"] = tile_i
+            tile_obj["tile_j"] = tile_j
+            generated_objs.append(tile_obj)
+
+        for (tile_i, tile_j, local_row, local_col,
+             grid_x, grid_y, location) in hyper_marker_specs:
+            obj = create_marker(
+                f"HyperGridMarker_{tile_i}_{tile_j}_{local_row}_{local_col}",
+                location, hyper_size, max_brightness)
+            obj["marker_grid"] = "hypergrid"
+            obj["tile_i"] = tile_i
+            obj["tile_j"] = tile_j
+            obj["local_row"] = local_row
+            obj["local_col"] = local_col
+            obj["grid_x"] = grid_x
+            obj["grid_y"] = grid_y
+
+        for (tile_i, tile_j, local_row, local_col,
+             marker_id, location) in my_marker_specs:
+            obj = create_marker(
+                f"MyGridMarker_{tile_i}_{tile_j}_{local_row}_{local_col}_{marker_id}",
+                location, my_size, min_brightness)
+            obj.hide_render = True
+            obj.hide_viewport = True
+            obj["marker_grid"] = "mygrid"
+            obj["tile_i"] = tile_i
+            obj["tile_j"] = tile_j
+            obj["local_row"] = local_row
+            obj["local_col"] = local_col
+            obj["marker_id"] = marker_id
+            my_objects_by_tile.setdefault((tile_i, tile_j), []).append(obj)
+
+        def packet_for(marker_id):
+            if marker_id not in packet_cache:
+                payload = [
+                    (marker_id >> bit_index) & 1
+                    for bit_index in range(payload_size - 1, -1, -1)
+                ]
+                packet_cache[marker_id] = payload + [1] * delimiter_size + [0]
+            return packet_cache[marker_id]
+
+        def keyframe_color(obj, frame, brightness):
+            obj.color = (brightness, brightness, brightness, 1.0)
+            obj.keyframe_insert(data_path="color", frame=frame)
+
+        for objects in my_objects_by_tile.values():
+            for obj in objects:
+                obj["blink_pattern"] = "".join(
+                    str(bit) for bit in packet_for(obj["marker_id"]))
+
+        latest_event_frame = max(
+            (scene.frame_start + time_s * timeline_fps
+             for events in events_by_tile.values()
+             for time_s, _state in events),
+            default=float(scene.frame_start))
+        packet_frame_count = frames_per_bit * (payload_size + delimiter_size + 1)
+        scene.frame_end = max(
+            scene.frame_end,
+            int(math.ceil(latest_event_frame + packet_frame_count)))
+        animation_end = float(scene.frame_end) + 1.0
+        for tile_key, objects in my_objects_by_tile.items():
+            events = events_by_tile[tile_key]
+            for obj in objects:
+                # No animation block means the default-off state is permanent.
+                if not events:
+                    continue
+                obj.hide_render = True
+                obj.hide_viewport = True
+                obj.keyframe_insert(data_path="hide_render", frame=scene.frame_start)
+                obj.keyframe_insert(data_path="hide_viewport", frame=scene.frame_start)
+                keyframe_color(obj, scene.frame_start, min_brightness)
+
+                powered = False
+                display_mode = "blinking"
+                for event_index, (time_s, state) in enumerate(events):
+                    event_frame = scene.frame_start + time_s * timeline_fps
+                    next_frame = (scene.frame_start +
+                                  events[event_index + 1][0] * timeline_fps
+                                  if event_index + 1 < len(events)
+                                  else animation_end)
+                    if state == "off":
+                        powered = False
+                    elif state == "on":
+                        powered = True
+                    else:
+                        powered = True
+                        display_mode = state
+                    hidden = not powered
+                    obj.hide_render = hidden
+                    obj.hide_viewport = hidden
+                    obj.keyframe_insert(data_path="hide_render", frame=event_frame)
+                    obj.keyframe_insert(data_path="hide_viewport", frame=event_frame)
+                    if powered and display_mode == "static":
+                        keyframe_color(obj, event_frame, max_brightness)
+                    elif powered and display_mode == "blinking":
+                        packet = packet_for(obj["marker_id"])
+                        step = 0
+                        frame = event_frame
+                        while frame < next_frame - 1e-7:
+                            brightness = (max_brightness if packet[step % len(packet)]
+                                          else min_brightness)
+                            keyframe_color(obj, frame, brightness)
+                            step += 1
+                            frame = event_frame + step * frames_per_bit
+
+                action = obj.animation_data.action
+                action.name = f"MyGridAnimation_{obj.name}"
+                for curve in action.fcurves:
+                    for point in curve.keyframe_points:
+                        point.interpolation = 'CONSTANT'
+
+        scene.frame_set(scene.frame_current)
+        context.view_layer.update()
+        selectable_objs = [obj for obj in generated_objs if not obj.hide_viewport]
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in selectable_objs:
+            obj.select_set(True)
+        if selectable_objs:
+            context.view_layer.objects.active = selectable_objs[-1]
+
+        self.report(
+            {'INFO'},
+            (f"Generated {len(tile_specs)} marker tiles, "
+             f"{len(hyper_marker_specs)} HyperGrid markers, and "
+             f"{len(my_marker_specs)} MyGrid markers."))
+        return {'FINISHED'}
 
     def execute(self, context):
         scene = context.scene
         props = scene.marker_grid_props
 
-        json_path = bpy.path.abspath(props.map_filepath)
-        if not os.path.exists(json_path):
-            json_path = os.path.join(get_repo_dir(), props.map_filepath)
-            if not os.path.exists(json_path):
-                self.report({'ERROR'}, f"Marker map not found: {props.map_filepath}")
-                return {'CANCELLED'}
+        try:
+            json_path = resolve_marker_map_path(props.map_filepath)
+            with open(json_path, 'r', encoding='utf-8') as map_file:
+                data = json.load(map_file)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            self.report({'ERROR'}, f"Could not load marker map: {exc}")
+            return {'CANCELLED'}
 
-        import json
-        with open(json_path, 'r') as f:
-            data = json.load(f)
+        if data.get("schema") == "fls-marker-grid":
+            return self.generate_web_grid(context, data)
 
         markers = data.get("markers", [])
         short_range = data.get("short_range") or {}
@@ -4530,7 +5281,7 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
         except (AttributeError, KeyError, TypeError, ValueError):
             self.report(
                 {'ERROR'},
-                "Marker map contains invalid coordinates, IDs, or short-range metadata")
+                "Marker map contains invalid coordinates, IDs, or MyGrid metadata")
             return {'CANCELLED'}
 
         timings_by_tile = {}
@@ -4544,14 +5295,21 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
                         timing.on_time < timing.off_time):
                     self.report(
                         {'ERROR'},
-                        "Short-range timing must reference one map tile and turn off before turning on")
+                        "MyGrid timing must reference one map tile and turn off before turning on")
                     return {'CANCELLED'}
                 timings_by_tile[tile_key] = timing
+
+        # Clear web-format metadata when returning to the legacy map format.
+        props.loaded_grid_format = "Legacy HyperGrid/MyGrid map"
+        props.loaded_tile_count = len(short_tile_keys)
+        props.animation_events.clear()
 
         # Delete existing markers only after the replacement map is valid.
         existing = [
             obj for obj in scene.objects
-            if obj.name.startswith(("GridMarker_", "ShortRangeMarker_"))
+            if obj.name.startswith((
+                "GridMarker_", "ShortRangeMarker_", "HyperGridMarker_",
+                "MyGridMarker_", "MarkerTile_"))
         ]
         for obj in existing:
             bpy.data.objects.remove(obj, do_unlink=True)
@@ -4584,8 +5342,13 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
         short_objects_by_tile = {}
 
         def create_marker(name, marker_id, location, marker_size):
-            bpy.ops.mesh.primitive_uv_sphere_add(
-                radius=marker_size / 2.0, location=location)
+            if props.marker_shape == 'CYLINDER':
+                bpy.ops.mesh.primitive_cylinder_add(
+                    vertices=32, radius=marker_size / 2.0,
+                    depth=MARKER_CYLINDER_HEIGHT_M, location=location)
+            else:
+                bpy.ops.mesh.primitive_uv_sphere_add(
+                    radius=marker_size / 2.0, location=location)
             obj = context.active_object
             obj.name = name
             obj.data.materials.append(mat)
@@ -4678,13 +5441,13 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            (f"Generated {len(marker_specs)} main and "
-             f"{len(short_marker_specs)} short-range markers."))
+            (f"Generated {len(marker_specs)} HyperGrid and "
+             f"{len(short_marker_specs)} MyGrid markers."))
         return {'FINISHED'}
 
 
 class DRONE_OT_render_drone_cameras(bpy.types.Operator):
-    """Render videos from the cameras of selected LightBenders in the background"""
+    """Render videos from the cameras of selected LightBenders"""
     bl_idname = "drone.render_drone_cameras"
     bl_label = "Render Selected Cameras"
 
@@ -4710,6 +5473,7 @@ class DRONE_OT_render_drone_cameras(bpy.types.Operator):
         output_dir = bpy.path.abspath(props.render_output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
+        camera_jobs = []
         for drone in selected_drones:
             cam = next((child for child in drone.children if child.name.startswith("Drone_Camera")), None)
             if not cam:
@@ -4717,16 +5481,63 @@ class DRONE_OT_render_drone_cameras(bpy.types.Operator):
                 continue
 
             out_path = os.path.join(output_dir, f"render_{drone.name}.mp4")
+            camera_jobs.append((cam, out_path))
+
+        if not camera_jobs:
+            self.report({'ERROR'}, "The selected LightBenders have no cameras.")
+            return {'CANCELLED'}
+
+        def configure_fast_video(camera, out_path):
+            scene.camera = camera
+            scene.render.resolution_x = 640
+            scene.render.resolution_y = 400
+            scene.render.fps = DRONE_CAMERA_RENDER_FPS
+            scene.render.fps_base = 1.0
+            scene.render.image_settings.file_format = "FFMPEG"
+            scene.render.image_settings.color_mode = "RGB"
+            scene.render.ffmpeg.format = "MPEG4"
+            scene.render.ffmpeg.codec = "H264"
+            scene.render.ffmpeg.constant_rate_factor = "LOW"
+            scene.render.ffmpeg.ffmpeg_preset = "REALTIME"
+            scene.render.ffmpeg.audio_codec = "NONE"
+            scene.render.ffmpeg.max_b_frames = 0
+            scene.render.filepath = out_path
+
+        if not props.render_in_background:
+            original_camera = scene.camera
+            original_filepath = scene.render.filepath
+            try:
+                for cam, out_path in camera_jobs:
+                    configure_fast_video(cam, out_path)
+                    bpy.ops.render.render(animation=True, write_still=False)
+            finally:
+                scene.camera = original_camera
+                scene.render.filepath = original_filepath
+            self.report(
+                {'INFO'},
+                f"Rendered {len(camera_jobs)} camera videos in this Blender session.")
+            return {'FINISHED'}
+
+        for cam, out_path in camera_jobs:
 
             script = f'''import bpy
 scene = bpy.context.scene
-scene.camera = bpy.data.objects.get("{cam.name}")
+scene.camera = bpy.data.objects.get({cam.name!r})
 scene.render.resolution_x = 640
 scene.render.resolution_y = 400
-scene.render.fps = 120
+scene.render.fps = {DRONE_CAMERA_RENDER_FPS}
+scene.render.fps_base = 1.0
 scene.render.image_settings.file_format = "FFMPEG"
+scene.render.image_settings.color_mode = "RGB"
 scene.render.ffmpeg.format = "MPEG4"
-scene.render.filepath = "{out_path}"
+# Always override settings stored in the .blend file. H.264's realtime preset
+# avoids slow multi-pass-style compression while remaining widely playable.
+scene.render.ffmpeg.codec = "H264"
+scene.render.ffmpeg.constant_rate_factor = "LOW"
+scene.render.ffmpeg.ffmpeg_preset = "REALTIME"
+scene.render.ffmpeg.audio_codec = "NONE"
+scene.render.ffmpeg.max_b_frames = 0
+scene.render.filepath = {out_path!r}
 bpy.ops.render.render(animation=True, write_still=False)
 '''
             fd, script_path = tempfile.mkstemp(suffix=".py", text=True)
@@ -4736,7 +5547,7 @@ bpy.ops.render.render(animation=True, write_still=False)
             cmd = [bpy.app.binary_path, "-b", bpy.data.filepath, "-P", script_path]
             subprocess.Popen(cmd)
 
-        self.report({'INFO'}, f"Started background rendering for {len(selected_drones)} cameras.")
+        self.report({'INFO'}, f"Started background rendering for {len(camera_jobs)} cameras.")
         return {'FINISHED'}
 
 
@@ -5185,6 +5996,90 @@ class DRONE_OT_clear_flyin(bpy.types.Operator):
                     if match: ptr.color_expression = match.group(1)
 
         self.report({'INFO'}, "Fly-In animation cleared.")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+#    Flight Attitude
+# ------------------------------------------------------------------------
+
+class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
+    """Replace roll/pitch animation using the selected LightBenders' keyed motion"""
+    bl_idname = "drone.apply_flight_attitude"
+    bl_label = "Apply Flight Attitude"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.drone_props
+        selected = [
+            obj for obj in context.selected_objects
+            if "servo_1" in obj and "servo_2" in obj
+        ]
+        if not selected:
+            self.report({'ERROR'}, "Select at least one LightBender")
+            return {'CANCELLED'}
+
+        fps = scene.render.fps / scene.render.fps_base
+        max_tilt = props.flight_attitude_max_tilt
+        smoothing = props.flight_attitude_smoothing_frames
+        original_frame = scene.frame_current
+        applied = []
+        skipped = []
+
+        try:
+            for obj in selected:
+                location_fcurves = get_location_fcurves(obj)
+                frame_range = get_location_keyframe_range(location_fcurves)
+                if frame_range is None:
+                    skipped.append(obj.name)
+                    continue
+
+                first_frame, last_frame = frame_range
+                accelerations = sample_flight_accelerations(
+                    obj, location_fcurves, first_frame, last_frame, fps, smoothing)
+
+                action = obj.animation_data.action
+                for axis in (0, 1):
+                    existing = action.fcurves.find("rotation_euler", index=axis)
+                    if existing:
+                        action.fcurves.remove(existing)
+
+                yaw_fcurve = action.fcurves.find("rotation_euler", index=2)
+                base_yaw = obj.rotation_euler.z
+                obj.rotation_mode = 'XYZ'
+                for offset, acceleration in enumerate(accelerations):
+                    frame = first_frame + offset
+                    yaw = yaw_fcurve.evaluate(frame) if yaw_fcurve else base_yaw
+                    roll, pitch = flight_attitude_from_acceleration(
+                        acceleration, yaw, max_tilt)
+                    obj.rotation_euler.x = roll
+                    obj.rotation_euler.y = pitch
+                    obj.keyframe_insert(
+                        data_path="rotation_euler", index=0, frame=frame,
+                        group="Flight Attitude")
+                    obj.keyframe_insert(
+                        data_path="rotation_euler", index=1, frame=frame,
+                        group="Flight Attitude")
+
+                for axis in (0, 1):
+                    generated = action.fcurves.find("rotation_euler", index=axis)
+                    if generated:
+                        for keyframe in generated.keyframe_points:
+                            keyframe.interpolation = 'LINEAR'
+                applied.append(obj.name)
+        finally:
+            scene.frame_set(original_frame)
+            context.view_layer.update()
+
+        if not applied:
+            self.report({'ERROR'}, "Selected LightBenders need at least two position keyframes")
+            return {'CANCELLED'}
+
+        message = f"Applied flight attitude to {len(applied)} LightBender(s)"
+        if skipped:
+            message += f"; skipped {len(skipped)} without position animation"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -5705,6 +6600,18 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         row.operator("drone.generate_flyin", text="Generate Fly-In/Fly-Out", icon='KEYINGSET')
         row.operator("drone.clear_flyin", text="", icon='TRASH')
 
+        layout.separator()
+
+        # --- Flight Attitude ---
+        layout.label(text="Flight Attitude:", icon='ORIENTATION_GIMBAL')
+        box = layout.box()
+        box.prop(props, "flight_attitude_max_tilt")
+        box.prop(props, "flight_attitude_smoothing_frames")
+        box.operator(
+            "drone.apply_flight_attitude",
+            text="Apply to Selected",
+            icon='CON_ROTLIKE')
+
 
 class VIEW3D_PT_lb_global_leds(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
@@ -6044,7 +6951,7 @@ class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "LightBender"
-    bl_label = "Marker Grid & Tracking"
+    bl_label = "MyGrid & HyperGrid Tracking"
     bl_parent_id = "VIEW3D_PT_drone_swarm"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -6053,9 +6960,28 @@ class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
         scene = context.scene
         props = scene.marker_grid_props
 
-        layout.label(text="Grid Generation:", icon='GRID')
+        layout.label(text="MyGrid / HyperGrid Generation:", icon='GRID')
         box = layout.box()
         box.prop(props, "map_filepath")
+        box.operator(
+            "drone.reset_marker_map_values",
+            text="Reset to File Values",
+            icon='FILE_REFRESH')
+
+        box.label(text=f"Loaded: {props.loaded_grid_format}")
+        if props.map_load_error:
+            box.label(text=props.map_load_error, icon='ERROR')
+        if props.loaded_grid_format.startswith("fls-marker-grid"):
+            box.label(text=f"Selected MyGrid tiles: {props.loaded_tile_count}")
+            loaded = box.column(align=True)
+            loaded.prop(props, "grid_origin")
+            row = loaded.row(align=True)
+            row.prop(props, "hypergrid_spacing")
+            row.prop(props, "tile_size")
+            loaded.prop(props, "mygrid_spacing")
+
+        box.label(text="Marker Shape:")
+        box.prop(props, "marker_shape", expand=True)
 
         row = box.row(align=True)
         row.prop(props, "marker_size")
@@ -6069,22 +6995,33 @@ class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
         row.prop(props, "fps")
         row.prop(props, "payload_size")
 
-        box.label(text="Short-Range Tile Timing (seconds):")
-        row = box.row()
-        row.template_list(
-            "MARKER_UL_short_range_tile_timings", "", props,
-            "short_range_timings",
-            props, "short_range_active_timing_index", rows=3)
-        col = row.column(align=True)
-        col.operator("drone.add_short_range_timing", icon='ADD', text="")
-        col.operator("drone.remove_short_range_timing", icon='REMOVE', text="")
+        if props.loaded_grid_format.startswith("fls-marker-grid"):
+            box.prop(props, "delimiter_size")
+            box.label(text="Imported MyGrid Events:")
+            box.template_list(
+                "MARKER_UL_grid_animation_events", "", props,
+                "animation_events", props,
+                "animation_active_event_index", rows=4)
+        else:
+            box.label(text="MyGrid Tile Timing (seconds):")
+            row = box.row()
+            row.template_list(
+                "MARKER_UL_short_range_tile_timings", "", props,
+                "short_range_timings",
+                props, "short_range_active_timing_index", rows=3)
+            col = row.column(align=True)
+            col.operator("drone.add_short_range_timing", icon='ADD', text="")
+            col.operator("drone.remove_short_range_timing", icon='REMOVE', text="")
 
-        box.operator("drone.generate_marker_grid", text="Generate Marker Grid")
+        box.operator(
+            "drone.generate_marker_grid", text="Generate MyGrid / HyperGrid")
 
         layout.separator()
         layout.label(text="Camera Rendering:", icon='CAMERA_DATA')
         box = layout.box()
         box.prop(props, "render_output_dir")
+        box.prop(props, "render_in_background")
+        box.operator("drone.export_trajectory", text="Export Selected Trajectory", icon='EXPORT')
         box.operator("drone.render_drone_cameras", text="Render Selected Cameras", icon='RENDER_ANIMATION')
 
 
@@ -6095,6 +7032,7 @@ class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
 classes = (
     LightBenderAddonPreferences,
     ShortRangeTileTiming,
+    MarkerGridAnimationEvent,
     MarkerGridProperties,
     LEDPointer,
     ColorItem,
@@ -6108,7 +7046,9 @@ classes = (
     UL_DronePointerList,
     DRONE_OT_add_short_range_timing,
     DRONE_OT_remove_short_range_timing,
+    DRONE_OT_reset_marker_map_values,
     MARKER_UL_short_range_tile_timings,
+    MARKER_UL_grid_animation_events,
     UL_GlobalColorList,
     UL_SwarmDroneList,
     UL_DrawEraseGroups,
@@ -6123,6 +7063,7 @@ classes = (
     DRONE_OT_generate_draw_erase,
     DRONE_OT_generate_flyin,
     DRONE_OT_clear_flyin,
+    DRONE_OT_apply_flight_attitude,
     DRONE_OT_generate_fold,
     DRONE_OT_clear_fold,
     DRONE_OT_apply_error,
@@ -6132,6 +7073,7 @@ classes = (
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
     DRONE_OT_generate_marker_grid,
+    EXPORT_OT_drone_trajectory,
     DRONE_OT_render_drone_cameras,
     DRONE_OT_transform_and_place,
     DRONE_OT_generate_morph,
