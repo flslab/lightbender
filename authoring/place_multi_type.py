@@ -1,4 +1,5 @@
 import time
+import json
 
 import numpy as np
 import yaml
@@ -516,6 +517,8 @@ class SetCoverStrategy(PlacementStrategy):
                         covered_chunk_ids.add(ch_id)
             cand['covered'] = covered_chunk_ids
 
+        export_set_cover_log(candidates, global_chunk_id, getattr(args, 'set_cover_log', None))
+
         # E. Solve Exact Set Cover with Overlap Penalty
         chosen_indices = self._solve_set_cover(candidates, global_chunk_id)
 
@@ -863,6 +866,25 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         print(f"Placed states saved to {filepath}")
 
 
+def export_set_cover_log(candidates: List[Dict], num_chunks: int, filepath: str):
+    if not filepath:
+        return
+
+    chunk_names = [f"m{i + 1}" for i in range(num_chunks)]
+    coverage = {
+        f"c{i + 1}": [f"m{chunk_id + 1}" for chunk_id in sorted(candidate['covered'])]
+        for i, candidate in enumerate(candidates)
+    }
+    lengths = {
+        f"c{i + 1}": float(candidate['ml'])
+        for i, candidate in enumerate(candidates)
+    }
+
+    with open(filepath, 'w') as f:
+        json.dump({'chunks': chunk_names, 'coverage': coverage, 'length': lengths}, f, indent=2)
+        f.write('\n')
+
+
 # --- Execution ---
 
 if __name__ == "__main__":
@@ -877,6 +899,8 @@ if __name__ == "__main__":
     parser.add_argument("--scale", type=float, default=1.0, help="Scale factor of input")
     parser.add_argument("--no_viz", action="store_true", help="Disable visualization")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
+    parser.add_argument("--set_cover_log", type=str, default="set_cover_log.json",
+                        help="Set-cover chunk/candidate log (SC and HYB policies only)")
 
     args = parser.parse_args()
 
@@ -924,5 +948,3 @@ if __name__ == "__main__":
         print(f"Average Rod Length:     {avg_rod_len:.2f}")
         print(f"Rod Length Utilization: {utilization:.1f}%")
         print("--------------------------\n")
-
-    

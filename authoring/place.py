@@ -1,4 +1,5 @@
 import time
+import json
 import numpy as np
 import yaml
 import os
@@ -512,6 +513,8 @@ class SetCoverStrategy(PlacementStrategy):
                         covered_chunk_ids.add(ch_id)
             cand['covered'] = covered_chunk_ids
 
+        export_set_cover_log(candidates, global_chunk_id, getattr(args, 'set_cover_log', None), max_length)
+
         # Optional: Visualize Candidates before exact solving
         if getattr(args, 'viz_candidates', False):
             print("Close the plot window to continue")
@@ -880,6 +883,28 @@ def save_to_solver_format(lightbenders: List[Point3D], filepath: str):
         # print(f"Placed LightBenders saved to {filepath}")
 
 
+def export_set_cover_log(candidates: List[Dict], num_chunks: int, filepath: str,
+                         default_length: Optional[float] = None):
+    if not filepath:
+        return
+
+    chunk_names = [f"m{i + 1}" for i in range(num_chunks)]
+    coverage = {
+        f"c{i + 1}": [f"m{chunk_id + 1}" for chunk_id in sorted(candidate['covered'])]
+        for i, candidate in enumerate(candidates)
+    }
+    lengths = {
+        f"c{i + 1}": float(candidate.get('ml', default_length))
+        for i, candidate in enumerate(candidates)
+    }
+
+    print(candidates)
+
+    with open(filepath, 'w') as f:
+        json.dump({'chunks': chunk_names, 'coverage': coverage, 'length': lengths}, f, indent=2)
+        f.write('\n')
+
+
 # --- Execution ---
 
 if __name__ == "__main__":
@@ -895,6 +920,8 @@ if __name__ == "__main__":
     parser.add_argument("--viz_candidates", action="store_true",
                         help="Enable 3D visualization of all generated Set Cover candidates")
     parser.add_argument("--csv", action='store_true', help="Output metrics as CSV to stdout")
+    parser.add_argument("--set_cover_log", type=str, default="set_cover_log.json",
+                        help="Set-cover chunk/candidate log (SC and HYB policies only)")
 
     args = parser.parse_args()
 
@@ -933,4 +960,3 @@ if __name__ == "__main__":
         # print(f"Average Rod Length:     {avg_rod_len:.2f} m")
         print(f"Rod Length Utilization: {utilization:.1f}%")
         print("=" * 40)
-
