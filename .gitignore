@@ -1,8 +1,13 @@
 authoring/results*
 analysis/results*
+orchestrator/results*
+orchestrator/SFL
 orchestrator/swarm_manifest.yaml
 orchestrator/logs
 orchestrator/uploader/token.json
+orchestrator/SFL/experimental/
+orchestrator/SFL/blender_mission.yaml
+orchestrator/SFL/lb_author_mission.yaml
 *.log
 .DS_Store
 
