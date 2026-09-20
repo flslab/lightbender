@@ -8,12 +8,13 @@ import sys
 
 
 class PerspectiveCamera:
-    def __init__(self, position, target, fov_deg=60, width=800, height=600):
+    def __init__(self, position, target, fov_deg=60, width=800, height=600, render_scale=1.0):
         self.position = np.array(position, dtype=float)
         self.target = np.array(target, dtype=float)
         self.width = width
         self.height = height
         self.fov_deg = fov_deg
+        self.render_scale = render_scale
 
         # Intrinsic Parameters
         self.f = (height / 2) / math.tan(math.radians(fov_deg / 2))
@@ -69,8 +70,8 @@ class PerspectiveCamera:
             return None
 
         # Pinhole projection
-        u = (x_c * self.f) / z_c + self.cx
-        v = (y_c * self.f) / z_c + self.cy
+        u = (x_c * self.f * self.render_scale) / z_c + self.cx
+        v = (y_c * self.f * self.render_scale) / z_c + self.cy
 
         return (u, v)
 
@@ -82,12 +83,14 @@ class SVGWriter:
         self.height = height
         self.elements = []
 
-    def add_line(self, x1, y1, x2, y2, color, stroke_width=2, opacity=1.0, element_id=None):
+    def add_line(self, x1, y1, x2, y2, color, stroke_width=2, opacity=1.0,
+                 element_id=None, linecap="butt"):
         # Insert ID attribute if provided
         id_attr = f'id="{element_id}" ' if element_id else ''
         self.elements.append(
             f'<line {id_attr}x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-            f'stroke="{color}" stroke-width="{stroke_width:.2f}" stroke-opacity="{opacity}" />'
+            f'stroke="{color}" stroke-width="{stroke_width:.2f}" stroke-opacity="{opacity}" '
+            f'stroke-linecap="{linecap}" />'
         )
 
     def add_circle(self, cx, cy, r, color, fill_opacity=1.0):
@@ -135,7 +138,10 @@ def get_line_tip_geometry(cx, cy, cz, length, angle_deg, yaw_deg):
     return np.array([cx + dx_rot, cy + dy_rot, cz + dz_rot])
 
 
-def render_scene(yaml_input, svg_output, camera_pos):
+def render_scene(yaml_input, svg_output, camera_pos, aesthetic=False, render_scale=1.0):
+    if render_scale <= 0:
+        raise ValueError("render_scale must be greater than zero")
+
     # 1. Load Data
     if not os.path.exists(yaml_input):
         print(f"Error: {yaml_input} not found.", file=sys.stderr)
@@ -154,13 +160,16 @@ def render_scene(yaml_input, svg_output, camera_pos):
     centroid = np.mean(positions, axis=0)
 
     WIDTH, HEIGHT = 1920, 1080
-    cam = PerspectiveCamera(camera_pos, centroid, fov_deg=60, width=WIDTH, height=HEIGHT)
+    cam = PerspectiveCamera(camera_pos, centroid, fov_deg=60, width=WIDTH, height=HEIGHT,
+                            render_scale=render_scale)
 
     # 3. Setup SVG
     svg = SVGWriter(svg_output, WIDTH, HEIGHT)
 
     # Base stroke width for lines
     BASE_STROKE_WIDTH = 3.0
+    aesthetic_color = "#2563eb"
+    linecap = "round" if aesthetic else "butt"
 
     # 4. Render
     # Sort points by distance to camera
@@ -179,7 +188,7 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         # Get scale factor (default 1.0 if not present)
         scale_factor = p.get('scale_factor', 1.0)
-        current_stroke = BASE_STROKE_WIDTH / scale_factor
+        current_stroke = BASE_STROKE_WIDTH * render_scale / scale_factor * (1.5 if aesthetic else 1.0)
 
         proj_origin = cam.project_point(origin)
         if proj_origin is None:
@@ -195,8 +204,8 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         if proj_tip1:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip1[0], proj_tip1[1],
-                         color="green", stroke_width=current_stroke, opacity=0.8,
-                         element_id=l1_id)
+                         color=aesthetic_color if aesthetic else "green", stroke_width=current_stroke, opacity=1.0,
+                         element_id=l1_id, linecap=linecap)
 
         # Line 2
         tip2_3d = get_line_tip_geometry(origin[0], origin[1], origin[2], p['length_2'], p['angle_2'], yaw)
@@ -204,19 +213,21 @@ def render_scene(yaml_input, svg_output, camera_pos):
 
         if proj_tip2:
             svg.add_line(proj_origin[0], proj_origin[1], proj_tip2[0], proj_tip2[1],
-                         color="magenta", stroke_width=current_stroke, opacity=0.8,
-                         element_id=l2_id)
+                         color=aesthetic_color if aesthetic else "magenta", stroke_width=current_stroke, opacity=1.0,
+                         element_id=l2_id, linecap=linecap)
 
         if split_info and proj_tip1 and proj_tip2:
             parent_id = split_info.get('parent_id', pid)
             segment_idx = split_info.get('segment', 1)
-            color = "green" if segment_idx == 1 else "magenta"
+            color = aesthetic_color if aesthetic else ("green" if segment_idx == 1 else "magenta")
             svg.add_line(proj_tip1[0], proj_tip1[1], proj_tip2[0], proj_tip2[1],
-                         color=color, stroke_width=current_stroke, opacity=0.8,
-                         element_id=f"p{parent_id}_l{segment_idx}")
+                         color=color, stroke_width=current_stroke, opacity=1.0,
+                         element_id=f"p{parent_id}_l{segment_idx}", linecap=linecap)
 
-        svg.add_circle(proj_origin[0], proj_origin[1], 5, color="orange")
-        svg.add_text(proj_origin[0] + 8, proj_origin[1] + 4, str(pid), color="#555")
+        if not aesthetic:
+            svg.add_circle(proj_origin[0], proj_origin[1], 5 * render_scale, color="orange")
+            svg.add_text(proj_origin[0] + 8 * render_scale, proj_origin[1] + 4 * render_scale,
+                         str(pid), color="#555", size=12 * render_scale)
 
     svg.save()
 
@@ -389,6 +400,10 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=str, help="Input file (YAML for render, SVG 1 for compare)")
     parser.add_argument("--output", type=str, help="Output file (SVG for render, SVG 2 for compare)")
     parser.add_argument("--camera_pos", type=float, nargs=3, default=[2.3, 0.0, 0.8], help="Camera Position x y z")
+    parser.add_argument("--aesthetic", action="store_true",
+                        help="Render all rods in one color without origin circles or ID labels")
+    parser.add_argument("--render_scale", type=float, default=1.0,
+                        help="Scale projected SVG content around its center (default: 1.0)")
     parser.add_argument("--csv", action="store_true", help="Output comparison metrics in CSV format")
 
     args = parser.parse_args()
@@ -399,7 +414,8 @@ if __name__ == "__main__":
         if not args.input or not args.output:
             print("Error: --input (YAML) and --output (SVG) required for render mode.")
         else:
-            render_scene(args.input, args.output, CAMERA_POS)
+            render_scene(args.input, args.output, CAMERA_POS, aesthetic=args.aesthetic,
+                         render_scale=args.render_scale)
 
     elif args.action == 'compare':
         if not args.input or not args.output:
@@ -415,11 +431,13 @@ if __name__ == "__main__":
 
         if os.path.exists(FILE_BEFORE_YAML):
             print(f"Rendering Before State: {FILE_BEFORE_YAML}")
-            render_scene(FILE_BEFORE_YAML, SVG_BEFORE, CAMERA_POS)
+            render_scene(FILE_BEFORE_YAML, SVG_BEFORE, CAMERA_POS, aesthetic=args.aesthetic,
+                         render_scale=args.render_scale)
 
         if os.path.exists(FILE_AFTER_YAML):
             print(f"Rendering After State: {FILE_AFTER_YAML}")
-            render_scene(FILE_AFTER_YAML, SVG_AFTER, CAMERA_POS)
+            render_scene(FILE_AFTER_YAML, SVG_AFTER, CAMERA_POS, aesthetic=args.aesthetic,
+                         render_scale=args.render_scale)
 
         if os.path.exists(SVG_BEFORE) and os.path.exists(SVG_AFTER):
             compare_svgs(SVG_BEFORE, SVG_AFTER)
