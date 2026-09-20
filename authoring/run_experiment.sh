@@ -30,9 +30,9 @@ TRANSFORM_MAX_HEIGHT=1.0
 MAX_LENGTH=0.16
 MAX_LENGTHS="0.13 0.16 0.24"
 MIN_CHUNK_LEN=0.01
-PLACEMENT_POLICIES=("SC")
+PLACEMENT_POLICIES=("SC" "VFG")
 # PLACEMENT_POLICIES=("VFG" "SC" "HYB")
-SET_COVER_SOLVER="gurobi" # bnb or gurobi; used only by SC/HYB
+SET_COVER_SOLVERS=("bnb" "gurobi") # used only by SC/HYB
 GUROBI_MIP_GAP=0.0
 
 # --- Stagger Parameters ---
@@ -96,7 +96,7 @@ Placement ($PLACE_SCRIPT)
 $MAX_LENGTH_REPORT
 Placement Policies       : ${PLACEMENT_POLICIES[*]}
 SC Min Chunk Length      : $MIN_CHUNK_LEN
-Set Cover Solver         : $SET_COVER_SOLVER
+Set Cover Solvers        : ${SET_COVER_SOLVERS[*]}
 Gurobi MIP Gap           : $GUROBI_MIP_GAP
 ----------------------------------------
 Stagger
@@ -170,10 +170,18 @@ for input_file in "${INPUT_FILES[@]}"; do
 
     # Loop over Placement Policies
     for policy in "${PLACEMENT_POLICIES[@]}"; do
+        if [ "$policy" == "SC" ] || [ "$policy" == "HYB" ]; then
+            policy_solvers=("${SET_COVER_SOLVERS[@]}")
+        else
+            # The solver is unused by non-set-cover policies, so run them only once.
+            policy_solvers=("${SET_COVER_SOLVERS[0]}")
+        fi
+
+        for set_cover_solver in "${policy_solvers[@]}"; do
 
         policy_output_name="$policy"
         if [ "$policy" == "SC" ] || [ "$policy" == "HYB" ]; then
-            policy_output_name="${policy}-${SET_COVER_SOLVER}"
+            policy_output_name="${policy}-${set_cover_solver}"
         fi
 
         # Setup specific directory structure for this policy
@@ -207,7 +215,7 @@ for input_file in "${INPUT_FILES[@]}"; do
             --min_chunck_len $MIN_CHUNK_LEN \
             --no_viz \
             --set_cover_log "$SC_LOG" \
-            --set_cover_solver "$SET_COVER_SOLVER" \
+            --set_cover_solver "$set_cover_solver" \
             --gurobi_mip_gap "$GUROBI_MIP_GAP" \
             --csv); then
             echo "$PLACE_OUT"
@@ -215,7 +223,6 @@ for input_file in "${INPUT_FILES[@]}"; do
             continue
         fi
 
-        echo "$PLACE_OUT"
         if [ ! -f "$INITIAL_LAYOUT" ]; then
             echo "$PLACE_OUT"
             echo "    Error: place.py failed to produce $INITIAL_LAYOUT. Skipping policy $policy."
@@ -342,6 +349,7 @@ for input_file in "${INPUT_FILES[@]}"; do
                     done
                 done
             done
+        done
         done
     done
 
