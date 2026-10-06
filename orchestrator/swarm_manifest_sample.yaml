@@ -84,6 +84,7 @@ drones:
     save_vicon: true
     tracker: true
     marker_tile: [0, 0]
+    uri: radio://0/100/2M/E7E7E7E708
   - id: "lb9"
     ip: lightbendercf09
     user: fls
