@@ -509,7 +509,14 @@ class DroneProcessor:
 
         self.act_r_fn = interp1d(ekf_rel_times, np.radians(roll), fill_value="extrapolate")
         self.act_p_fn = interp1d(ekf_rel_times, np.radians(pitch), fill_value="extrapolate")
-        self.act_y_fn = interp1d(ekf_rel_times, np.radians(yaw), fill_value="extrapolate")
+        # The estimator reports yaw wrapped to [-180, 180]. Interpolating the
+        # wrapped samples makes a +180 -> -180 crossing pass through zero,
+        # which rotates an offset mocap marker to the wrong side of the body
+        # for samples between the two attitude log entries.
+        unwrapped_yaw = np.unwrap(np.radians(yaw))
+        self.act_y_fn = interp1d(
+            ekf_rel_times, unwrapped_yaw, fill_value="extrapolate"
+        )
 
         self.act_max_rel_time = rel_times[-1]
 
