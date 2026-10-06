@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 21),
+    "version": (1, 23),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create and animate LightBenders, export SFL, and export ground-truth trajectories",
@@ -394,18 +394,25 @@ def sample_flight_accelerations(obj, location_fcurves, first_frame,
     if smoothing_frames <= 0:
         return accelerations
 
-    # A fixed-width window treats samples outside the keyed range as hovering.
-    # Besides reducing Bezier noise, this spreads instantaneous velocity changes
-    # from linear position curves into a visible acceleration/deceleration lean.
-    window_size = smoothing_frames * 2 + 1
+    # Treat samples outside the keyed range as hovering. A quintic smoothstep
+    # kernel reaches zero with zero first and second derivatives, unlike a box
+    # filter whose hard edge produces visible jerk and snap in the attitude.
+    kernel = []
+    for offset in range(-smoothing_frames, smoothing_frames + 1):
+        distance = abs(offset) / (smoothing_frames + 1)
+        smoothstep = distance ** 3 * (
+            distance * (distance * 6.0 - 15.0) + 10.0)
+        kernel.append(1.0 - smoothstep)
+    kernel_total = sum(kernel)
+
     smoothed = []
     for index in range(len(accelerations)):
         total = Vector((0.0, 0.0, 0.0))
-        start = max(0, index - smoothing_frames)
-        stop = min(len(accelerations), index + smoothing_frames + 1)
-        for sample in accelerations[start:stop]:
-            total += sample
-        smoothed.append(total / window_size)
+        for kernel_index, weight in enumerate(kernel):
+            sample_index = index + kernel_index - smoothing_frames
+            if 0 <= sample_index < len(accelerations):
+                total += accelerations[sample_index] * weight
+        smoothed.append(total / kernel_total)
     return smoothed
 
 
@@ -419,8 +426,14 @@ def flight_attitude_from_acceleration(acceleration, yaw, max_tilt):
 
     horizontal = math.hypot(body_x, body_y)
     max_horizontal = thrust_z * math.tan(max_tilt)
-    if horizontal > max_horizontal and horizontal > 0.0:
-        scale = max_horizontal / horizontal
+    if horizontal > 0.0:
+        # Approach the tilt limit smoothly. A hard clamp introduces a corner
+        # in attitude, which becomes an angular-velocity/jerk discontinuity.
+        limited_horizontal = (
+            max_horizontal * math.tanh(horizontal / max_horizontal)
+            if max_horizontal > 0.0 else 0.0
+        )
+        scale = limited_horizontal / horizontal
         body_x *= scale
         body_y *= scale
 
@@ -428,6 +441,157 @@ def flight_attitude_from_acceleration(acceleration, yaw, max_tilt):
     roll = math.asin(max(-1.0, min(1.0, -body_y / thrust_length)))
     pitch = math.atan2(body_x, thrust_z)
     return roll, pitch
+
+
+def natural_cubic_tangents(frames, values):
+    """Return C2-continuous natural-cubic-spline slopes at each key."""
+    key_count = len(frames)
+    if key_count == 0:
+        return []
+    if key_count == 1:
+        return [0.0]
+
+    spans = [frames[index + 1] - frames[index]
+             for index in range(key_count - 1)]
+    secants = [(values[index + 1] - values[index]) / spans[index]
+               for index in range(key_count - 1)]
+    if key_count == 2:
+        return [secants[0], secants[0]]
+
+    # Solve for the spline's second derivatives with natural end conditions.
+    lower = [0.0] * key_count
+    diagonal = [1.0] * key_count
+    upper = [0.0] * key_count
+    right_hand_side = [0.0] * key_count
+    for index in range(1, key_count - 1):
+        previous_span = spans[index - 1]
+        next_span = spans[index]
+        lower[index] = previous_span
+        diagonal[index] = 2.0 * (previous_span + next_span)
+        upper[index] = next_span
+        right_hand_side[index] = 6.0 * (
+            secants[index] - secants[index - 1])
+
+    for index in range(1, key_count):
+        factor = lower[index] / diagonal[index - 1]
+        diagonal[index] -= factor * upper[index - 1]
+        right_hand_side[index] -= factor * right_hand_side[index - 1]
+
+    second_derivatives = [0.0] * key_count
+    second_derivatives[-1] = right_hand_side[-1] / diagonal[-1]
+    for index in range(key_count - 2, -1, -1):
+        second_derivatives[index] = (
+            right_hand_side[index]
+            - upper[index] * second_derivatives[index + 1]
+        ) / diagonal[index]
+
+    tangents = [0.0] * key_count
+    tangents[0] = secants[0] - spans[0] * (
+        2.0 * second_derivatives[0] + second_derivatives[1]) / 6.0
+    for index in range(1, key_count - 1):
+        tangents[index] = secants[index - 1] + spans[index - 1] * (
+            second_derivatives[index - 1]
+            + 2.0 * second_derivatives[index]
+        ) / 6.0
+    tangents[-1] = secants[-1] + spans[-1] * (
+        second_derivatives[-2]
+        + 2.0 * second_derivatives[-1]
+    ) / 6.0
+    return tangents
+
+
+def flight_attitude_spline_tangents(attitudes, keyframe_indexes):
+    """Return natural-spline roll/pitch slopes for selected sample indexes."""
+    return list(zip(*(
+        natural_cubic_tangents(
+            keyframe_indexes,
+            [attitudes[index][axis] for index in keyframe_indexes],
+        )
+        for axis in (0, 1)
+    )))
+
+
+def evaluate_cubic_hermite(start_value, end_value, start_tangent,
+                           end_tangent, span, factor):
+    """Evaluate one cubic segment using values and per-frame tangents."""
+    factor_squared = factor * factor
+    factor_cubed = factor_squared * factor
+    return (
+        (2.0 * factor_cubed - 3.0 * factor_squared + 1.0) * start_value
+        + (factor_cubed - 2.0 * factor_squared + factor)
+        * span * start_tangent
+        + (-2.0 * factor_cubed + 3.0 * factor_squared) * end_value
+        + (factor_cubed - factor_squared) * span * end_tangent
+    )
+
+
+def simplify_flight_attitudes(attitudes, max_error):
+    """Fit sparse, C2-continuous roll/pitch keys within max_error."""
+    sample_count = len(attitudes)
+    if sample_count <= 2:
+        return list(range(sample_count))
+
+    keyframe_indexes = [0, sample_count - 1]
+    while True:
+        tangents = flight_attitude_spline_tangents(
+            attitudes, keyframe_indexes)
+        largest_error = max_error
+        largest_index = None
+
+        for segment in range(len(keyframe_indexes) - 1):
+            start = keyframe_indexes[segment]
+            end = keyframe_indexes[segment + 1]
+            span = end - start
+            for index in range(start + 1, end):
+                factor = (index - start) / span
+                error = max(
+                    abs(attitudes[index][axis] - evaluate_cubic_hermite(
+                        attitudes[start][axis], attitudes[end][axis],
+                        tangents[segment][axis], tangents[segment + 1][axis],
+                        span, factor))
+                    for axis in (0, 1)
+                )
+                if error > largest_error:
+                    largest_error = error
+                    largest_index = index
+
+        if largest_index is None:
+            return keyframe_indexes
+        keyframe_indexes.append(largest_index)
+        keyframe_indexes.sort()
+
+
+def set_flight_attitude_bezier_handles(fcurve, keyframe_indexes, tangents,
+                                       first_frame):
+    """Set Bezier handles that exactly encode the fitted cubic spline."""
+    points = fcurve.keyframe_points
+    last_index = len(keyframe_indexes) - 1
+    for index, (keyframe_index, tangent) in enumerate(
+            zip(keyframe_indexes, tangents)):
+        point = points[index]
+        frame = first_frame + keyframe_index
+        value = point.co.y
+        left_span = (
+            keyframe_index - keyframe_indexes[index - 1]
+            if index > 0 else keyframe_indexes[1] - keyframe_index
+        )
+        right_span = (
+            keyframe_indexes[index + 1] - keyframe_index
+            if index < last_index else keyframe_index - keyframe_indexes[index - 1]
+        )
+
+        point.interpolation = 'BEZIER'
+        point.handle_left_type = 'FREE'
+        point.handle_right_type = 'FREE'
+        point.handle_left = (
+            frame - left_span / 3.0,
+            value - tangent * left_span / 3.0,
+        )
+        point.handle_right = (
+            frame + right_span / 3.0,
+            value + tangent * right_span / 3.0,
+        )
+    fcurve.update()
 
 
 def show_popup(context, title, lines, icon='INFO'):
@@ -1559,6 +1723,15 @@ class DroneProperties(bpy.types.PropertyGroup):
         default=5,
         min=0,
         max=120,
+    )
+    flight_attitude_keyframe_tolerance: FloatProperty(
+        name="Keyframe Tolerance",
+        description="Angular detail that may be handled by interpolation; higher values generate fewer keyframes",
+        default=math.radians(0.25),
+        min=0.0,
+        max=math.radians(10.0),
+        subtype='ANGLE',
+        unit='ROTATION',
     )
 
     # Fold Animation Settings
@@ -6034,9 +6207,12 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
         fps = scene.render.fps / scene.render.fps_base
         max_tilt = props.flight_attitude_max_tilt
         smoothing = props.flight_attitude_smoothing_frames
+        keyframe_tolerance = props.flight_attitude_keyframe_tolerance
         original_frame = scene.frame_current
         applied = []
         skipped = []
+        sampled_frames = 0
+        generated_keyframe_times = 0
 
         try:
             for obj in selected:
@@ -6059,11 +6235,20 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
                 yaw_fcurve = action.fcurves.find("rotation_euler", index=2)
                 base_yaw = obj.rotation_euler.z
                 obj.rotation_mode = 'XYZ'
+                attitudes = []
                 for offset, acceleration in enumerate(accelerations):
                     frame = first_frame + offset
                     yaw = yaw_fcurve.evaluate(frame) if yaw_fcurve else base_yaw
-                    roll, pitch = flight_attitude_from_acceleration(
-                        acceleration, yaw, max_tilt)
+                    attitudes.append(flight_attitude_from_acceleration(
+                        acceleration, yaw, max_tilt))
+
+                keyframe_offsets = simplify_flight_attitudes(
+                    attitudes, keyframe_tolerance)
+                spline_tangents = flight_attitude_spline_tangents(
+                    attitudes, keyframe_offsets)
+                for offset in keyframe_offsets:
+                    frame = first_frame + offset
+                    roll, pitch = attitudes[offset]
                     obj.rotation_euler.x = roll
                     obj.rotation_euler.y = pitch
                     obj.keyframe_insert(
@@ -6076,8 +6261,14 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
                 for axis in (0, 1):
                     generated = action.fcurves.find("rotation_euler", index=axis)
                     if generated:
-                        for keyframe in generated.keyframe_points:
-                            keyframe.interpolation = 'LINEAR'
+                        set_flight_attitude_bezier_handles(
+                            generated,
+                            keyframe_offsets,
+                            [tangent[axis] for tangent in spline_tangents],
+                            first_frame,
+                        )
+                sampled_frames += len(attitudes)
+                generated_keyframe_times += len(keyframe_offsets)
                 applied.append(obj.name)
         finally:
             scene.frame_set(original_frame)
@@ -6087,7 +6278,11 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
             self.report({'ERROR'}, "Selected LightBenders need at least two position keyframes")
             return {'CANCELLED'}
 
-        message = f"Applied flight attitude to {len(applied)} LightBender(s)"
+        message = (
+            f"Applied flight attitude to {len(applied)} LightBender(s) using "
+            f"{generated_keyframe_times} keyframe times from "
+            f"{sampled_frames} sampled frames"
+        )
         if skipped:
             message += f"; skipped {len(skipped)} without position animation"
         self.report({'INFO'}, message)
@@ -6623,6 +6818,7 @@ class VIEW3D_PT_lb_automated_animations(bpy.types.Panel):
         box = layout.box()
         box.prop(props, "flight_attitude_max_tilt")
         box.prop(props, "flight_attitude_smoothing_frames")
+        box.prop(props, "flight_attitude_keyframe_tolerance")
         box.operator(
             "drone.apply_flight_attitude",
             text="Apply to Selected",

@@ -21,8 +21,26 @@ cp swarm_manifest_sample.yaml swarm_manifest.yaml
 **Adjusting the manifest:**
 Open `swarm_manifest.yaml` and update the following settings to match your environment:
 - **`controller`**: Set your local machine's `ip`. You can define `mission_path` (e.g., `"SFL"`) and list out multiple `mission_files` to run sequentially.
+- **`common.localizer_work_dir`**: Optional path to the marker-localization checkout on each drone; it defaults to `/home/fls/fls-marker-localization`. When that Git checkout exists, drone boot pulls it with a fast-forward-only update and runs its incremental high-rate release build before launching the controller.
 - **`drones`**: Define the drones participating in the swarm. For each drone, make sure the `ip`, `uri`, hardware `type` (H or V), and `servo_offsets` match your actual hardware configurations.
 - **`camera_node` / `radio_node`**: Provide the corresponding IP addresses and usernames for the remote nodes if you are using them for recording or CrazyRadio communication.
+- **`marker_grid_node`**: Define the dedicated Raspberry Pi Zero W, its marker-grid checkout/virtual environment, grid JSON, UDP port, and GPIO levels. The orchestrator validates and launches this node before it launches any drone. A drone that owns a MyGrid tile declares `marker_tile: [i, j]`.
+
+The marker grid is deliberately not a drone peer. A drone requests a state
+change over its existing ZMQ connection by sending
+`{"id":"lb1","status":"MARKER_GRID_MODE","mode":"off"}`. The orchestrator
+maps the drone ID to its manifest-owned tile and forwards an idempotent UDP
+command to the grid. Modes are `blink`, `static`, and `off`; requests without a
+drone target are reserved for orchestrator-wide lifecycle changes.
+During cleanup, the orchestrator terminates the remote marker-grid controller;
+its signal handler clears every LED channel before the process exits.
+
+To test the physical marker grid without launching a mission, run
+`python orchestrator.py --test-marker-grid`. The orchestrator turns on the
+HyperGrid and all MyGrids, then prompts for Enter before turning each MyGrid
+off and back on in snake order. Tile coordinates are `(i, j) = (x, y)`: tiles
+with the same `i`, such as `(-1, -1)` and `(-1, 0)`, share an x row and are
+adjacent along y. The controller is stopped when the test ends.
 
 ### 3. Uploader Setup
 The orchestrator automatically uploads logs and experiment data (like recorded videos and drone logs) to Google Drive via the `uploader` module once a mission concludes.

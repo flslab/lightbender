@@ -5,16 +5,26 @@ controller:
   http_port: 8000
   mission_path: "SFL"
   mission_files:
-    - la_flyin.yaml
-    - la_draw.yaml
-    - la_pulse.yaml
-    - la_color_chase.yaml
-    - la_sparkle.yaml
+    - hover.yaml
   downloads_file: downloads.json
+
+marker_grid_node:
+  id: marker-grid
+  ip: 192.168.1.81
+  user: fls
+  work_dir: /home/fls/fls-marker-localization
+  venv_path: /home/fls/env
+  port: 5558
+  grid_file: high_rate_localizer/config/hypergrid-mygrid-4x4.json
+  gpio: 10
+  mygrid_level: 40
+  hypergrid_level: 200
+  initial_mode: "off"
 
 common:
   work_dir: /home/fls/fls-cf-offboard-controller
   venv_path: /home/fls/env
+  localizer_work_dir: /home/fls/fls-marker-localization
 
 drones:
   - id: "lb1"
@@ -59,6 +69,16 @@ drones:
     type: H
     servo_offsets: [3, 0]
     uri: radio://0/100/2M/E7E7E7E707
+  - id: "lb8"
+    ip: lightbendercf08
+    user: fls
+    init_pos: [-0.5, 0.5, 0]
+    type: H
+    flowdeck: false
+    vicon: false
+    save_vicon: true
+    tracker: true
+    marker_tile: [0, 0]
   - id: "lb9"
     ip: lightbendercf09
     user: fls
@@ -66,13 +86,14 @@ drones:
     type: V
     servo_offsets: [-1, 0]
     uri: radio://0/100/2M/E7E7E7E709
-  - id: "lb8"
-    ip: lightbendercf08
+  - id: "lb10"
+    ip: lightbendercf10
     user: fls
-    init_pos: [ 0.0, 0.0, 0.2 ]
-    servo_count: 0
-    led_count: 108
-    uri: radio://0/100/2M/E7E7E7E708
+    init_pos: [ 0.0, -0.5, 0.2 ]
+    type: H
+    servo_offsets: [3, 3]
+    uri: radio://0/100/2M/E7E7E7E710
+  
 
 mission:
   delta_t: 0.0
