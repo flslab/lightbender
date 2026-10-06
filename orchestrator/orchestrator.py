@@ -85,6 +85,25 @@ def validate_marker_tile_ownership(manifest):
         value = config.get(field, 255)
         if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255:
             raise ValueError(f"marker_grid_node.{field} must be in [0, 255]")
+    if 'hypergrid_tiles' in config:
+        hypergrid_tiles = config['hypergrid_tiles']
+        if not isinstance(hypergrid_tiles, list):
+            raise ValueError("marker_grid_node.hypergrid_tiles must be a list")
+        seen = set()
+        for tile in hypergrid_tiles:
+            if (not isinstance(tile, (list, tuple)) or len(tile) != 2 or
+                    not all(isinstance(value, int) and not isinstance(value, bool)
+                            for value in tile)):
+                raise ValueError(
+                    "marker_grid_node.hypergrid_tiles entries must be [i, j] "
+                    "integer pairs"
+                )
+            key = tuple(tile)
+            if key in seen:
+                raise ValueError(
+                    f"marker_grid_node.hypergrid_tiles contains duplicate {key}"
+                )
+            seen.add(key)
 
 
 class SwarmOrchestrator:
@@ -364,6 +383,11 @@ class SwarmOrchestrator:
             f"--hypergrid-level {config.get('hypergrid_level', 255)}",
             f"--initial-mode {shlex.quote(config.get('initial_mode', 'blink'))}",
         ]
+        if 'hypergrid_tiles' in config:
+            tiles = shlex.quote(
+                json.dumps(config['hypergrid_tiles'], separators=(',', ':'))
+            )
+            options.append(f"--hypergrid-tiles {tiles}")
         invocation = f"{python} -m marker_grid_controller {grid_file} {' '.join(options)}"
         return (
             f"cd {work_dir} && git pull && "

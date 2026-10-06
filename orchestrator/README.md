@@ -24,7 +24,7 @@ Open `swarm_manifest.yaml` and update the following settings to match your envir
 - **`common.localizer_work_dir`**: Optional path to the marker-localization checkout on each drone; it defaults to `/home/fls/fls-marker-localization`. When that Git checkout exists, drone boot pulls it with a fast-forward-only update and runs its incremental high-rate release build before launching the controller.
 - **`drones`**: Define the drones participating in the swarm. For each drone, make sure the `ip`, `uri`, hardware `type` (H or V), and `servo_offsets` match your actual hardware configurations.
 - **`camera_node` / `radio_node`**: Provide the corresponding IP addresses and usernames for the remote nodes if you are using them for recording or CrazyRadio communication.
-- **`marker_grid_node`**: Define the dedicated Raspberry Pi Zero W, its marker-grid checkout/virtual environment, grid JSON, UDP port, and GPIO levels. The orchestrator validates and launches this node before it launches any drone. A drone that owns a MyGrid tile declares `marker_tile: [i, j]`.
+- **`marker_grid_node`**: Define the dedicated Raspberry Pi Zero W, its marker-grid checkout/virtual environment, grid JSON, UDP port, and GPIO levels. Set optional `hypergrid_tiles` to a list of `[i, j]` coordinates to light only those tiles' HyperGrid LEDs; omit it to light all HyperGrid tiles (an empty list lights none). The orchestrator validates and launches this node before it launches any drone. A drone that owns a MyGrid tile declares `marker_tile: [i, j]`.
 
 The marker grid is deliberately not a drone peer. A drone requests a state
 change over its existing ZMQ connection by sending

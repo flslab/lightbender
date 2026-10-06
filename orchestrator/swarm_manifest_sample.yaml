@@ -19,6 +19,11 @@ marker_grid_node:
   gpio: 10
   mygrid_level: 40
   hypergrid_level: 200
+  # Optional. Omit this field to turn on every tile's HyperGrid.
+  # An empty list turns off every HyperGrid tile.
+  # hypergrid_tiles:
+  #   - [0, 0]
+  #   - [0, 1]
   initial_mode: "off"
 
 common:
