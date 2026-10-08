@@ -17,6 +17,10 @@ import shlex
 from datetime import datetime
 from functools import partial
 from fabric import Connection
+from estimator_calibration_launch import (
+    run_estimator_calibration,
+    validate_estimator_calibration_options,
+)
 from invoke.exceptions import CommandTimedOut
 import concurrent.futures
 
@@ -1269,6 +1273,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
     parser.add_argument("--interaction", action="store_true", help="interaction application")
+    parser.add_argument(
+        '--calibrate-estimator-imu', action='store_true',
+        help='interactive motors-off six-face IMU calibration on one Pi; no flight startup',
+    )
+    parser.add_argument('--drone-id', default=None,
+                        help='manifest aircraft ID for --calibrate-estimator-imu')
+    parser.add_argument('--imu-firmware-id', default=None,
+                        help='actual flashed firmware build/tag; prompted when omitted')
+    parser.add_argument('--imu-fixture-id', default=None,
+                        help='independently checked body-aligned fixture ID; prompted when omitted')
+    parser.add_argument('--imu-reference-note', default=None,
+                        help='independent fixture reference description; prompted when omitted')
+    parser.add_argument('--imu-duration-s', type=float, default=None,
+                        help='recording seconds per static pose (default: 4)')
+    parser.add_argument('--imu-settle-s', type=float, default=None,
+                        help='settling seconds per static pose (default: 2)')
     parser.add_argument("--intractable-illumination", action="store_true",
                         help="interaction application with illumination")
     parser.add_argument("--morphing", action="store_true", help="illumination application with morphing emulator")
@@ -1295,6 +1315,17 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    try:
+        validate_estimator_calibration_options(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.calibrate_estimator_imu:
+        try:
+            raise SystemExit(run_estimator_calibration(args, MANIFEST_FILE, BASE_DIR))
+        except ValueError as exc:
+            parser.error(str(exc))
 
     orchestrator = SwarmOrchestrator(args)
     orchestrator.run()
