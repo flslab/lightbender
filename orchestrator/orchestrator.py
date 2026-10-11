@@ -14,6 +14,8 @@ import shutil
 import socket
 import logging
 import shlex
+import math
+import uuid
 from datetime import datetime
 from functools import partial
 from fabric import Connection
@@ -25,6 +27,7 @@ from logger import setup_logging
 from restart import reboot_crazyflie
 from switch_network import apply_network_mode
 from marker_grid_client import MarkerGridClient
+from camera.pose_estimation import CameraPoseMixin, CAMERA_POSE_FAILURE_STATUSES
 
 # from Interaction.vicon_noise_tracker import run_tracker
 from pathlib import Path
@@ -106,7 +109,7 @@ def validate_marker_tile_ownership(manifest):
             seen.add(key)
 
 
-class SwarmOrchestrator:
+class SwarmOrchestrator(CameraPoseMixin):
     def __init__(self, args):
         setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -129,6 +132,11 @@ class SwarmOrchestrator:
         self.common_cfg = self.manifest['common']
         self.missions = self._load_missions()
         self.mission = self.missions[0] if self.missions else None
+        self.camera_pose = None
+        self.camera_ready = False
+        self.camera_run_id = None
+        self.marker_grid_sha256 = None
+        self._configure_camera_pose()
 
         # Runtime State
         self.tag = None
@@ -256,6 +264,7 @@ class SwarmOrchestrator:
                 init_pos = m.get("init_pos")
                 if init_pos is not None:
                     extra_marker_args += f"{' '.join(str(c) for c in m['init_pos'])} "
+        viewpoint_arg = self._get_viewpoint_args(drone)
         cmd = [
             f"cd {self.common_cfg['work_dir']} && "
             f"source {self.common_cfg['venv_path']}/bin/activate && "
@@ -266,6 +275,7 @@ class SwarmOrchestrator:
             f"--ground-test " if self.args.ground else "",
             f"{radio_arg} "
             f"{extra_marker_args} "
+            f"{viewpoint_arg}"
             f"--vicon {mocap_args} "
             f"--drone-id {drone['id']} ",
             f"--led --led-count {led_count} " if led_count > 0 and not self.args.radio else " ",
@@ -318,7 +328,7 @@ class SwarmOrchestrator:
             p = drone['init_pos']
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud --init-yaw {init_yaw} "
             
-        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        viewpoint_arg = self._get_viewpoint_args(drone)
         reference_arg = f"--reference {drone['reference'][0]} {drone['reference'][1]} {drone['reference'][2]} " if 'reference' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         tracker_arg = self._get_marker_grid_tracker_arg(drone)
@@ -328,7 +338,7 @@ class SwarmOrchestrator:
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
         elif drone.get('vicon'):
-            localization_flags = "--vicon"
+            localization_flags = "--vicon --light-module-offset 0.075 0.0 -0.040"
         if drone.get('save_vicon'):
             localization_flags += " --save-vicon "
         
@@ -397,6 +407,11 @@ class SwarmOrchestrator:
 
     def _boot_marker_grid(self):
         if not self.marker_grid_cfg:
+            if self._camera_pose_enabled():
+                raise RuntimeError(
+                    "camera pose estimation requires marker_grid_node so the "
+                    "active grid SHA-256 can be verified"
+                )
             return
         if not self._boot_remote_node(
             self.marker_grid_cfg, self._get_marker_grid_cmd(), "Marker grid"
@@ -405,9 +420,23 @@ class SwarmOrchestrator:
         self.marker_grid_client = MarkerGridClient(
             self.marker_grid_cfg['ip'], self.marker_grid_cfg['port']
         )
-        self.marker_grid_client.wait_until_ready(
+        status = self.marker_grid_client.wait_until_ready(
             self.marker_grid_cfg.get('startup_timeout_s', 15.0)
         )
+        digest = status.get('grid_sha256')
+        valid_digest = False
+        if isinstance(digest, str) and len(digest) == 64:
+            try:
+                int(digest, 16)
+                valid_digest = True
+            except ValueError:
+                pass
+        self.marker_grid_sha256 = digest.lower() if valid_digest else None
+        if self._camera_pose_enabled() and self.marker_grid_sha256 is None:
+            raise RuntimeError(
+                "marker-grid controller did not report grid SHA-256; refusing "
+                "RGB camera pose estimation"
+            )
         self.logger.info("Marker-grid node ready")
 
     def _set_marker_grid_mode(self, mode, drone_id=None):
@@ -545,7 +574,7 @@ class SwarmOrchestrator:
             p = drone['init_pos']
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
             
-        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        viewpoint_arg = self._get_viewpoint_args(drone)
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         
         cmd = [
@@ -574,6 +603,27 @@ class SwarmOrchestrator:
                 return d
         return None
 
+    def _get_viewpoint_args(self, drone):
+        """Return the explicit RGB-camera correction or the legacy viewpoint.
+
+        A PnP result is authoritative and deliberately suppresses a viewpoint
+        selected by the Vicon dispatcher.  This prevents applying both camera
+        corrections to the same mission.
+        """
+        pose = getattr(self, 'camera_pose', None)
+        if pose is not None:
+            offset = pose['position_offset_xyz']
+            return (
+                f"--viewpoint-offset {offset[0]} {offset[1]} {offset[2]} "
+                f"--viewpoint-yaw-offset {pose['yaw_offset_rad']} "
+            )
+        if 'viewpoint' in drone:
+            viewpoint = drone['viewpoint']
+            return (
+                f"--viewpoint {viewpoint[0]} {viewpoint[1]} {viewpoint[2]} "
+            )
+        return ""
+
     def _get_camera_cmd(self):
         camera_params = [
             "--autofocus-mode", "manual",
@@ -586,10 +636,29 @@ class SwarmOrchestrator:
         else:
             camera_params += ["--gain", "0.8"]
 
+        camera_cfg = self.camera_cfg or {}
+        work_dir = shlex.quote(
+            camera_cfg.get('work_dir', self.common_cfg['work_dir'])
+        )
+        venv_path = shlex.quote(
+            camera_cfg.get('venv_path', self.common_cfg['venv_path'])
+        )
+        parameters = ' '.join(shlex.quote(item) for item in camera_params)
         return (
-            f"bash -c 'cd {self.common_cfg['work_dir']} && "
-            f"source {self.common_cfg['venv_path']}/bin/activate && "
-            f"nohup python3 {CAMERA_SCRIPT} {' '.join(camera_params)} > CAM.log 2>&1 < /dev/null &'"
+            f"bash -c 'cd {work_dir} && "
+            f"source {venv_path}/bin/activate && "
+            "git pull && "
+            # Anchor the process pattern so it cannot match this enclosing
+            # ``bash -c`` command, whose text also contains the later
+            # ``python3 camera_node.py`` launch command.
+            "(pkill -TERM -f \"^python3 .*camera_node[.]py( |$)\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[r]picam-vid\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[l]ibcamera-vid\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[r]picam-still\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[l]ibcamera-still\" 2>/dev/null || true) && "
+            "sleep 0.5 && "
+            f"nohup python3 {CAMERA_SCRIPT} {parameters} "
+            "> CAM.log 2>&1 < /dev/null &'"
         )
 
     def _boot_remote_node(self, device_cfg, cmd, node_type="Drone"):
@@ -898,6 +967,9 @@ class SwarmOrchestrator:
 
             # Switch drones to adhoc/bluetooth if configured, update IPs
             self._apply_network_mode()
+            # Network switching may replace the live manifest dictionaries.
+            self._configure_camera_pose()
+            self._prepare_camera_run()
             if not self.running.is_set():
                 return
 
@@ -908,6 +980,30 @@ class SwarmOrchestrator:
 
             if not self.args.record:
                 self._boot_marker_grid()
+                if self._camera_pose_enabled():
+                    if self._reuse_or_recompute_camera_pose():
+                        # The camera still records this run, but it must not
+                        # repeat PnP after the operator chose the saved pose.
+                        self.camera_cfg['pose_estimation']['enabled'] = False
+                    else:
+                        # Keep the ID-bearing MyGrid clusters dark during RGB
+                        # preflight; HyperGrid remains continuously illuminated.
+                        self._set_marker_grid_mode('off')
+
+            # Pose estimation must finish before controller commands/manifests
+            # are built, so the camera is deliberately launched before drones.
+            if self.camera_cfg:
+                if not self.args.skip_record:
+                    camera_started = self._boot_remote_node(
+                        self.camera_cfg, self._get_camera_cmd(), "Camera"
+                    )
+                    if not camera_started:
+                        raise RuntimeError("failed to launch camera node")
+                    if self._camera_pose_enabled():
+                        self._wait_for_camera_pose()
+                        self._confirm_camera_pose()
+            else:
+                self.logger.warning("No camera_node found. Skipping.")
 
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
@@ -932,6 +1028,9 @@ class SwarmOrchestrator:
                     is_mock = self.args.ground or self.args.droneless
                     self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
                     self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
+                    if self.camera_pose is not None:
+                        for drone in self.drones:
+                            drone.pop('viewpoint', None)
                     self.manifest['drones'] = self.drones
                     if not self.running.is_set():
                         return
@@ -967,12 +1066,6 @@ class SwarmOrchestrator:
                     target=loadcell_worker,
                     args=(self.logger, self.running, self.tag)  #
                 )
-            if self.camera_cfg:
-                if not self.args.skip_record:
-                    self._boot_remote_node(self.camera_cfg, self._get_camera_cmd(), "Camera")
-            else:
-                self.logger.warning("No camera_node found. Skipping.")
-
             if self.loadcell_thread:
                 self.loadcell_thread.start()
 
@@ -989,6 +1082,7 @@ class SwarmOrchestrator:
                 else:
                     input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
                     # time.sleep(10)
+            self._start_camera_recording()
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
             self.took_off = True
@@ -1009,6 +1103,11 @@ class SwarmOrchestrator:
                     if i == 0:
                         # time.sleep(5)
                         pass
+                    # Confirmation can remain open indefinitely. Re-check the
+                    # recorder immediately before every mission START so a
+                    # queued failure or dead camera cannot be followed by a
+                    # launch command.
+                    self._start_camera_recording()
                     self.logger.info(f"Broadcasting START for Mission {i+1}...")
                     self.pub_socket.send_json({"cmd": "START"})
 
@@ -1081,13 +1180,49 @@ class SwarmOrchestrator:
     def _wait_for_ready(self, mission_index=None):
         self.logger.info("Waiting for swarm readiness...")
 
-        if mission_index is not None:
+        if getattr(self.args, 'record', False):
+            total_drones = 0
+        elif mission_index is not None:
             manifest_drones = [d['id'] for d in self.manifest.get('drones', [])]
             total_drones = len([d for d in self.missions[mission_index]['drones'] if d in manifest_drones])
         else:
             total_drones = len(self.drones)
+        camera_required = bool(
+            self.camera_cfg and not getattr(self.args, 'skip_record', False)
+        )
+        camera_ready_deadline = None
+        camera_ready_timeout_s = None
+        if camera_required and not self.camera_ready:
+            camera_ready_timeout_s = float(
+                self.camera_cfg.get('ready_timeout_s', 15.0)
+            )
+            if (
+                not math.isfinite(camera_ready_timeout_s)
+                or camera_ready_timeout_s <= 0
+            ):
+                raise ValueError(
+                    "camera_node.ready_timeout_s must be positive"
+                )
+            camera_ready_deadline = (
+                time.monotonic() + camera_ready_timeout_s
+            )
 
-        while len(self.ready_ids) < total_drones and self.running.is_set():
+        while (
+            (
+                len(self.ready_ids) < total_drones
+                or (camera_required and not self.camera_ready)
+            )
+            and self.running.is_set()
+        ):
+            if (
+                camera_required
+                and not self.camera_ready
+                and time.monotonic() >= camera_ready_deadline
+            ):
+                raise RuntimeError(
+                    "camera did not become ready within "
+                    f"{camera_ready_timeout_s:g}s"
+                )
             try:
                 msg = self.pull_socket.recv_json()
                 sender_id = msg.get('id')
@@ -1096,11 +1231,25 @@ class SwarmOrchestrator:
                 if self._handle_marker_grid_event(msg):
                     continue
 
-                if sender_id == 'CAM' and status == 'READY':
-                    self.logger.info("Camera Node Ready.")
-                    if self.args.record:
-                        return
-                elif "lb" in sender_id:
+                if sender_id == 'CAM':
+                    if not self._camera_message_matches_run(msg):
+                        self.logger.warning(
+                            "Ignoring stale camera status for run %s",
+                            msg.get('run_id'),
+                        )
+                        continue
+                    if (
+                        status in CAMERA_POSE_FAILURE_STATUSES
+                        or status in {'FAILED', 'CAMERA_RECORDING_FAILED'}
+                    ):
+                        raise RuntimeError(
+                            "camera node failed before readiness: "
+                            f"{msg.get('error', status)}"
+                        )
+                    if status == 'READY':
+                        self.camera_ready = True
+                        self.logger.info("Camera Node Ready.")
+                elif isinstance(sender_id, str) and "lb" in sender_id:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
                         self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
@@ -1114,16 +1263,104 @@ class SwarmOrchestrator:
             except zmq.Again:
                 continue  # Timeout, loop back to check self.running
 
+    def _handle_camera_runtime_event(self, msg):
+        if msg.get('id') != 'CAM':
+            return False
+        if not self._camera_message_matches_run(msg):
+            self.logger.warning(
+                "Ignoring stale camera runtime status for run %s",
+                msg.get('run_id'),
+            )
+            return True
+        status = msg.get('status')
+        if status in {
+            'FAILED', 'CAMERA_RECORDING_FAILED',
+            *CAMERA_POSE_FAILURE_STATUSES,
+        }:
+            raise RuntimeError(
+                f"camera runtime failure: {msg.get('error', status)}"
+            )
+        if status == 'RECORDING':
+            self.logger.info("Camera recording confirmed.")
+        return True
+
+    def _start_camera_recording(self):
+        """Start and verify video capture before any drone receives START."""
+        if not self.camera_cfg or getattr(self.args, 'skip_record', False):
+            return
+        timeout_s = float(self.camera_cfg.get('recording_start_timeout_s', 8.0))
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError(
+                "camera_node.recording_start_timeout_s must be positive"
+            )
+        request_id = uuid.uuid4().hex
+        self.pub_socket.send_json({
+            'cmd': 'START_CAMERA',
+            'run_id': self.camera_run_id,
+            'request_id': request_id,
+        })
+        deadline = time.monotonic() + timeout_s
+        while self.running.is_set():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"camera did not confirm recording within {timeout_s:g}s"
+                )
+            try:
+                msg = self.pull_socket.recv_json()
+            except zmq.Again:
+                continue
+            if self._handle_marker_grid_event(msg):
+                continue
+            if msg.get('id') != 'CAM':
+                self.logger.warning(
+                    "Ignoring status while starting camera: %s", msg
+                )
+                continue
+            if not self._camera_message_matches_run(msg):
+                self.logger.warning(
+                    "Ignoring stale camera recording status for run %s",
+                    msg.get('run_id'),
+                )
+                continue
+            status = msg.get('status')
+            if status == 'RECORDING':
+                if msg.get('request_id') != request_id:
+                    self.logger.warning(
+                        "Ignoring stale camera recording acknowledgement %s",
+                        msg.get('request_id'),
+                    )
+                    continue
+                self.logger.info("Camera recording confirmed before launch.")
+                return
+            if status in {
+                'FAILED', 'CAMERA_RECORDING_FAILED',
+                *CAMERA_POSE_FAILURE_STATUSES,
+            }:
+                raise RuntimeError(
+                    "camera could not start recording: "
+                    f"{msg.get('error', status)}"
+                )
+        raise RuntimeError("camera recording start was interrupted")
+
     def _monitor_flight(self):
         launched_drones = len(self.ready_ids)
 
         if self.args.record:
             while self.running.is_set():
-                time.sleep(1)
+                try:
+                    msg = self.pull_socket.recv_json()
+                    if self._handle_marker_grid_event(msg):
+                        continue
+                    self._handle_camera_runtime_event(msg)
+                except zmq.Again:
+                    continue
+            return
         while len(self.landed_drones) < launched_drones and self.running.is_set():
             try:
                 msg = self.pull_socket.recv_json()
                 if self._handle_marker_grid_event(msg):
+                    continue
+                if self._handle_camera_runtime_event(msg):
                     continue
                 if msg.get('status') == 'LANDED':
                     self._handle_landed_msg(msg)
@@ -1191,7 +1428,10 @@ class SwarmOrchestrator:
 
             # Download Video
             if self.took_off:
-                remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
+                camera_work_dir = self.camera_cfg.get(
+                    'work_dir', self.common_cfg['work_dir']
+                )
+                remote = f"{camera_work_dir}/mission_footage.mp4"
                 local_dir = f"./logs/{self.tag}"
                 os.makedirs(local_dir, exist_ok=True)
                 local = f"{local_dir}/{self.tag}.mp4"
@@ -1286,6 +1526,24 @@ if __name__ == "__main__":
     parser.add_argument("--http-port", type=int, default=None, help="override manifest http_port")
     parser.add_argument("--zmq-cmd-port", type=int, default=None, help="override manifest zmq_cmd_port")
     parser.add_argument("--zmq-ack-port", type=int, default=None, help="override manifest zmq_ack_port")
+    parser.add_argument(
+        "--camera-rough-position", type=float, nargs=3, default=None,
+        metavar=("X", "Y", "Z"),
+        help="override camera_node.pose_estimation rough XYZ position (meters)",
+    )
+    parser.add_argument(
+        "--camera-rough-yaw", type=float, default=None, metavar="RADIANS",
+        help="override the optional rough RGB-camera viewing heading",
+    )
+    parser.add_argument(
+        "--camera-grid-file", type=str, default=None, metavar="REMOTE_PATH",
+        help="override the HyperGrid JSON path on the camera computer",
+    )
+    parser.add_argument(
+        "--camera-calibration-file", type=str, default=None,
+        metavar="REMOTE_PATH",
+        help="override the RGB camera calibration path on the camera computer",
+    )
     parser.add_argument("--droneless", action="store_true", help="Run without FC conneced")
     parser.add_argument("--blender", type=str, default="", help="Connect to Blender monitor via IP:PORT")
     parser.add_argument(
