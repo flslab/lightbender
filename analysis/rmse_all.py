@@ -700,17 +700,27 @@ def get_position_mean_alignment(processors, timestamps):
     return act_mean - gt_mean, gt_mean, act_mean
 
 
+def get_drone_translation(gt_translation, drone_id):
+    """Resolve a global or per-drone GT translation for one drone."""
+    if gt_translation is None:
+        return np.zeros(3)
+    if isinstance(gt_translation, dict):
+        return gt_translation.get(drone_id, np.zeros(3))
+    return gt_translation
+
+
 def get_trajectory_positions(processor, timestamps, gt_translation=None):
     """Return matching valid GT and actual position samples for one drone."""
-    if gt_translation is None:
-        gt_translation = np.zeros(3)
+    drone_translation = get_drone_translation(
+        gt_translation, processor.drone_id
+    )
 
     gt_positions = []
     act_positions = []
     for t in timestamps:
         gt_pos, act_pos, valid = processor.get_positions_at_relative_time(t)
         if valid and act_pos is not None:
-            gt_positions.append(gt_pos + gt_translation)
+            gt_positions.append(gt_pos + drone_translation)
             act_positions.append(act_pos)
 
     if not gt_positions:
@@ -802,9 +812,14 @@ def calculate_rmse(
         lit_only=False, trim_start=0.0, trim_end=0.0,
         align_position_means=False, position_only=False,
         trajectory_rmse=False, trajectory_rmse_segment_duration=None,
-        trajectory_rmse_accumulative=False, mocap_marker_position=None):
+        trajectory_rmse_accumulative=False, mocap_marker_position=None,
+        align_position_means_per_drone=False):
     if lit_only and position_only:
         raise ValueError("lit_only and position_only cannot be enabled together")
+    if align_position_means and align_position_means_per_drone:
+        raise ValueError(
+            "global and per-drone position-mean alignment cannot both be enabled"
+        )
     if (
             trajectory_rmse_segment_duration is not None
             and trajectory_rmse_segment_duration <= 0.0):
@@ -921,10 +936,17 @@ def calculate_rmse(
     position_alignment = np.zeros(3)
     gt_position_mean = None
     act_position_mean = None
-    if align_position_means:
+    per_drone_position_means = {}
+    alignment_requested = (
+        align_position_means or align_position_means_per_drone
+    )
+    if alignment_requested:
         if visualize_only:
-            print("WARNING: --align-position-means requires actual data; alignment is disabled in YAML-only visualization mode.")
-        else:
+            print(
+                "WARNING: position-mean alignment requires actual data; "
+                "alignment is disabled in YAML-only visualization mode."
+            )
+        elif align_position_means:
             position_alignment, gt_position_mean, act_position_mean = get_position_mean_alignment(processors, timestamps)
             if gt_position_mean is None:
                 print("WARNING: No matching finite GT and actual positions were found; position-mean alignment was not applied.")
@@ -935,6 +957,31 @@ def calculate_rmse(
                     f"{np.round(act_position_mean, 5).tolist()}; translating GT by "
                     f"{np.round(position_alignment, 5).tolist()} m."
                 )
+        else:
+            position_alignment = {}
+            for p in processors:
+                translation, drone_gt_mean, drone_act_mean = (
+                    get_position_mean_alignment([p], timestamps)
+                )
+                position_alignment[p.drone_id] = translation
+                per_drone_position_means[p.drone_id] = {
+                    "gt_mean": drone_gt_mean,
+                    "actual_mean": drone_act_mean,
+                }
+                if drone_gt_mean is None:
+                    print(
+                        f"WARNING: Drone {p.drone_id}: No matching finite GT "
+                        "and actual positions were found; position-mean "
+                        "alignment was not applied."
+                    )
+                else:
+                    print(
+                        f"Drone {p.drone_id}: Aligning mean GT position "
+                        f"{np.round(drone_gt_mean, 5).tolist()} with mean "
+                        f"actual position "
+                        f"{np.round(drone_act_mean, 5).tolist()}; translating "
+                        f"GT by {np.round(translation, 5).tolist()} m."
+                    )
 
     results = {
         'timestamps': timestamps,
@@ -959,7 +1006,9 @@ def calculate_rmse(
                 gt_leds, act_leds, valid = p.get_state_at_relative_time(t)
 
             if valid:
-                gt_leds = gt_leds + position_alignment
+                gt_leds = gt_leds + get_drone_translation(
+                    position_alignment, p.drone_id
+                )
 
                 if position_only:
                     gt_leds_f, act_leds_f, count = gt_leds, act_leds, 1
@@ -1088,8 +1137,13 @@ def calculate_rmse(
             output_filename = f"{tag}_absolute_rmse_lit_only.json"
         else:
             output_filename = f"{tag}_absolute_rmse.json"
-        if align_position_means:
-            output_filename = output_filename.replace(".json", "_position_aligned.json")
+        if alignment_requested:
+            alignment_suffix = (
+                "_position_aligned_per_drone.json"
+                if align_position_means_per_drone
+                else "_position_aligned.json"
+            )
+            output_filename = output_filename.replace(".json", alignment_suffix)
         print(f"\nExporting raw data to {output_filename}...")
 
         # Structure data for export (handle numpy types)
@@ -1101,10 +1155,39 @@ def calculate_rmse(
             "time_independent_trajectory": trajectory_metrics,
             "trajectory_rmse_over_time": segmented_trajectory_metrics,
             "position_mean_alignment": {
-                "enabled": bool(align_position_means and gt_position_mean is not None),
+                "enabled": bool(
+                    (align_position_means and gt_position_mean is not None)
+                    or (align_position_means_per_drone and any(
+                        means["gt_mean"] is not None
+                        for means in per_drone_position_means.values()
+                    ))
+                ),
+                "mode": (
+                    "per_drone" if align_position_means_per_drone
+                    else "global" if align_position_means
+                    else "disabled"
+                ),
                 "gt_mean_m": None if gt_position_mean is None else gt_position_mean.tolist(),
                 "actual_mean_m": None if act_position_mean is None else act_position_mean.tolist(),
-                "gt_translation_m": position_alignment.tolist()
+                "gt_translation_m": (
+                    None if isinstance(position_alignment, dict)
+                    else position_alignment.tolist()
+                ),
+                "drones": {
+                    drone_id: {
+                        "enabled": means["gt_mean"] is not None,
+                        "gt_mean_m": (
+                            None if means["gt_mean"] is None
+                            else means["gt_mean"].tolist()
+                        ),
+                        "actual_mean_m": (
+                            None if means["actual_mean"] is None
+                            else means["actual_mean"].tolist()
+                        ),
+                        "gt_translation_m": position_alignment[drone_id].tolist(),
+                    }
+                    for drone_id, means in per_drone_position_means.items()
+                },
             },
             "drones": {}
         }
@@ -1422,7 +1505,9 @@ if __name__ == "__main__":
     metric_group = parser.add_mutually_exclusive_group()
     metric_group.add_argument('--lit-only', action='store_true', dest='lit_only', help='Only include lit (non-black) LEDs in RMSE computation and visualization')
     metric_group.add_argument('--position-only', action='store_true', help='Compute RMSE from drone center positions instead of LED positions')
-    parser.add_argument('--align-position-means', action='store_true', help='Translate all GT positions by one constant offset so their mean matches the mean actual position')
+    alignment_group = parser.add_mutually_exclusive_group()
+    alignment_group.add_argument('--align-position-means', action='store_true', help='Translate all GT positions by one constant offset so their fleet-wide mean matches the mean actual position')
+    alignment_group.add_argument('--align-position-means-per-drone', action='store_true', help='Translate each drone\'s GT positions independently so its mean matches its own mean actual position')
     parser.add_argument('--trajectory-rmse', action='store_true', help='Report symmetric nearest-path position RMSE without matching samples by time')
     parser.add_argument(
         '--trajectory-rmse-over-time',
@@ -1470,6 +1555,7 @@ if __name__ == "__main__":
         args.trim_start,
         args.trim_end,
         align_position_means=args.align_position_means,
+        align_position_means_per_drone=args.align_position_means_per_drone,
         position_only=args.position_only,
         trajectory_rmse=args.trajectory_rmse,
         trajectory_rmse_segment_duration=args.trajectory_rmse_over_time,
