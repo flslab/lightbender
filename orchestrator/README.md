@@ -66,6 +66,44 @@ python orchestrator.py [OPTIONS]
 ### Important Runtime Flags:
 - **`--illumination`**: Run an illumination application mission.
 - **`--interaction`**: Run an interaction application mission.
+- **`--calibrate-estimator-imu`**: Run the separate motors-off six-face IMU
+  fixture calibration interactively on one Pi. This branches before swarm
+  setup: no Dispatcher, Vicon forwarding, camera, flight-controller reboot,
+  flight handshake, or takeoff. Original `--calibrate` behavior is unchanged.
+  Run from this directory:
+
+  ```bash
+  python orchestrator.py --calibrate-estimator-imu --drone-id lb11
+  ```
+
+  If the selected mission references exactly one aircraft, `--drone-id` may be
+  omitted. Otherwise it is required. The selected Pi/SSH user and offboard
+  environment come from `swarm_manifest.yaml`; a named drone does not require
+  an SFL mission. The default device connection is `usb://0`, matching ordinary
+  launches. Add `--radio` to use that aircraft's manifest radio URI instead.
+
+  Before connecting, the terminal prompts for the **actual flashed firmware**
+  build/tag, fixture identity, and independent reference description. You can
+  also supply `--imu-firmware-id`, `--imu-fixture-id`, and `--imu-reference-note`.
+  The Pi then asks for props-off confirmation and guides six training and six
+  independently reseated validation poses. Prompts remain interactive over SSH;
+  do not run this mode in the background. `--imu-duration-s` and `--imu-settle-s`
+  override the 4-second recording and 2-second settling defaults.
+
+  Data, fit reports, accepted calibration (if any), and terminal transcript are
+  downloaded to `logs/estimator_imu_<drone>_<session>/`. Failed calibration also
+  retrieves the available raw data. `launch_result.json` records missing files
+  and transfer errors; originals remain on the Pi in
+  `Interaction/estimator_calibrations/<drone>/<session>/`. A successful result
+  requires all outputs, accepted fit and a matching dataset fingerprint.
+
+  Update both this orchestrator checkout and the Pi's offboard checkout before
+  using the entry. This mode does not automatically pull or alter remote code.
+  It saves a checked candidate; it does **not** load corrections into estimator 3
+  or identify Vicon delay. The offboard guide
+  `Interaction/ESTIMATOR_IMU_CALIBRATION.md` describes fixture accuracy and limits.
+  Do not combine this flag with `--calibrate`, `--interaction`, other flight or
+  sensing modes, or `--skip-confirm`.
 - **`--morphing`**: Run the mission with morphing algorithms enabled.
 - **`--radio`**: Connect to drones over CrazyRadio (commands forwarded via the radio node).
 - **`--ground`**: Perform a ground test without making the drones take off (useful for testing LED interactions or servos).
