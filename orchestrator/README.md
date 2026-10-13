@@ -21,6 +21,7 @@ cp swarm_manifest_sample.yaml swarm_manifest.yaml
 **Adjusting the manifest:**
 Open `swarm_manifest.yaml` and update the following settings to match your environment:
 - **`controller`**: Set your local machine's `ip`. You can define `mission_path` (e.g., `"SFL"`) and list out multiple `mission_files` to run sequentially.
+- **`mocap`**: Set `type` (for example, `vicon`) and `ip` (the mocap server address). The orchestrator passes both to drone controllers and uses `ip` for its Vicon dispatcher and optional reference-object noise tracker. Older manifests default to Vicon at `192.168.1.39`. The dispatcher and noise tracker currently require `type: vicon`.
 - **`common.localizer_work_dir`**: Optional path to the marker-localization checkout on each drone; it defaults to `/home/fls/fls-marker-localization`. When that Git checkout exists, drone boot pulls it with a fast-forward-only update and runs its incremental high-rate release build before launching the controller.
 - **`drones`**: Define the drones participating in the swarm. For each drone, make sure the `ip`, `uri`, hardware `type` (H or V), and `servo_offsets` match your actual hardware configurations.
 - **`camera_node` / `radio_node`**: Provide the corresponding IP addresses and usernames for the remote nodes if you are using them for recording or CrazyRadio communication.

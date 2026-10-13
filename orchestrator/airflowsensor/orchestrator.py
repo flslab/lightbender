@@ -13,6 +13,7 @@ import signal
 import shutil
 import socket
 import logging
+import shlex
 from datetime import datetime
 from functools import partial
 from fabric import Connection
@@ -86,6 +87,18 @@ SENSOR_SCRIPT = 'sensor_node.py'
 SENSOR_SCRIPT_LOCAL = BASE_DIR / 'sensor' / 'sensor_node.py'
 DEFAULT_SENSOR_WORK_DIR = '/home/fls/sensor'
 DEFAULT_SENSOR_VENV = '/home/fls/sensor-env'
+DEFAULT_MOCAP = {'type': 'vicon', 'ip': '192.168.1.39'}
+
+
+def resolve_mocap_config(manifest):
+    """Return the configured mocap endpoint, preserving older manifests."""
+    config = manifest.get('mocap', DEFAULT_MOCAP)
+    if not isinstance(config, dict):
+        raise ValueError('mocap must be a mapping with type and ip')
+    for field in ('type', 'ip'):
+        if not isinstance(config.get(field), str) or not config[field].strip():
+            raise ValueError(f'mocap.{field} must be a nonempty string')
+    return {'type': config['type'].strip().lower(), 'ip': config['ip'].strip()}
 
 
 class SwarmOrchestrator:
@@ -96,6 +109,7 @@ class SwarmOrchestrator:
 
         # Configuration State
         self.manifest = self._load_manifest()
+        self.mocap_cfg = resolve_mocap_config(self.manifest)
         self.ctrl_cfg = self.manifest['controller']
         if args.http_port:
             self.ctrl_cfg['http_port'] = args.http_port
@@ -217,6 +231,11 @@ class SwarmOrchestrator:
         else:
             raise Exception("mode not supported")
 
+    def _mocap_cli_args(self):
+        config = getattr(self, 'mocap_cfg', DEFAULT_MOCAP)
+        return (f"--mocap-type {shlex.quote(config['type'])} "
+                f"--mocap-ip {shlex.quote(config['ip'])}")
+
     def _get_drone_cmd_interaction(self, drone):
         alt = self.mission['drones'][drone['id']]['target'][2]
         servo_count = drone.get('servo_count', 2)
@@ -249,6 +268,7 @@ class SwarmOrchestrator:
             f"{radio_arg} "
             f"{extra_marker_args} "
             f"--vicon {mocap_args} "
+            f"{self._mocap_cli_args()} "
             f"--drone-id {drone['id']} ",
             f"--led --led-count {led_count} " if led_count > 0 and not self.args.radio else " ",
             f"--servo --servo-type {drone.get('type', 'H')} --servo-count {servo_count} " if servo_count > 0 and not self.args.radio else " ",
@@ -264,12 +284,15 @@ class SwarmOrchestrator:
         # If a reference object is configured, also launch the noise tracker on the drone.
         ref_obj = self.common_cfg.get('reference_object')
         if ref_obj:
+            if self.mocap_cfg['type'] != 'vicon':
+                raise ValueError('reference_object noise tracking requires mocap.type: vicon')
             vicon_log = f"{self.common_cfg['work_dir']}/logs/vicon_{self.tag}.json"
             cmd.append(
                 f"cd {self.common_cfg['work_dir']} && "
                 f"source {self.common_cfg['venv_path']}/bin/activate && "
                 f"nohup python3 Interaction/vicon_noise_tracker.py "
                 f"--subject {ref_obj} --duration 10 "
+                f"--mocap-ip {shlex.quote(self.mocap_cfg['ip'])} "
                 f"--out {vicon_log} "
                 f"> vicon_noise.log 2>&1 < /dev/null &"
             )
@@ -316,6 +339,7 @@ class SwarmOrchestrator:
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --orchestrated --tag {self.tag} ",
+            f"{self._mocap_cli_args()} ",
             "--ground-test " if self.args.ground else f" {localization_flags} {mocap_args} ",
             f"--marker-id {marker_id} " if marker_id is not None else "",
             f"--target-id {target_id} " if target_id is not None else "",
@@ -357,6 +381,7 @@ class SwarmOrchestrator:
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --morphing --orchestrated --tag {self.tag} ",
+            f"{self._mocap_cli_args()} ",
             "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
             f"{viewpoint_arg}",
             f"{anchor_arg}",
@@ -761,8 +786,13 @@ class SwarmOrchestrator:
                 if not self.args.skip_dispatcher:
                     from dispatcher import run_dispatch
                     is_mock = self.args.ground or self.args.droneless
+                    if not is_mock and self.mocap_cfg['type'] != 'vicon':
+                        raise ValueError('dispatcher currently requires mocap.type: vicon')
                     self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
-                    self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
+                    self.drones = run_dispatch(
+                        self.drones, self.mission,
+                        vicon_host=self.mocap_cfg['ip'], mock=is_mock,
+                    )
                     self.manifest['drones'] = self.drones
                     if not self.running.is_set():
                         return
