@@ -13,6 +13,23 @@ from test_braking_test_launch import cli_parser, command_builder
 
 
 class SflSensingTests(unittest.TestCase):
+    def test_prev_mission_keeps_interaction_entry_without_sensor_or_detector(self):
+        import yaml
+        path = Path(__file__).parents[2] / 'Interaction/SFL/prev_behavior.yaml'
+        mission = yaml.safe_load(path.read_text())
+        config = mission['Interaction']['config']
+        self.assertEqual(config['behavior'], 'prev')
+        self.assertNotIn('detection_method', config)
+        self.assertNotIn('wrench_interaction', config)
+        for flags in ((), ('--sense',)):
+            args = self.args(*flags)
+            before = copy.deepcopy(vars(args))
+            tokens = self.command(args, config)
+            self.assertIn('--interaction', tokens)
+            self.assertNotIn('--illumination', tokens)
+            self.assertNotIn('--sense', tokens)
+            self.assertEqual(vars(args), before)
+
     def args(self, *extra):
         return cli_parser().parse_args(['--interaction', *extra])
 
