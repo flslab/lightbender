@@ -1,13 +1,15 @@
 #!/bin/bash
 
-if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <place_script.py> [input_file.svg ...]"
-    echo "Example: $0 place.py svg/c.svg"
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 <place_script.py> <base_results_dir> [input_file.svg ...]"
+    echo "Example: $0 place.py results/gurobi/a-z svg/c.svg"
     exit 1
 fi
 
 PLACE_SCRIPT=$1
-shift
+BASE_RESULTS_DIR=$2
+shift 2
+PYTHON_BIN=${PYTHON_BIN:-python3}
 
 # Default Input files
 INPUT_FILES=("dtla.svg")
@@ -18,19 +20,24 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # Base Directory for all results
-BASE_RESULTS_DIR="results/apr13/a_z_25cm"
-mkdir -p "$BASE_RESULTS_DIR"
+mkdir -p -- "$BASE_RESULTS_DIR"
 
 # --- Transform Parameters ---
-TRANSFORM_MAX_WIDTH=0.5
-TRANSFORM_MAX_HEIGHT=0.25
+# Each entry is "max_width max_height".
+TRANSFORM_MAX_SIZE_PAIRS=(
+    "2.0 1.0"
+    "1.0 0.5"
+    "0.5 0.25"
+)
 
 # --- Placement Parameters ---
 MAX_LENGTH=0.16
 MAX_LENGTHS="0.13 0.16 0.24"
 MIN_CHUNK_LEN=0.01
-PLACEMENT_POLICIES=("VFG" "SC" "HYB")
+PLACEMENT_POLICIES=("SC" "VFG")
 # PLACEMENT_POLICIES=("VFG" "SC" "HYB")
+SET_COVER_SOLVERS=("bnb" "gurobi") # used only by SC/HYB
+GUROBI_MIP_GAP=0.0
 
 # --- Stagger Parameters ---
 SELECTION_METHODS=("GREEDY_MAX_DEGREE")
@@ -46,18 +53,34 @@ DECONFLICT_PLACEMENT_TYPES=("MIN_DISTANCE")
 ALLOW_SPLIT=false
 
 # Shared Camera Position
-CAM_X=2.3
+CAM_X=3.0
 CAM_Y=0.0
 CAM_Z=0.0
 
+CAM_d=(0.0 45.0 90.0)
+AESTHETIC_RENDER=false
+RENDER_SCALE=4.0
+
+CAM_render=()
+for cam_d in "${CAM_d[@]}"; do
+    CAM_render+=("$("$PYTHON_BIN" -c 'import math, sys; x, y, z, d = map(float, sys.argv[1:]); a = math.radians(d); print(*(0.0 if abs(v) < 1e-12 else round(v, 10) for v in (x * math.cos(a) - y * math.sin(a), x * math.sin(a) + y * math.cos(a), z)))' "$CAM_X" "$CAM_Y" "$CAM_Z" "$cam_d")")
+done
+
+RENDER_STYLE_ARGS=()
+if [ "$AESTHETIC_RENDER" == "true" ]; then
+    RENDER_STYLE_ARGS=(--aesthetic)
+fi
+
 # Define the comprehensive CSV header
-CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SCTotalCand,SCTotalChunks,SCTotalIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,AddedLbs,NewUtilization,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthAbsError,AvgWidthRelError,OverallAvgError,NormalizedError,SimilarityScore"
+CSV_HEADER="InputFile,TransformNodes,TransformEdges,PlacementPolicy,PlaceExecTime,PlaceTotalLBs,PlaceTotalSegs,PlaceAvgSegLen,PlaceSegLenUtil,SetCoverSolver,SCStatus,SCTotalCand,SCTotalChunks,SCTotalNodesOrIter,GreedySol,GreedyOverlap,SCOverlap,IsSCBetterThanGreedy,SelectionMethod,ResolutionOrder,TrajectoryType,MoveDirection,DeconflictPlacementType,DownwashConflicts,Collisions,UnresolvedDownwashes,UnresolvedCollisions,InitMinDW,InitMaxDW,InitMinCol,InitMaxCol,InitMinTotal,InitMaxTotal,FinalMinDW,FinalMaxDW,FinalMinCol,FinalMaxCol,FinalMinTotal,FinalMaxTotal,LBsSelected,LBsMoved,AvgDist,MinDist,MaxDist,AddedLbs,NewUtilization,CameraRotationDeg,RenderCameraX,RenderCameraY,RenderCameraZ,MatchedLines,ImageDiagonal,AvgPosError,AvgWidthAbsError,AvgWidthRelError,OverallAvgError,NormalizedError,SimilarityScore"
 
 if [ "$PLACE_SCRIPT" == "place.py" ]; then
     MAX_LENGTH_REPORT="LB Length                : $MAX_LENGTH"
 else
     MAX_LENGTH_REPORT="LB Lengths               : $MAX_LENGTHS"
 fi
+
+printf -v TRANSFORM_SIZE_PAIRS_REPORT '  - %s\n' "${TRANSFORM_MAX_SIZE_PAIRS[@]}"
 
 # --- Generate Configuration Report ---
 REPORT_FILE="$BASE_RESULTS_DIR/experiment_config.txt"
@@ -72,13 +95,15 @@ Git Hash  : $(git rev-parse HEAD 2>/dev/null || echo 'N/A')
 Inputs: ${INPUT_FILES[*]}
 ----------------------------------------
 Transform
-Max Width                : $TRANSFORM_MAX_WIDTH
-Max Height               : $TRANSFORM_MAX_HEIGHT
+Max Width/Height Pairs:
+$TRANSFORM_SIZE_PAIRS_REPORT
 ----------------------------------------
 Placement ($PLACE_SCRIPT)
 $MAX_LENGTH_REPORT
 Placement Policies       : ${PLACEMENT_POLICIES[*]}
 SC Min Chunk Length      : $MIN_CHUNK_LEN
+Set Cover Solvers        : ${SET_COVER_SOLVERS[*]}
+Gurobi MIP Gap           : $GUROBI_MIP_GAP
 ----------------------------------------
 Stagger
 Selection Methods        : ${SELECTION_METHODS[*]}
@@ -92,13 +117,32 @@ Perspective Camera
 Camera Position X        : $CAM_X
 Camera Position Y        : $CAM_Y
 Camera Position Z        : $CAM_Z
+Render Rotations (deg)   : ${CAM_d[*]}
+Render Camera Positions  : ${CAM_render[*]}
+Aesthetic Render         : $AESTHETIC_RENDER
+Render Scale             : $RENDER_SCALE
 ========================================
 EOF
 echo "Generated configuration report: $REPORT_FILE"
 
 # --- Execution ---
 
-for input_file in "${INPUT_FILES[@]}"; do
+for transform_size_pair in "${TRANSFORM_MAX_SIZE_PAIRS[@]}"; do
+    read -r TRANSFORM_MAX_WIDTH TRANSFORM_MAX_HEIGHT extra_dimension <<< "$transform_size_pair"
+    if [ -z "$TRANSFORM_MAX_WIDTH" ] || [ -z "$TRANSFORM_MAX_HEIGHT" ] || [ -n "$extra_dimension" ]; then
+        echo "Error: Invalid transform size pair '$transform_size_pair'. Expected: \"max_width max_height\"."
+        exit 1
+    fi
+
+    TRANSFORM_ID="width_${TRANSFORM_MAX_WIDTH}_height_${TRANSFORM_MAX_HEIGHT}"
+    TRANSFORM_RESULTS_DIR="$BASE_RESULTS_DIR/$TRANSFORM_ID"
+    mkdir -p "$TRANSFORM_RESULTS_DIR"
+
+    echo "========================================"
+    echo "Transform size: width=$TRANSFORM_MAX_WIDTH, height=$TRANSFORM_MAX_HEIGHT"
+    echo "========================================"
+
+    for input_file in "${INPUT_FILES[@]}"; do
     if [ ! -f "$input_file" ]; then
         echo "Warning: Input file '$input_file' not found. Skipping."
         continue
@@ -112,11 +156,11 @@ for input_file in "${INPUT_FILES[@]}"; do
     echo "========================================"
 
     # Setup base directory for this input file
-    FILE_DIR="$BASE_RESULTS_DIR/$FILE_BASENAME"
+    FILE_DIR="$TRANSFORM_RESULTS_DIR/$FILE_BASENAME"
     mkdir -p "$FILE_DIR/yaml"
 
     # Initialize CSV for this file
-    CSV_FILE="$FILE_DIR/${FILE_BASENAME}.csv"
+    CSV_FILE="$FILE_DIR/${FILE_BASENAME}_${TRANSFORM_ID}.csv"
     echo "$CSV_HEADER" > "$CSV_FILE"
 
     # ---------------------------------------------------------
@@ -126,7 +170,7 @@ for input_file in "${INPUT_FILES[@]}"; do
     echo "  [Step 1] Transforming SVG to Graph..."
 
     # Capture output to extract metrics (expecting CSV format on the last line)
-    TRANSFORM_OUT=$(python transform.py \
+    TRANSFORM_OUT=$("$PYTHON_BIN" transform.py \
         --input "$input_file" \
         --output "$GRAPH_YAML" \
         -mw "$TRANSFORM_MAX_WIDTH" \
@@ -147,9 +191,22 @@ for input_file in "${INPUT_FILES[@]}"; do
 
     # Loop over Placement Policies
     for policy in "${PLACEMENT_POLICIES[@]}"; do
+        if [ "$policy" == "SC" ] || [ "$policy" == "HYB" ]; then
+            policy_solvers=("${SET_COVER_SOLVERS[@]}")
+        else
+            # The solver is unused by non-set-cover policies, so run them only once.
+            policy_solvers=("${SET_COVER_SOLVERS[0]}")
+        fi
+
+        for set_cover_solver in "${policy_solvers[@]}"; do
+
+        policy_output_name="$policy"
+        if [ "$policy" == "SC" ] || [ "$policy" == "HYB" ]; then
+            policy_output_name="${policy}-${set_cover_solver}"
+        fi
 
         # Setup specific directory structure for this policy
-        POLICY_DIR="$FILE_DIR/$policy"
+        POLICY_DIR="$FILE_DIR/$policy_output_name"
         mkdir -p "$POLICY_DIR/2d"
         mkdir -p "$POLICY_DIR/3d"
         mkdir -p "$POLICY_DIR/graph_viz"
@@ -161,7 +218,8 @@ for input_file in "${INPUT_FILES[@]}"; do
         # STEP 2: PLACE (Graph YAML -> Initial Layout YAML)
         # ---------------------------------------------------------
         INITIAL_LAYOUT="$POLICY_DIR/yaml/initial_layout.yaml"
-        echo "  [Step 2] Running Placement ($policy) via $PLACE_SCRIPT..."
+        SC_LOG="$POLICY_DIR/yaml/sc_log.json"
+        echo "  [Step 2] Running Placement ($policy_output_name) via $PLACE_SCRIPT..."
 
         if [ "$PLACE_SCRIPT" == "place.py" ]; then
             PLACE_LENGTH_ARGS="--max_len $MAX_LENGTH"
@@ -170,16 +228,22 @@ for input_file in "${INPUT_FILES[@]}"; do
         fi
 
         # Capture output
-        PLACE_OUT=$(python $PLACE_SCRIPT \
+        if ! PLACE_OUT=$("$PYTHON_BIN" "$PLACE_SCRIPT" \
             --input "$GRAPH_YAML" \
             --output "$INITIAL_LAYOUT" \
             --policy "$policy" \
             $PLACE_LENGTH_ARGS \
             --min_chunck_len $MIN_CHUNK_LEN \
             --no_viz \
-            --csv)
+            --set_cover_log "$SC_LOG" \
+            --set_cover_solver "$set_cover_solver" \
+            --gurobi_mip_gap "$GUROBI_MIP_GAP" \
+            --csv); then
+            echo "$PLACE_OUT"
+            echo "    Error: placement command failed for $policy_output_name. Skipping."
+            continue
+        fi
 
-        # echo "$PLACE_OUT"
         if [ ! -f "$INITIAL_LAYOUT" ]; then
             echo "$PLACE_OUT"
             echo "    Error: place.py failed to produce $INITIAL_LAYOUT. Skipping policy $policy."
@@ -187,25 +251,33 @@ for input_file in "${INPUT_FILES[@]}"; do
         fi
 
         # Use whole lines from place.py depending on the policy
-        if [ "$policy" == "SC" ]; then
+        if [ "$policy" == "SC" ] || [ "$policy" == "HYB" ]; then
             PLACE_SC_METRICS=$(echo "$PLACE_OUT" | tail -n 2 | head -n 1)
             PLACE_STD_METRICS=$(echo "$PLACE_OUT" | tail -n 1)
             PLACE_STATS="${PLACE_STD_METRICS},${PLACE_SC_METRICS}"
         else
             PLACE_STD_METRICS=$(echo "$PLACE_OUT" | tail -n 1)
-            PLACE_STATS="${PLACE_STD_METRICS},NA,NA,NA,NA,NA,NA,NA"
+            PLACE_STATS="${PLACE_STD_METRICS},NA,NA,NA,NA,NA,NA,NA,NA,NA"
         fi
 
         # ---------------------------------------------------------
         # STEP 2.5: REFERENCE SVG RENDER
         # ---------------------------------------------------------
-        REF_SVG="$POLICY_DIR/svg/reference_initial.svg"
-        echo "  [Step 2.5] Rendering Reference SVG for Comparison..."
-        python perspective_camera.py \
-            --action render \
-            --input "$INITIAL_LAYOUT" \
-            --output "$REF_SVG" \
-            --camera_pos $CAM_X $CAM_Y $CAM_Z
+        echo "  [Step 2.5] Rendering Reference SVGs for Comparison..."
+        for cam_idx in "${!CAM_d[@]}"; do
+            cam_d="${CAM_d[$cam_idx]}"
+            camera_pos="${CAM_render[$cam_idx]}"
+            read -r CAM_X_render CAM_Y_render CAM_Z_render <<< "$camera_pos"
+            ref_svg="$POLICY_DIR/svg/reference_initial_camera_${cam_d}deg.svg"
+
+            "$PYTHON_BIN" perspective_camera.py \
+                --action render \
+                --input "$INITIAL_LAYOUT" \
+                --output "$ref_svg" \
+                --camera_pos "$CAM_X_render" "$CAM_Y_render" "$CAM_Z_render" \
+                --render_scale "$RENDER_SCALE" \
+                "${RENDER_STYLE_ARGS[@]}"
+        done
 
         if [ "$ALLOW_SPLIT" == "true" ]; then
             SPLIT_ARG="--allow-split"
@@ -224,18 +296,17 @@ for input_file in "${INPUT_FILES[@]}"; do
                             config_id="${sel}_${res}_${traj}_${move}_${d_place}"
 
                             out_yaml="$POLICY_DIR/yaml/feasible_${config_id}.yaml"
-                            out_svg="$POLICY_DIR/svg/result_${config_id}.svg"
                             out_2d="$POLICY_DIR/2d/${config_id}.png"
                             out_3d="$POLICY_DIR/3d/${config_id}.png"
                             out_graph_viz="$POLICY_DIR/graph_viz/${config_id}.png"
                             out_bar_viz="$POLICY_DIR/bar_viz/${config_id}.png"
 
-                            echo "    [Step 3 & 4] Deconflict & Render: $policy + $config_id"
+                            echo "    [Step 3 & 4] Deconflict & Render: $policy_output_name + $config_id"
 
                             # ---------------------------------------------------------
                             # STEP 3: DECONFLICT (Initial Layout -> Feasible Layout)
                             # ---------------------------------------------------------
-                            SOLVER_STATS=$(python deconflict.py \
+                            SOLVER_STATS=$("$PYTHON_BIN" deconflict.py \
                                 --input_file "$INITIAL_LAYOUT" \
                                 --output_file "$out_yaml" \
                                 --selection_method "$sel" \
@@ -253,6 +324,7 @@ for input_file in "${INPUT_FILES[@]}"; do
                                 --csv | tail -n 1)
 
                             # Validate Solver Output (Requires 7 comma-separated numbers)
+                            echo "SOLVER_STATS: $SOLVER_STATS"
                             if [[ "$SOLVER_STATS" != *","* ]]; then
                                 echo "      Error: Solver failed or returned invalid CSV."
                                 SOLVER_STATS="0,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0" # Dummy data
@@ -261,61 +333,73 @@ for input_file in "${INPUT_FILES[@]}"; do
                             # ---------------------------------------------------------
                             # STEP 4: RENDER & COMPARE (Feasible Layout -> SVG -> Diff)
                             # ---------------------------------------------------------
-                            # Render Result SVG
-                            python perspective_camera.py \
-                                --action render \
-                                --input "$out_yaml" \
-                                --output "$out_svg" \
-                                --camera_pos $CAM_X $CAM_Y $CAM_Z
+                            for cam_idx in "${!CAM_d[@]}"; do
+                                cam_d="${CAM_d[$cam_idx]}"
+                                camera_pos="${CAM_render[$cam_idx]}"
+                                read -r CAM_X_render CAM_Y_render CAM_Z_render <<< "$camera_pos"
+                                ref_svg="$POLICY_DIR/svg/reference_initial_camera_${cam_d}deg.svg"
+                                out_svg="$POLICY_DIR/svg/result_${config_id}_camera_${cam_d}deg.svg"
 
-                            # Compare reference SVG with the output SVG
-                            CAMERA_STATS=$(python perspective_camera.py \
-                                --action compare \
-                                --input "$REF_SVG" \
-                                --output "$out_svg" \
-                                --csv | tail -n 1)
+                                # Render Result SVG
+                                "$PYTHON_BIN" perspective_camera.py \
+                                    --action render \
+                                    --input "$out_yaml" \
+                                    --output "$out_svg" \
+                                    --camera_pos "$CAM_X_render" "$CAM_Y_render" "$CAM_Z_render" \
+                                    --render_scale "$RENDER_SCALE" \
+                                    "${RENDER_STYLE_ARGS[@]}"
 
-                            # Validate Camera Output
-                            if [[ "$CAMERA_STATS" != *","* ]]; then
-                                echo "      Error: Camera comparison failed."
-                                CAMERA_STATS="0,0.0,0.0,0.0,0.0,0.0,0.0" # Dummy data
-                            fi
+                                # Compare reference SVG with the output SVG
+                                CAMERA_STATS=$("$PYTHON_BIN" perspective_camera.py \
+                                    --action compare \
+                                    --input "$ref_svg" \
+                                    --output "$out_svg" \
+                                    --csv | tail -n 1)
 
-                            # Append row to CSV
-                            echo "$input_file,$TRANSFORM_STATS,$policy,$PLACE_STATS,$sel,$res,$traj,$move,$d_place,$SOLVER_STATS,$CAMERA_STATS" >> "$CSV_FILE"
+                                # Validate Camera Output
+                                if [[ "$CAMERA_STATS" != *","* ]]; then
+                                    echo "      Error: Camera comparison failed."
+                                    CAMERA_STATS="0,0.0,0.0,0.0,0.0,0.0" # Dummy data
+                                fi
+
+                                # Append one row per camera rotation
+                                echo "$input_file,$TRANSFORM_STATS,$policy_output_name,$PLACE_STATS,$sel,$res,$traj,$move,$d_place,$SOLVER_STATS,$cam_d,${camera_pos// /,},$CAMERA_STATS" >> "$CSV_FILE"
+                            done
 
                         done
                     done
                 done
             done
         done
+        done
     done
 
-    echo "  Results saved to $CSV_FILE"
+        echo "  Results saved to $CSV_FILE"
+    done
+
+    # ---------------------------------------------------------
+    # STEP 5: COMBINE THIS TRANSFORM PAIR INTO A MASTER CSV
+    # ---------------------------------------------------------
+    if [ "$PLACE_SCRIPT" == "place.py" ]; then
+        MASTER_CSV="$BASE_RESULTS_DIR/master_results_${TRANSFORM_ID}.csv"
+    else
+        MASTER_CSV="$BASE_RESULTS_DIR/master_results_multi_type_${TRANSFORM_ID}.csv"
+    fi
+    echo "========================================"
+    echo "Compiling master CSV for width=$TRANSFORM_MAX_WIDTH, height=$TRANSFORM_MAX_HEIGHT..."
+
+    # Check if any per-input CSVs were generated for this transform pair.
+    if find "$TRANSFORM_RESULTS_DIR" -mindepth 2 -name "*.csv" -print -quit | grep -q .; then
+        # Write the header to the master file.
+        echo "$CSV_HEADER" > "$MASTER_CSV"
+
+        # Append all CSV rows for this pair, skipping their header rows.
+        find "$TRANSFORM_RESULTS_DIR" -mindepth 2 -name "*.csv" -exec tail -q -n +2 {} + >> "$MASTER_CSV"
+        echo "Master CSV successfully generated at: $MASTER_CSV"
+    else
+        echo "Warning: No individual CSV files found for $TRANSFORM_ID."
+    fi
 done
-
-# ---------------------------------------------------------
-# STEP 5: COMBINE INTO MASTER CSV
-# ---------------------------------------------------------
-if [ "$PLACE_SCRIPT" == "place.py" ]; then
-    MASTER_CSV="$BASE_RESULTS_DIR/master_results_${TRANSFORM_MAX_HEIGHT}.csv"
-else
-    MASTER_CSV="$BASE_RESULTS_DIR/master_results_multi_type_${TRANSFORM_MAX_HEIGHT}.csv"
-fi
-echo "========================================"
-echo "Compiling Master CSV..."
-
-# Check if any CSVs were generated
-if find "$BASE_RESULTS_DIR" -mindepth 2 -name "*.csv" -print -quit | grep -q .; then
-    # Write the header to the master file
-    echo "$CSV_HEADER" > "$MASTER_CSV"
-
-    # Append all CSV rows (skipping the header row) quietly
-    find "$BASE_RESULTS_DIR" -mindepth 2 -name "*.csv" | xargs tail -q -n +2 >> "$MASTER_CSV"
-    echo "Master CSV successfully generated at: $MASTER_CSV"
-else
-    echo "Warning: No individual CSV files found to combine."
-fi
 
 echo "========================================"
 echo "Experiment Completed."

@@ -13,6 +13,9 @@ import signal
 import shutil
 import socket
 import logging
+import shlex
+import math
+import uuid
 from datetime import datetime
 from functools import partial
 from fabric import Connection
@@ -58,6 +61,8 @@ from interaction_launch import (
     resolve_interaction_sensing,
     validate_interaction_modes,
 )
+from marker_grid_client import MarkerGridClient
+from camera.pose_estimation import CameraPoseMixin, CAMERA_POSE_FAILURE_STATUSES
 
 # from Interaction.vicon_noise_tracker import run_tracker
 from pathlib import Path
@@ -67,9 +72,91 @@ BASE_DIR = Path(__file__).resolve().parent
 MANIFEST_FILE = BASE_DIR / 'swarm_manifest.yaml'
 DRONE_SCRIPT = 'controller.py'
 CAMERA_SCRIPT = 'camera_node.py'
+DEFAULT_MOCAP = {'type': 'vicon', 'ip': '192.168.1.39'}
 
 
-class SwarmOrchestrator:
+def resolve_mocap_config(manifest):
+    """Return the configured mocap endpoint, preserving older manifests."""
+    config = manifest.get('mocap', DEFAULT_MOCAP)
+    if not isinstance(config, dict):
+        raise ValueError('mocap must be a mapping with type and ip')
+    for field in ('type', 'ip'):
+        if not isinstance(config.get(field), str) or not config[field].strip():
+            raise ValueError(f'mocap.{field} must be a nonempty string')
+    return {'type': config['type'].strip().lower(), 'ip': config['ip'].strip()}
+
+
+def validate_marker_tile_ownership(manifest):
+    """Validate optional per-drone landing tiles and reject shared ownership."""
+    owners = {}
+    for drone in manifest.get('drones', []):
+        tile = drone.get('marker_tile')
+        if tile is None:
+            continue
+        if (not isinstance(tile, (list, tuple)) or len(tile) != 2 or
+                not all(isinstance(value, int) and not isinstance(value, bool)
+                        for value in tile)):
+            raise ValueError(
+                f"Drone {drone.get('id')} has invalid marker_tile {tile}"
+            )
+        key = tuple(tile)
+        if key in owners:
+            raise ValueError(
+                f"Marker tile {key} is assigned to both {owners[key]} and "
+                f"{drone.get('id')}"
+            )
+        owners[key] = drone.get('id')
+
+    config = manifest.get('marker_grid_node')
+    if not owners and config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError(
+            "marker_grid_node configuration is required for marker_tile drones"
+        )
+    port = config.get('port')
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("marker_grid_node.port must be in [1, 65535]")
+    for field in ('ip', 'user', 'work_dir', 'grid_file'):
+        value = config.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"marker_grid_node.{field} must be a non-empty string")
+    if config.get('initial_mode', 'blink') not in ('off', 'static', 'blink'):
+        raise ValueError("marker_grid_node.initial_mode must be off, static, or blink")
+    for field, default in (('gpio', 10), ('dma_channel', 10)):
+        value = config.get(field, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"marker_grid_node.{field} must be a non-negative integer")
+    frequency_hz = config.get('frequency_hz', 800000)
+    if (not isinstance(frequency_hz, int) or isinstance(frequency_hz, bool) or
+            frequency_hz <= 0):
+        raise ValueError("marker_grid_node.frequency_hz must be a positive integer")
+    for field in ('mygrid_level', 'hypergrid_level'):
+        value = config.get(field, 255)
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255:
+            raise ValueError(f"marker_grid_node.{field} must be in [0, 255]")
+    if 'hypergrid_tiles' in config:
+        hypergrid_tiles = config['hypergrid_tiles']
+        if not isinstance(hypergrid_tiles, list):
+            raise ValueError("marker_grid_node.hypergrid_tiles must be a list")
+        seen = set()
+        for tile in hypergrid_tiles:
+            if (not isinstance(tile, (list, tuple)) or len(tile) != 2 or
+                    not all(isinstance(value, int) and not isinstance(value, bool)
+                            for value in tile)):
+                raise ValueError(
+                    "marker_grid_node.hypergrid_tiles entries must be [i, j] "
+                    "integer pairs"
+                )
+            key = tuple(tile)
+            if key in seen:
+                raise ValueError(
+                    f"marker_grid_node.hypergrid_tiles contains duplicate {key}"
+                )
+            seen.add(key)
+
+
+class SwarmOrchestrator(CameraPoseMixin):
     def __init__(self, args):
         setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -83,6 +170,7 @@ class SwarmOrchestrator:
             self.imu_validation_plan = ImuValidationMission(args,self.manifest,BASE_DIR)
             self.logger.info('IMU validation source: %s',self.imu_validation_plan.source)
             self.logger.info('Using normal Dispatcher UI and swarm launch; gyro zero refreshes on the floor after startup.')
+        self.mocap_cfg = resolve_mocap_config(self.manifest)
         self.ctrl_cfg = self.manifest['controller']
         if args.http_port:
             self.ctrl_cfg['http_port'] = args.http_port
@@ -91,8 +179,10 @@ class SwarmOrchestrator:
         if args.zmq_ack_port:
             self.ctrl_cfg['zmq_ack_port'] = args.zmq_ack_port
         self.drones = self.manifest.get('drones', [])
+        validate_marker_tile_ownership(self.manifest)
         self.camera_cfg = self.manifest.get('camera_node')
         self.radio_node = self.manifest.get('radio_node')
+        self.marker_grid_cfg = self.manifest.get('marker_grid_node')
         self.common_cfg = self.manifest['common']
         self.missions = self._load_missions()
         self.mission = self.missions[0] if self.missions else None
@@ -105,6 +195,11 @@ class SwarmOrchestrator:
                 self.logger.info('SFL %s: potentiometer sensing %s',
                                  mission.get('name', '(unnamed)'),
                                  'enabled' if launch_args.sense else 'disabled')
+        self.camera_pose = None
+        self.camera_ready = False
+        self.camera_run_id = None
+        self.marker_grid_sha256 = None
+        self._configure_camera_pose()
 
         # Runtime State
         self.tag = None
@@ -123,6 +218,7 @@ class SwarmOrchestrator:
         self.pub_socket = None
         self.pull_socket = None
         self.http_server = None
+        self.marker_grid_client = None
 
         # Bind signal handlers for graceful exit
         # signal.signal(signal.SIGINT, self._signal_handler)
@@ -218,6 +314,11 @@ class SwarmOrchestrator:
         else:
             raise Exception("mode not supported")
 
+    def _mocap_cli_args(self):
+        config = getattr(self, 'mocap_cfg', DEFAULT_MOCAP)
+        return (f"--mocap-type {shlex.quote(config['type'])} "
+                f"--mocap-ip {shlex.quote(config['ip'])}")
+
     def _get_drone_cmd_interaction(self, drone):
         alt = self.mission['drones'][drone['id']]['target'][2]
         servo_count = drone.get('servo_count', 2)
@@ -283,6 +384,7 @@ class SwarmOrchestrator:
                 init_pos = m.get("init_pos")
                 if init_pos is not None:
                     extra_marker_args += f"{' '.join(str(c) for c in m['init_pos'])} "
+        viewpoint_arg = self._get_viewpoint_args(drone)
         cmd = [
             f"cd {self.common_cfg['work_dir']} && "
             f"source {self.common_cfg['venv_path']}/bin/activate && "
@@ -294,7 +396,9 @@ class SwarmOrchestrator:
             f"--ground-test " if self.args.ground else "",
             f"{radio_arg} "
             f"{extra_marker_args} "
+            f"{viewpoint_arg}"
             f"--vicon {mocap_args} "
+            f"{self._mocap_cli_args()} "
             f"--drone-id {drone['id']} ",
             f"--led --led-count {led_count} " if led_count > 0 and not self.args.radio else " ",
             f"--servo --servo-type {drone.get('type', 'H')} --servo-count {servo_count} " if servo_count > 0 and not self.args.radio else " ",
@@ -310,12 +414,15 @@ class SwarmOrchestrator:
         # If a reference object is configured, also launch the noise tracker on the drone.
         ref_obj = self.common_cfg.get('reference_object')
         if ref_obj:
+            if self.mocap_cfg['type'] != 'vicon':
+                raise ValueError('reference_object noise tracking requires mocap.type: vicon')
             vicon_log = f"{self.common_cfg['work_dir']}/logs/vicon_{self.tag}.json"
             cmd.append(
                 f"cd {self.common_cfg['work_dir']} && "
                 f"source {self.common_cfg['venv_path']}/bin/activate && "
                 f"nohup python3 Interaction/vicon_noise_tracker.py "
                 f"--subject {ref_obj} --duration 10 "
+                f"--mocap-ip {shlex.quote(self.mocap_cfg['ip'])} "
                 f"--out {vicon_log} "
                 f"> vicon_noise.log 2>&1 < /dev/null &"
             )
@@ -323,6 +430,7 @@ class SwarmOrchestrator:
         return f" ".join(cmd)
 
     def _get_drone_cmd_illumination(self, drone):
+        self.logger.debug(drone)
         drone_mission = self.mission['drones'][drone['id']]
         alt = drone_mission['target'][2]
         servo_count = drone.get('servo_count', 2)
@@ -337,24 +445,27 @@ class SwarmOrchestrator:
             anchor_drone = self._get_drone_by_id(anchor_id)
             if anchor_drone:
                 target_id = anchor_drone.get('marker_id', 0)
-        
-        if hasattr(drone, "obj_name"):
+            else:
+                target_id = drone_mission['relative_anchor'].get('marker_id', 0)
+        if drone.get('obj_name'):
             mocap_args = f"--obj-name {drone['obj_name']} --vicon-mode rigidbody --vicon-full-pose "
         else:
             p = drone['init_pos']
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud --init-yaw {init_yaw} "
             
-        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        viewpoint_arg = self._get_viewpoint_args(drone)
         reference_arg = f"--reference {drone['reference'][0]} {drone['reference'][1]} {drone['reference'][2]} " if 'reference' in drone else ""
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
-        tracker_arg = f"--tracker --save-tracker" if drone.get('tracker') else ""
+        tracker_arg = self._get_marker_grid_tracker_arg(drone)
+
         smooth_controller_rate = f"--smooth-controller-rate 100"
+        localization_flags = ""
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
-            if drone.get('save_vicon'):
-                localization_flags += " --save-vicon "
-        else:
-            localization_flags = "--vicon"
+        elif drone.get('vicon'):
+            localization_flags = "--vicon --light-module-offset 0.075 0.0 -0.040"
+        if drone.get('save_vicon'):
+            localization_flags += " --save-vicon "
         
         cmd = [
             f"cd {self.common_cfg['work_dir']} && ",
@@ -363,6 +474,7 @@ class SwarmOrchestrator:
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --orchestrated --tag {self.tag} ",
+            f"{self._mocap_cli_args()} ",
             "--ground-test " if self.args.ground else f" {localization_flags} {mocap_args} ",
             f"--marker-id {marker_id} " if marker_id is not None else "",
             f"--target-id {target_id} " if target_id is not None else "",
@@ -371,19 +483,213 @@ class SwarmOrchestrator:
             f"{reference_arg}",
             f"--drone-id {drone['id']} ",
             f"{tracker_arg}",
-            f"--led --led-brightness 0.5 --led-count {led_count} " if led_count > 0 else " ",
+            f"--led --led-brightness 0.95 --led-count {led_count} " if led_count > 0 else " ",
             f"--servo --servo-type {drone['type']} --servo-count {servo_count} " if servo_count > 0 else " ",
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
             f"--takeoff-altitude {alt} ",
             f"{smooth_controller_rate}",
-            "--enable-tracker-kf  --tracker-encoder-rate 50 --tracker-camera-rate 120 --tracker-res 400",
+            "--camera-offset 0.04 0 0 --marker-offset 0 0 0",
             "--velocity-p 1.0",
-            "--log ",
+            "--log",
+            # "--skip-arm",
             f"--ground-test" if ground_test else "",
             f"> drone_{drone['id']}.log 2>&1 < /dev/null &",
         ]
 
         return " ".join(cmd)
+
+    def _get_marker_grid_tracker_arg(self, drone):
+        """Launch grid PnP whenever this drone owns a short-range tile."""
+        if drone.get('marker_tile') is None:
+            return ""
+        return "--tracker"
+
+    def _get_marker_grid_cmd(self):
+        """Build the detached command run on the dedicated marker-grid Pi."""
+        config = self.marker_grid_cfg
+        work_dir = shlex.quote(config['work_dir'])
+        python = shlex.quote(
+            f"{config.get('venv_path', config['work_dir'] + '/.venv')}/bin/python3"
+        )
+        grid_file = shlex.quote(config['grid_file'])
+        options = [
+            "--host 0.0.0.0",
+            f"--port {config['port']}",
+            f"--gpio {config.get('gpio', 10)}",
+            f"--mygrid-level {config.get('mygrid_level', 255)}",
+            f"--hypergrid-level {config.get('hypergrid_level', 255)}",
+            f"--initial-mode {shlex.quote(config.get('initial_mode', 'blink'))}",
+        ]
+        if 'hypergrid_tiles' in config:
+            tiles = shlex.quote(
+                json.dumps(config['hypergrid_tiles'], separators=(',', ':'))
+            )
+            options.append(f"--hypergrid-tiles {tiles}")
+        invocation = f"{python} -m marker_grid_controller {grid_file} {' '.join(options)}"
+        return (
+            f"cd {work_dir} && git pull && "
+            # f"{invocation} --check && "
+            f"nohup {invocation} > marker_grid.log 2>&1 < /dev/null &"
+        )
+
+    def _boot_marker_grid(self):
+        if not self.marker_grid_cfg:
+            if self._camera_pose_enabled():
+                raise RuntimeError(
+                    "camera pose estimation requires marker_grid_node so the "
+                    "active grid SHA-256 can be verified"
+                )
+            return
+        if not self._boot_remote_node(
+            self.marker_grid_cfg, self._get_marker_grid_cmd(), "Marker grid"
+        ):
+            raise RuntimeError("failed to launch marker-grid node")
+        self.marker_grid_client = MarkerGridClient(
+            self.marker_grid_cfg['ip'], self.marker_grid_cfg['port']
+        )
+        status = self.marker_grid_client.wait_until_ready(
+            self.marker_grid_cfg.get('startup_timeout_s', 15.0)
+        )
+        digest = status.get('grid_sha256')
+        valid_digest = False
+        if isinstance(digest, str) and len(digest) == 64:
+            try:
+                int(digest, 16)
+                valid_digest = True
+            except ValueError:
+                pass
+        self.marker_grid_sha256 = digest.lower() if valid_digest else None
+        if self._camera_pose_enabled() and self.marker_grid_sha256 is None:
+            raise RuntimeError(
+                "marker-grid controller did not report grid SHA-256; refusing "
+                "RGB camera pose estimation"
+            )
+        self.logger.info("Marker-grid node ready")
+
+    def _set_marker_grid_mode(self, mode, drone_id=None):
+        if not self.marker_grid_client:
+            return
+        tile = None
+        if drone_id is not None:
+            drone = self._get_drone_by_id(drone_id)
+            if drone is None or drone.get('marker_tile') is None:
+                raise ValueError(f"Drone {drone_id} does not own a marker tile")
+            tile = drone['marker_tile']
+        response = self.marker_grid_client.set_mode(mode, tile)
+        target = "all tiles" if tile is None else f"tile {tuple(tile)}"
+        self.logger.info(
+            f"Marker grid {target} -> {mode} ({response['changed']} changed)"
+        )
+
+    @staticmethod
+    def _snake_order_marker_tiles(tiles):
+        """Order (i, j) = (x, y) tiles along fixed-x serpentine rows."""
+        rows = {}
+        for tile in tiles:
+            if (not isinstance(tile, (list, tuple)) or len(tile) != 2 or
+                    not all(isinstance(value, int) and not isinstance(value, bool)
+                            for value in tile)):
+                raise ValueError(f"Invalid MyGrid tile coordinate: {tile}")
+            i, j = tile
+            rows.setdefault(i, set()).add(j)
+
+        ordered = []
+        for row_number, i in enumerate(sorted(rows)):
+            columns = sorted(rows[i], reverse=bool(row_number % 2))
+            ordered.extend((i, j) for j in columns)
+        return ordered
+
+    def _get_marker_grid_tiles(self):
+        """Read all MyGrid coordinates advertised by the grid controller."""
+        status = self.marker_grid_client.status()
+        tiles = status.get('tiles')
+        if isinstance(tiles, dict):
+            tiles = list(tiles)
+        if not isinstance(tiles, list):
+            raise RuntimeError(
+                "marker-grid status did not include a tiles list"
+            )
+        if not tiles:
+            raise RuntimeError("marker-grid status reported no MyGrid tiles")
+
+        coordinates = []
+        for tile in tiles:
+            if isinstance(tile, dict):
+                tile = tile.get('tile')
+            elif isinstance(tile, str):
+                try:
+                    tile = [int(value.strip()) for value in tile.split(',')]
+                except ValueError:
+                    pass
+            coordinates.append(tile)
+        return self._snake_order_marker_tiles(coordinates)
+
+    def run_marker_grid_test(self):
+        """Interactively exercise every MyGrid while keeping HyperGrid on."""
+        if not self.marker_grid_cfg:
+            raise RuntimeError(
+                "--test-marker-grid requires marker_grid_node in the manifest"
+            )
+
+        self._boot_marker_grid()
+        try:
+            # A whole-grid static command enables HyperGrid and every MyGrid.
+            self._set_marker_grid_mode("static")
+            tiles = self._get_marker_grid_tiles()
+            self.logger.info(
+                f"Marker-grid test ready: HyperGrid and {len(tiles)} "
+                "MyGrids are ON"
+            )
+            for index, tile in enumerate(tiles, start=1):
+                input(
+                    f">>> MyGrid {index}/{len(tiles)} {tile}: "
+                    "press ENTER to turn OFF..."
+                )
+                self.marker_grid_client.set_mode("off", tile)
+                input(
+                    f">>> MyGrid {index}/{len(tiles)} {tile}: "
+                    "press ENTER to turn ON..."
+                )
+                self.marker_grid_client.set_mode("static", tile)
+            self.logger.info("Marker-grid test complete")
+        finally:
+            self._stop_marker_grid_controller()
+
+    def _stop_marker_grid_controller(self):
+        """Gracefully stop the controller running on the marker-grid node."""
+        if not self.marker_grid_cfg:
+            return
+        marker_id = self.marker_grid_cfg.get('id', 'marker-grid')
+        venv = self.marker_grid_cfg.get(
+            'venv_path', self.marker_grid_cfg['work_dir'] + '/.venv'
+        )
+        pattern = shlex.quote(
+            f"^{venv}/bin/python3 -m marker_grid_controller "
+        )
+        self.logger.info(f"Stopping marker-grid controller {marker_id}...")
+        try:
+            conn = Connection(
+                host=self.marker_grid_cfg['ip'],
+                user=self.marker_grid_cfg['user'],
+            )
+            conn.run(
+                f"pkill -TERM -f {pattern}", pty=False, timeout=2, warn=True
+            )
+            self.marker_grid_client = None
+        except Exception as error:
+            self.logger.warning(
+                f"Could not stop marker-grid controller {marker_id}: {error}"
+            )
+
+    def _handle_marker_grid_event(self, msg):
+        """Route a drone lifecycle request through the orchestrator."""
+        if msg.get('status') != 'MARKER_GRID_MODE':
+            return False
+        try:
+            self._set_marker_grid_mode(msg.get('mode'), msg.get('id'))
+        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+            self.logger.error(f"Rejected marker-grid event {msg}: {error}")
+        return True
 
     def _get_drone_cmd_morphing(self, drone):
         alt = self.mission['drones'][drone['id']]['target'][2]
@@ -395,7 +701,7 @@ class SwarmOrchestrator:
             p = drone['init_pos']
             mocap_args = f"--init-pos {p[0]} {p[1]} {p[2]} --vicon-mode pointcloud "
             
-        viewpoint_arg = f"--viewpoint {drone['viewpoint'][0]} {drone['viewpoint'][1]} {drone['viewpoint'][2]} " if 'viewpoint' in drone else ""
+        viewpoint_arg = self._get_viewpoint_args(drone)
         anchor_arg = f"--anchor {drone['anchor'][0]} {drone['anchor'][1]} {drone['anchor'][2]} " if 'anchor' in drone else ""
         
         cmd = [
@@ -405,6 +711,7 @@ class SwarmOrchestrator:
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --morphing --orchestrated --tag {self.tag} ",
+            f"{self._mocap_cli_args()} ",
             "--ground-test " if self.args.ground else f"--vicon {mocap_args} ",
             f"{viewpoint_arg}",
             f"{anchor_arg}",
@@ -425,6 +732,27 @@ class SwarmOrchestrator:
                 return d
         return None
 
+    def _get_viewpoint_args(self, drone):
+        """Return the explicit RGB-camera correction or the legacy viewpoint.
+
+        A PnP result is authoritative and deliberately suppresses a viewpoint
+        selected by the Vicon dispatcher.  This prevents applying both camera
+        corrections to the same mission.
+        """
+        pose = getattr(self, 'camera_pose', None)
+        if pose is not None:
+            offset = pose['position_offset_xyz']
+            return (
+                f"--viewpoint-offset {offset[0]} {offset[1]} {offset[2]} "
+                f"--viewpoint-yaw-offset {pose['yaw_offset_rad']} "
+            )
+        if 'viewpoint' in drone:
+            viewpoint = drone['viewpoint']
+            return (
+                f"--viewpoint {viewpoint[0]} {viewpoint[1]} {viewpoint[2]} "
+            )
+        return ""
+
     def _get_camera_cmd(self):
         camera_params = [
             "--autofocus-mode", "manual",
@@ -437,10 +765,29 @@ class SwarmOrchestrator:
         else:
             camera_params += ["--gain", "0.8"]
 
+        camera_cfg = self.camera_cfg or {}
+        work_dir = shlex.quote(
+            camera_cfg.get('work_dir', self.common_cfg['work_dir'])
+        )
+        venv_path = shlex.quote(
+            camera_cfg.get('venv_path', self.common_cfg['venv_path'])
+        )
+        parameters = ' '.join(shlex.quote(item) for item in camera_params)
         return (
-            f"bash -c 'cd {self.common_cfg['work_dir']} && "
-            f"source {self.common_cfg['venv_path']}/bin/activate && "
-            f"nohup python3 {CAMERA_SCRIPT} {' '.join(camera_params)} > CAM.log 2>&1 < /dev/null &'"
+            f"bash -c 'cd {work_dir} && "
+            f"source {venv_path}/bin/activate && "
+            "git pull && "
+            # Anchor the process pattern so it cannot match this enclosing
+            # ``bash -c`` command, whose text also contains the later
+            # ``python3 camera_node.py`` launch command.
+            "(pkill -TERM -f \"^python3 .*camera_node[.]py( |$)\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[r]picam-vid\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[l]ibcamera-vid\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[r]picam-still\" 2>/dev/null || true) && "
+            "(pkill -TERM -f \"[l]ibcamera-still\" 2>/dev/null || true) && "
+            "sleep 0.5 && "
+            f"nohup python3 {CAMERA_SCRIPT} {parameters} "
+            "> CAM.log 2>&1 < /dev/null &'"
         )
 
     def _boot_remote_node(self, device_cfg, cmd, node_type="Drone"):
@@ -449,9 +796,12 @@ class SwarmOrchestrator:
 
         try:
             conn = Connection(host=device_cfg['ip'], user=device_cfg['user'], connect_timeout=5)
+            if node_type == "Drone":
+                self._prepare_drone_localizer(conn, node_id)
             # Push manifest from in-memory state (reflects any arg overrides) without touching local file
             manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
-            conn.put(manifest_buf, remote=f"{self.common_cfg['work_dir']}/swarm_manifest.yaml")
+            remote_work_dir = device_cfg.get('work_dir', self.common_cfg['work_dir'])
+            conn.put(manifest_buf, remote=f"{remote_work_dir}/swarm_manifest.yaml")
             if getattr(self,'imu_validation_plan',None) is not None and node_id == self.imu_validation_plan.drone_id:
                 self.imu_validation_download = self.imu_validation_plan.stage(conn,self.common_cfg['work_dir'],self.tag,
                     python=self.common_cfg['venv_path']+'/bin/python')
@@ -464,6 +814,25 @@ class SwarmOrchestrator:
         except Exception as e:
             self.logger.error(f"  > Error booting {node_type} {node_id}: {e}")
             return False
+
+    def _prepare_drone_localizer(self, conn, node_id):
+        """Update and incrementally build a local high-rate localizer checkout."""
+        repo = self.common_cfg.get(
+            'localizer_work_dir', '/home/fls/fls-marker-localization'
+        )
+        quoted_repo = shlex.quote(repo)
+        git_dir = shlex.quote(f"{repo}/.git")
+        build_script = shlex.quote(f"{repo}/high_rate_localizer/build.sh")
+        command = (
+            f"if [ -d {git_dir} ]; then "
+            f"GIT_TERMINAL_PROMPT=0 git -C {quoted_repo} pull --ff-only && "
+            f"bash {build_script}; "
+            "fi"
+        )
+        self.logger.info(
+            f"Checking high-rate localizer checkout on drone {node_id}..."
+        )
+        conn.run(command, pty=False)
 
     def _download_file(self, device_cfg, remote_path, local_path, description, *, required=False):
         self.logger.info(f"Downloading {description} from {device_cfg.get('id', 'CAM')}...")
@@ -507,10 +876,11 @@ class SwarmOrchestrator:
         self.drones     = updated.get("drones", [])
         self.camera_cfg = updated.get("camera_node")
         self.radio_node = updated.get("radio_node")
+        self.marker_grid_cfg = updated.get("marker_grid_node")
         self.logger.info(f"Network switch complete. Controller IP: {self.ctrl_cfg['ip']}")
 
     def shutdown_nodes(self, target_ids=None):
-        """Sends sudo shutdown command to all drones."""
+        """Send shutdown to selected swarm computers, including the grid node."""
         drones_to_target = self.drones
         if target_ids:
             drones_to_target = [d for d in self.drones if d['id'] in target_ids]
@@ -523,8 +893,20 @@ class SwarmOrchestrator:
             except Exception:
                 pass
 
+        marker_id = (self.marker_grid_cfg or {}).get('id', 'marker-grid')
+        if self.marker_grid_cfg and (not target_ids or marker_id in target_ids):
+            self.logger.info(f"Shutting down marker-grid node {marker_id}...")
+            try:
+                conn = Connection(
+                    host=self.marker_grid_cfg['ip'],
+                    user=self.marker_grid_cfg['user'],
+                )
+                conn.run("sudo shutdown now", pty=False, timeout=2, warn=True)
+            except Exception:
+                pass
+
     def kill_processes(self, target_ids=None):
-        """Kills python processes on all drones."""
+        """Stop selected swarm processes, including the grid controller."""
         drones_to_target = self.drones
         if target_ids:
             drones_to_target = [d for d in self.drones if d['id'] in target_ids]
@@ -536,6 +918,10 @@ class SwarmOrchestrator:
                 conn.run("pkill python3", pty=False, timeout=2, warn=True)
             except Exception:
                 pass
+
+        marker_id = (self.marker_grid_cfg or {}).get('id', 'marker-grid')
+        if self.marker_grid_cfg and (not target_ids or marker_id in target_ids):
+            self._stop_marker_grid_controller()
 
     def reboot_flight_controllers(self, remote=False):
         """
@@ -668,6 +1054,9 @@ class SwarmOrchestrator:
         if self.args.kill is not None:
             self.kill_processes(self.args.kill)
             return
+        if getattr(self.args, 'test_marker_grid', False):
+            self.run_marker_grid_test()
+            return
 
         date_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.date_tag = date_tag
@@ -695,7 +1084,7 @@ class SwarmOrchestrator:
                     self.drones = [d for d in self.drones if d['id'] in mission_ids]
                 
                 # Compute init_pos from mission target + default_height
-                self._compute_init_positions()
+                # self._compute_init_positions()
 
                 self._blender_notify({
                     "cmd": "swarm_info",
@@ -713,6 +1102,9 @@ class SwarmOrchestrator:
 
             # Switch drones to adhoc/bluetooth if configured, update IPs
             self._apply_network_mode()
+            # Network switching may replace the live manifest dictionaries.
+            self._configure_camera_pose()
+            self._prepare_camera_run()
             if not self.running.is_set():
                 return
 
@@ -720,6 +1112,33 @@ class SwarmOrchestrator:
             self._process_pending_downloads()
             if not self.running.is_set():
                 return
+
+            if not self.args.record:
+                self._boot_marker_grid()
+                if self._camera_pose_enabled():
+                    if self._reuse_or_recompute_camera_pose():
+                        # The camera still records this run, but it must not
+                        # repeat PnP after the operator chose the saved pose.
+                        self.camera_cfg['pose_estimation']['enabled'] = False
+                    else:
+                        # Keep the ID-bearing MyGrid clusters dark during RGB
+                        # preflight; HyperGrid remains continuously illuminated.
+                        self._set_marker_grid_mode('off')
+
+            # Pose estimation must finish before controller commands/manifests
+            # are built, so the camera is deliberately launched before drones.
+            if self.camera_cfg:
+                if not self.args.skip_record:
+                    camera_started = self._boot_remote_node(
+                        self.camera_cfg, self._get_camera_cmd(), "Camera"
+                    )
+                    if not camera_started:
+                        raise RuntimeError("failed to launch camera node")
+                    if self._camera_pose_enabled():
+                        self._wait_for_camera_pose()
+                        self._confirm_camera_pose()
+            else:
+                self.logger.warning("No camera_node found. Skipping.")
 
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
@@ -737,7 +1156,7 @@ class SwarmOrchestrator:
                         self.logger.info(f"Filtered to {len(self.drones)} mission drones: {[d['id'] for d in self.drones]}")
 
                     # Compute init_pos from mission target + default_height
-                    self._compute_init_positions()
+                    # self._compute_init_positions()
 
                 skip_pointcloud_dispatcher = (
                     contact_attitude_skips_pointcloud_dispatcher(self.args)
@@ -755,8 +1174,16 @@ class SwarmOrchestrator:
                 if not self.args.skip_dispatcher and not skip_pointcloud_dispatcher:
                     from dispatcher import run_dispatch
                     is_mock = self.args.ground or self.args.droneless
+                    if not is_mock and self.mocap_cfg['type'] != 'vicon':
+                        raise ValueError('dispatcher currently requires mocap.type: vicon')
                     self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
-                    self.drones = run_dispatch(self.drones, self.mission, mock=is_mock)
+                    self.drones = run_dispatch(
+                        self.drones, self.mission,
+                        vicon_host=self.mocap_cfg['ip'], mock=is_mock,
+                    )
+                    if self.camera_pose is not None:
+                        for drone in self.drones:
+                            drone.pop('viewpoint', None)
                     self.manifest['drones'] = self.drones
                     if not self.running.is_set():
                         return
@@ -800,12 +1227,12 @@ class SwarmOrchestrator:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(boot_drone, d) for d in self.drones]
                     for future in concurrent.futures.as_completed(futures):
-                        try:
-                            entry = future.result()
-                            if entry:
-                                self.pending_downloads.append(entry)
-                        except Exception as e:
-                            self.logger.error(f"Error booting drone: {e}")
+                        # try:
+                        entry = future.result()
+                        if entry:
+                            self.pending_downloads.append(entry)
+                        # except Exception as e:
+                        #     self.logger.error(f"Error booting drone: {e}")
 
             if self.imu_validation_plan is not None and not any(
                     item.get('tag') == self.tag and item.get('imu_validation') for item in self.pending_downloads):
@@ -817,12 +1244,6 @@ class SwarmOrchestrator:
                     target=loadcell_worker,
                     args=(self.logger, self.running, self.tag)  #
                 )
-            if self.camera_cfg:
-                if not self.args.skip_record:
-                    self._boot_remote_node(self.camera_cfg, self._get_camera_cmd(), "Camera")
-            else:
-                self.logger.warning("No camera_node found. Skipping.")
-
             if self.loadcell_thread:
                 self.loadcell_thread.start()
 
@@ -839,6 +1260,7 @@ class SwarmOrchestrator:
                 else:
                     input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
                     # time.sleep(10)
+            self._start_camera_recording()
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
             self.took_off = True
@@ -846,7 +1268,7 @@ class SwarmOrchestrator:
             if self.manifest['mission']['require_handshake']:
                 for i, mission in enumerate(self.missions):
                     self.ready_ids = set()
-                    self._wait_for_ready()
+                    self._wait_for_ready(i)
                     if not self.args.skip_confirm:
                         if self._blender_monitor_sock:
                             self._confirm_launch_event.clear()
@@ -859,6 +1281,11 @@ class SwarmOrchestrator:
                     if i == 0:
                         # time.sleep(5)
                         pass
+                    # Confirmation can remain open indefinitely. Re-check the
+                    # recorder immediately before every mission START so a
+                    # queued failure or dead camera cannot be followed by a
+                    # launch command.
+                    self._start_camera_recording()
                     self.logger.info(f"Broadcasting START for Mission {i+1}...")
                     self.pub_socket.send_json({"cmd": "START"})
 
@@ -908,12 +1335,15 @@ class SwarmOrchestrator:
                 success = retrieve_validation(item,drone,self._download_file,self.logger) and success
 
             if drone.get("tracker"):
-                tr = f"{work}/logs/video.mp4"
+                tr = f"{work}/logs/high_rate_localizer/video_{tag}.mp4"
                 tl = f"{local_dir}/{drone['id']}_tracker_{tag}.mp4"
                 success = success and self._download_file(drone, tr, tl, "Tracker")
-                tr = f"{work}/logs/tracker_{tag}.json"
+                tr = f"{work}/logs/high_rate_localizer/log_{tag}.json"
                 tl = f"{local_dir}/{drone['id']}_tracker_{tag}.json"
                 success = success and self._download_file(drone, tr, tl, "Tracker")
+                # tr = f"{work}/logs/frames.zip"
+                # tl = f"{local_dir}/{drone['id']}_tracker_{tag}.zip"
+                # success = success and self._download_file(drone, tr, tl, "Tracker")
 
             # Vicon noise log
             if item.get('vicon_log'):
@@ -939,21 +1369,79 @@ class SwarmOrchestrator:
 
         self.pending_downloads = remaining
 
-    def _wait_for_ready(self):
+    def _wait_for_ready(self, mission_index=None):
         self.logger.info("Waiting for swarm readiness...")
-        total_drones = len(self.drones)
 
-        while len(self.ready_ids) < total_drones and self.running.is_set():
+        if getattr(self.args, 'record', False):
+            total_drones = 0
+        elif mission_index is not None:
+            manifest_drones = [d['id'] for d in self.manifest.get('drones', [])]
+            total_drones = len([d for d in self.missions[mission_index]['drones'] if d in manifest_drones])
+        else:
+            total_drones = len(self.drones)
+        camera_required = bool(
+            self.camera_cfg and not getattr(self.args, 'skip_record', False)
+        )
+        camera_ready_deadline = None
+        camera_ready_timeout_s = None
+        if camera_required and not self.camera_ready:
+            camera_ready_timeout_s = float(
+                self.camera_cfg.get('ready_timeout_s', 15.0)
+            )
+            if (
+                not math.isfinite(camera_ready_timeout_s)
+                or camera_ready_timeout_s <= 0
+            ):
+                raise ValueError(
+                    "camera_node.ready_timeout_s must be positive"
+                )
+            camera_ready_deadline = (
+                time.monotonic() + camera_ready_timeout_s
+            )
+
+        while (
+            (
+                len(self.ready_ids) < total_drones
+                or (camera_required and not self.camera_ready)
+            )
+            and self.running.is_set()
+        ):
+            if (
+                camera_required
+                and not self.camera_ready
+                and time.monotonic() >= camera_ready_deadline
+            ):
+                raise RuntimeError(
+                    "camera did not become ready within "
+                    f"{camera_ready_timeout_s:g}s"
+                )
             try:
                 msg = self.pull_socket.recv_json()
                 sender_id = msg.get('id')
                 status = msg.get('status')
 
-                if sender_id == 'CAM' and status == 'READY':
-                    self.logger.info("Camera Node Ready.")
-                    if self.args.record:
-                        return
-                elif "lb" in sender_id:
+                if self._handle_marker_grid_event(msg):
+                    continue
+
+                if sender_id == 'CAM':
+                    if not self._camera_message_matches_run(msg):
+                        self.logger.warning(
+                            "Ignoring stale camera status for run %s",
+                            msg.get('run_id'),
+                        )
+                        continue
+                    if (
+                        status in CAMERA_POSE_FAILURE_STATUSES
+                        or status in {'FAILED', 'CAMERA_RECORDING_FAILED'}
+                    ):
+                        raise RuntimeError(
+                            "camera node failed before readiness: "
+                            f"{msg.get('error', status)}"
+                        )
+                    if status == 'READY':
+                        self.camera_ready = True
+                        self.logger.info("Camera Node Ready.")
+                elif isinstance(sender_id, str) and "lb" in sender_id:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
                         self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
@@ -967,15 +1455,105 @@ class SwarmOrchestrator:
             except zmq.Again:
                 continue  # Timeout, loop back to check self.running
 
+    def _handle_camera_runtime_event(self, msg):
+        if msg.get('id') != 'CAM':
+            return False
+        if not self._camera_message_matches_run(msg):
+            self.logger.warning(
+                "Ignoring stale camera runtime status for run %s",
+                msg.get('run_id'),
+            )
+            return True
+        status = msg.get('status')
+        if status in {
+            'FAILED', 'CAMERA_RECORDING_FAILED',
+            *CAMERA_POSE_FAILURE_STATUSES,
+        }:
+            raise RuntimeError(
+                f"camera runtime failure: {msg.get('error', status)}"
+            )
+        if status == 'RECORDING':
+            self.logger.info("Camera recording confirmed.")
+        return True
+
+    def _start_camera_recording(self):
+        """Start and verify video capture before any drone receives START."""
+        if not self.camera_cfg or getattr(self.args, 'skip_record', False):
+            return
+        timeout_s = float(self.camera_cfg.get('recording_start_timeout_s', 8.0))
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError(
+                "camera_node.recording_start_timeout_s must be positive"
+            )
+        request_id = uuid.uuid4().hex
+        self.pub_socket.send_json({
+            'cmd': 'START_CAMERA',
+            'run_id': self.camera_run_id,
+            'request_id': request_id,
+        })
+        deadline = time.monotonic() + timeout_s
+        while self.running.is_set():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"camera did not confirm recording within {timeout_s:g}s"
+                )
+            try:
+                msg = self.pull_socket.recv_json()
+            except zmq.Again:
+                continue
+            if self._handle_marker_grid_event(msg):
+                continue
+            if msg.get('id') != 'CAM':
+                self.logger.warning(
+                    "Ignoring status while starting camera: %s", msg
+                )
+                continue
+            if not self._camera_message_matches_run(msg):
+                self.logger.warning(
+                    "Ignoring stale camera recording status for run %s",
+                    msg.get('run_id'),
+                )
+                continue
+            status = msg.get('status')
+            if status == 'RECORDING':
+                if msg.get('request_id') != request_id:
+                    self.logger.warning(
+                        "Ignoring stale camera recording acknowledgement %s",
+                        msg.get('request_id'),
+                    )
+                    continue
+                self.logger.info("Camera recording confirmed before launch.")
+                return
+            if status in {
+                'FAILED', 'CAMERA_RECORDING_FAILED',
+                *CAMERA_POSE_FAILURE_STATUSES,
+            }:
+                raise RuntimeError(
+                    "camera could not start recording: "
+                    f"{msg.get('error', status)}"
+                )
+        raise RuntimeError("camera recording start was interrupted")
+
     def _monitor_flight(self):
         launched_drones = len(self.ready_ids)
 
         if self.args.record:
             while self.running.is_set():
-                time.sleep(1)
+                try:
+                    msg = self.pull_socket.recv_json()
+                    if self._handle_marker_grid_event(msg):
+                        continue
+                    self._handle_camera_runtime_event(msg)
+                except zmq.Again:
+                    continue
+            return
         while len(self.landed_drones) < launched_drones and self.running.is_set():
             try:
                 msg = self.pull_socket.recv_json()
+                if self._handle_marker_grid_event(msg):
+                    continue
+                if self._handle_camera_runtime_event(msg):
+                    continue
                 if msg.get('status') == 'LANDED':
                     self._handle_landed_msg(msg)
             except zmq.Again:
@@ -1002,6 +1580,7 @@ class SwarmOrchestrator:
 
         if self.pub_socket:
             self.pub_socket.send_json({"cmd": "EMERGENCY"})
+        self._set_marker_grid_mode("static")
 
         time.sleep(1)
         self.logger.info("Waiting for drones to land... (Press Ctrl+C to force exit)")
@@ -1011,6 +1590,8 @@ class SwarmOrchestrator:
             while len(self.landed_drones) < launched_drones:
                 try:
                     msg = self.pull_socket.recv_json()
+                    if self._handle_marker_grid_event(msg):
+                        continue
                     if msg.get('status') == 'LANDED':
                         self._handle_landed_msg(msg)
                 except zmq.Again:
@@ -1024,6 +1605,13 @@ class SwarmOrchestrator:
         self.logger.info("Running cleanup sequence...")
         self.running.clear()
 
+        # Request a known final mode before SIGTERM makes the grid clear its LEDs.
+        try:
+            self._set_marker_grid_mode("blink")
+        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+            self.logger.warning(f"Could not reset marker grid to blink: {error}")
+        self._stop_marker_grid_controller()
+
         # Stop Camera
         if self.camera_cfg and self.pub_socket and not self.args.skip_record:
             self.logger.info("Stopping Camera...")
@@ -1032,7 +1620,10 @@ class SwarmOrchestrator:
 
             # Download Video
             if self.took_off:
-                remote = f"{self.common_cfg['work_dir']}/mission_footage.mp4"
+                camera_work_dir = self.camera_cfg.get(
+                    'work_dir', self.common_cfg['work_dir']
+                )
+                remote = f"{camera_work_dir}/mission_footage.mp4"
                 local_dir = f"./logs/{self.tag}"
                 os.makedirs(local_dir, exist_ok=True)
                 local = f"{local_dir}/{self.tag}.mp4"
@@ -1243,8 +1834,31 @@ if __name__ == "__main__":
     parser.add_argument("--http-port", type=int, default=None, help="override manifest http_port")
     parser.add_argument("--zmq-cmd-port", type=int, default=None, help="override manifest zmq_cmd_port")
     parser.add_argument("--zmq-ack-port", type=int, default=None, help="override manifest zmq_ack_port")
+    parser.add_argument(
+        "--camera-rough-position", type=float, nargs=3, default=None,
+        metavar=("X", "Y", "Z"),
+        help="override camera_node.pose_estimation rough XYZ position (meters)",
+    )
+    parser.add_argument(
+        "--camera-rough-yaw", type=float, default=None, metavar="RADIANS",
+        help="override the optional rough RGB-camera viewing heading",
+    )
+    parser.add_argument(
+        "--camera-grid-file", type=str, default=None, metavar="REMOTE_PATH",
+        help="override the HyperGrid JSON path on the camera computer",
+    )
+    parser.add_argument(
+        "--camera-calibration-file", type=str, default=None,
+        metavar="REMOTE_PATH",
+        help="override the RGB camera calibration path on the camera computer",
+    )
     parser.add_argument("--droneless", action="store_true", help="Run without FC conneced")
     parser.add_argument("--blender", type=str, default="", help="Connect to Blender monitor via IP:PORT")
+    parser.add_argument(
+        "--test-marker-grid",
+        action="store_true",
+        help="interactively test every MyGrid in snake order",
+    )
 
     args = parser.parse_args()
     if args.validate_estimator_imu:

@@ -48,6 +48,11 @@ LightBender visual effects for different illuminations:
 
 3. In **Edit > Preferences > Add-ons**, find **LightBender Swarm Animator** and set the **Repository Directory** to the absolute path of your local clone. The path is saved permanently in Blender's user preferences — you only need to set it once.
 
+The Set Cover policy can use either the built-in branch-and-bound solver or
+Gurobi. To use Gurobi, install `gurobipy` in the external Python environment
+used by the add-on and configure a valid Gurobi license. Other placement
+policies and the built-in solver do not import or require Gurobi at runtime.
+
 ---
 
 ## Panel Reference
@@ -124,6 +129,7 @@ Reads an SVG shape and places LightBenders along the shape's strokes using avail
 | **Max Width / Max Height** | Bounding box (m) to scale the SVG layout into. |
 | **Center X / Center Z** | World-space coordinates for the layout center. |
 | **Placement Policy** | **VFG** or **Set Cover** — algorithm used to place drones along the shape's strokes. |
+| **Set Cover Solver** | Shown for Set Cover. Choose dependency-free **Built-in B&B** or the lexicographic **Gurobi** MIP backend. |
 | **LED Color** | Python RGB list (e.g. `[255, 0, 0]`) applied to all placed drones. |
 
 Click **Transform and Place** to run the placement. The button is disabled until an SVG file is selected.
@@ -132,7 +138,7 @@ Click **Transform and Place** to run the placement. The button is disabled until
 
 ### Automated Animations
 
-Contains four keyframe-generation tools.
+Contains five keyframe-generation tools.
 
 #### Morph
 
@@ -198,6 +204,22 @@ Generates an exploded-assembly animation: drones fly in from off-screen position
 | **Inward Duration (s)** | Time for drones to fly from the exploded positions back to their targets. |
 
 Click **Generate Fly-In/Fly-Out** to write keyframes; **Trash** icon clears them.
+
+#### Flight Attitude
+
+Generates yaw-relative roll and pitch for the selected LightBenders from their
+animated positions. The operator estimates acceleration over the position-keyed
+frame range, smooths it, and writes per-frame roll/pitch keys while preserving
+existing yaw animation.
+
+| Field | Description |
+|---|---|
+| **Max Tilt** | Maximum combined roll/pitch angle produced by horizontal acceleration. |
+| **Smoothing** | Number of frames on either side used to smooth acceleration and braking. Higher values produce slower, softer banking. |
+
+Click **Apply to Selected** after selecting one or more position-animated
+LightBenders. Applying replaces any existing roll and pitch curves; location
+and yaw keys are left unchanged.
 
 ---
 

@@ -53,33 +53,7 @@ def cli_parser():
     return namespace['parser']
 
 
-def command_builder():
-    source = Path(__file__).parents[1] / 'orchestrator.py'
-    tree = ast.parse(source.read_text())
-    orchestrator = next(
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef)
-        and node.name == 'SwarmOrchestrator'
-    )
-    methods = [
-        node for node in orchestrator.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in ('_get_drone_cmd', '_get_drone_cmd_interaction')
-    ]
-    namespace = {
-        'interaction_adaptive_calibration_args': interaction_adaptive_calibration_args,
-        'interaction_application_flag': interaction_application_flag,
-        'interaction_braking_test_args': interaction_braking_test_args,
-        'interaction_contact_attitude_args': interaction_contact_attitude_args,
-        'interaction_mocap_args': interaction_mocap_args,
-        'interaction_targeted_calibration_args': interaction_targeted_calibration_args,
-        'DRONE_SCRIPT': 'controller.py',
-    }
-    exec(
-        compile(ast.Module(body=methods, type_ignores=[]), str(source), 'exec'),
-        namespace,
-    )
-    return namespace
+from launcher_test_support import command_builder
 
 
 def hover_args(**overrides):

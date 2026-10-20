@@ -49,36 +49,7 @@ def cli_parser():
     return namespace['parser']
 
 
-def command_builder():
-    """Load only production command builders; never open SSH or hardware."""
-    source = Path(__file__).parents[1] / 'orchestrator.py'
-    tree = ast.parse(source.read_text())
-    orchestrator = next(
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == 'SwarmOrchestrator'
-    )
-    methods = [
-        node for node in orchestrator.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in ('_get_drone_cmd', '_get_drone_cmd_interaction')
-    ]
-    namespace = {
-        'interaction_adaptive_calibration_args': (
-            interaction_adaptive_calibration_args
-        ),
-        'interaction_application_flag': interaction_application_flag,
-        'interaction_braking_test_args': interaction_braking_test_args,
-        'interaction_contact_attitude_args': interaction_contact_attitude_args,
-        'interaction_mocap_args': interaction_mocap_args,
-        'interaction_targeted_calibration_args': (
-            interaction_targeted_calibration_args
-        ),
-        'DRONE_SCRIPT': 'controller.py',
-    }
-    exec(compile(ast.fix_missing_locations(
-        ast.Module(body=methods, type_ignores=[])
-    ), str(source), 'exec'), namespace)
-    return namespace
+from launcher_test_support import command_builder
 
 
 def mpc_command():
@@ -120,35 +91,16 @@ def mpc_command():
 
 
 class MPCCalibrationLaunchTests(unittest.TestCase):
-    def test_translation_inertia_automatic_bootstrap_contract(self):
+    def test_translation_inertia_keeps_experimental_bootstrap_disabled(self):
         mission_path = (
             Path(__file__).parents[2]
             / 'Interaction' / 'SFL' / 'translation_inertia.yaml'
         )
-        with mission_path.open(encoding='utf-8') as stream:
-            mission = yaml.safe_load(stream)
-        config = mission['Interaction']['config']['wrench_interaction'][
-            'mpc_bootstrap_calibration'
-        ]
-
-        self.assertFalse(config['enabled'])
-        self.assertEqual(config['initial_speed_targets_m_s'], [.25, .45, .65])
-        self.assertEqual(config['repetitions_per_cell'], 2)
-        self.assertEqual(config['automatic_acceleration_tilt_deg'], 8.0)
-        self.assertEqual(config['automatic_release_tolerance_m_s'], .02)
-        self.assertEqual(config['ready_speed_tolerance_m_s'], .03)
-        self.assertEqual(config['ready_position_tolerance_m'], .05)
-        self.assertEqual(config['ready_z_tolerance_m'], .05)
-        self.assertEqual(config['ready_dwell_s'], .30)
-        self.assertEqual(config['ready_timeout_s'], 5.0)
-        self.assertEqual(config['level_warmup_min_s'], .10)
-        self.assertEqual(config['max_sample_gap_s'], .10)
-        self.assertEqual(config['max_acceleration_duration_s'], .85)
-        self.assertEqual(config['max_maneuver_displacement_m'], .60)
-        self.assertEqual(config['boundary_reserve_m'], .10)
-        self.assertEqual(config['max_automatic_tilt_deg'], 12.0)
-        self.assertEqual(config['max_automatic_rate_deg_s'], 100.0)
-        self.assertEqual(config['wrong_way_land_speed_m_s'], .05)
+        mission = yaml.safe_load(mission_path.read_text())
+        config = mission['Interaction']['config']['wrench_interaction']
+        self.assertEqual(config['mpc_bootstrap_calibration'], {'enabled': False})
+        self.assertFalse(config['learning_velocity_mpc_shadow']['enabled'])
+        self.assertFalse(config['learning_velocity_mpc_shadow']['command_authority'])
 
     def test_cli_registers_the_single_flag(self):
         parser = cli_parser()

@@ -22,35 +22,7 @@ from interaction_launch import (  # noqa: E402
 )
 
 
-def command_builder():
-    # Exercise the production launch method without importing the module's
-    # optional networking/hardware packages or constructing an orchestrator.
-    source = Path(__file__).parents[1] / 'orchestrator.py'
-    tree = ast.parse(source.read_text())
-    orchestrator = next(node for node in tree.body if isinstance(node, ast.ClassDef)
-                        and node.name == 'SwarmOrchestrator')
-    methods = [node for node in orchestrator.body if isinstance(node, ast.FunctionDef)
-               and node.name in ('_get_drone_cmd', '_get_drone_cmd_interaction')]
-    module = ast.Module(body=methods, type_ignores=[])
-    namespace = {
-        'interaction_adaptive_calibration_args': interaction_adaptive_calibration_args,
-        'interaction_application_flag': interaction_application_flag,
-        'interaction_braking_test_args': interaction_braking_test_args,
-        'interaction_contact_attitude_args': interaction_contact_attitude_args,
-        'interaction_mocap_args': interaction_mocap_args,
-        'interaction_targeted_calibration_args': interaction_targeted_calibration_args,
-        'DRONE_SCRIPT': 'controller.py',
-        # Read the production constant as data; never execute its shell text.
-        'TIME_SYNC_CMD': ast.literal_eval(next(
-            node.value for node in tree.body
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == 'TIME_SYNC_CMD'
-                for target in node.targets
-            )
-        )),
-    }
-    exec(compile(ast.fix_missing_locations(module), str(source), 'exec'), namespace)
-    return namespace
+from launcher_test_support import command_builder
 
 
 def cli_parser():
