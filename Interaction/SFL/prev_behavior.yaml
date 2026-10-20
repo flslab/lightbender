@@ -1,0 +1,22 @@
+# Previous/default position-hold behavior: take off, hold, then land.
+# Select this mission in orchestrator/swarm_manifest.yaml and launch with:
+#   python orchestrator.py --illumination
+# No Interaction block: no contact detector or interaction response is started.
+name: prev_behavior
+drones:
+  lb11:
+    target: [0.7, 1.0, 1.0, 0.0]
+    waypoints: []
+    delta_t: 60.0  # Hold time in seconds after reaching the target.
+    iterations: 1
+    params:
+      linear: false
+      relative: false
+
+boundary_limits:
+  x_min: -1.5
+  x_max: 1.5
+  y_min: -1.5
+  y_max: 1.5
+  z_min: 0.3
+  z_max: 1.5

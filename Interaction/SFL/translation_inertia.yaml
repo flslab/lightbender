@@ -1,3 +1,6 @@
+# Stable flight baseline: lb11 / firmware 26092803 / offboard 2bbc3992.
+# Scope: ordinary --interaction --sense and XYZ-only --calibrate.
+# Archived experimental tuning remains in the original flight's YAML snapshot.
 name: translation_inertia
 
 drones:
@@ -7,126 +10,122 @@ drones:
 
 Interaction:
   action: translation
-
   config:
-    # Orientation feedback source follows the detector automatically:
-    #   velocity         -> mocap delta-velocity / dt
-    #   momentum_impulse -> bias-corrected onboard external-force estimate
+    # Preserve Vicon source/timing diagnostics and the 60 s repeated-touch loop.
+    vicon_source_metadata: true
     detection_method: momentum_impulse
-
     duration: 60
-    delta_v: 0.13
-    z: -1
-
-    # Keep other environmental effects disabled so mass is the only factor.
-    friction_coefficient: 0
-    base_attitude: 1
-
-    # Retained for the legacy non-position command reference calculation.
-    # Anchored position inertia does not use this look-ahead scalar.
-    v_scalar: [1, 1, 1]
-    # After braking reaches HOVER, keep translation detection disarmed for this
-    # long so controller-induced attitude/acceleration transients cannot start
-    # a false interaction.
     grace_time: 0.5
-    alpha_vel: 1
 
     virtual_object:
-
       current_mass: 0.17
-
-      # Rendering policy:
-      #   virtual motion faster than the native drone -> position (forced)
-      #   virtual motion slower/equal -> honor inertia_command as the priority
-      # Position emphasizes visual motion/coast; orientation emphasizes force.
-      # Active condition: MATCHED MASS + WOOD-ON-WOOD KINETIC FRICTION.
-      # Set inertia_command to position or orientation to choose the slow-case
-      # priority. Faster virtual motion always overrides it to position.
       mass: 0.17
       inertia_command: orientation
       render_acceleration_tolerance_m_s2: 0.02
-
-      # During contact the vehicle remains level (roll=pitch=0) while estimator
-      # and potentiometer forces are recorded. Enable this to restore
-      # force/inertia damping during contact.
+      # Contact-time virtual friction rendering is OFF.
       force_rendering:
         enabled: false
 
-      # The spring signal owns both interaction onset and release. Require a
-      # low-force baseline first, then sustained compression above 0.08 N so a
-      # still-compressed spring cannot retrigger after a previous interaction.
+      # Require an unloaded baseline, then force >= 0.18 N for 30 ms.
       contact_detection:
         source: potentiometer
-        force_threshold_n: 0.08
+        force_threshold_n: 0.18
         onset_dwell_s: 0.03
-
-      # A sufficiently fast decrease starts cancellable attitude braking, but
-      # Contact End is confirmed only after the spring returns close to its
-      # unloaded baseline continuously. To restore the previous observer
-      # release path, set contact_detection.source to wrench_observer, set this
-      # mode to observer_brake, and optionally enable force_rendering above.
+      # A candidate is reversible; FC braking starts only at confirmed release.
       release_behavior:
         mode: potentiometer_coast
-        # The untouched-flight peak-to-peak force noise was about 0.027 N.
-        # Require a larger 0.04 N (0.25 mm) decrease before release.
         force_drop_n: 0.04
+        candidate_lead_drop_n: 0.005
         decrease_rate_n_s: 0.05
-        unloaded_force_n: 0.05
+        unloaded_force_n: 0.17
         unloaded_dwell_s: 0.05
         max_sample_gap_s: 0.15
-        # If unloading stops above the unloaded threshold, cancel early
-        # braking and resume contact rendering instead of coasting forever.
-        candidate_stall_timeout_s: 0.50
-        # Comparison-only virtual model: apply the pre-release force as a short
-        # impulse. This does not affect the braking attitude command.
+        candidate_sensor_stale_timeout_s: 0.25
+        candidate_stall_timeout_s: 0.15
         force_memory_s: 0.02
 
-      # Legacy velocity-detector mapping only:
-      # v_virtual = v_LB * sqrt(current_mass / mass).
-      # The raw and applied gains, plus saturation, are written to the log.
-      max_energy_gain: 4.0
-
-      # Command safety limits. Roll/pitch feedback is capped at 20 degrees.
       max_velocity_command_m_s: 0.60
       max_attitude_deg: 20.0
-
-      # Wood box on a wooden floor: (static, kinetic) = (0.50, 0.30).
+      # Each randomized pair has one high and one low condition. The selected
+      # value sets both static and kinetic mu. Without either friction switch,
+      # these remain logged conditions / virtual-model values, not FC braking.
       static_friction_coefficient: 0.10
-      # Kinetic friction: F = mu_k * mass * g.
       kinetic_friction_coefficient: 0.10
+      two_afc_friction:
+        enabled: true
+        high_mu: 0.10
+        low_mu: 0.02
+        random_seed: null
       friction_min_speed_m_s: 0.02
-      # Air drag: F = 0.5 * rho * Cd * area * speed^2.
       drag_coefficient: 0.0
       frontal_area: 0.019
       air_density: 1.225
 
-    # Used only when detection_method is momentum_impulse. It is ignored by
-    # the velocity detector, so switching the line above is sufficient.
     wrench_interaction:
       state_source: onboard
       shadow_mode: false
-      mass: 0.17
-      inertia: [0.002, 0.002, 0.003]
-      observer_settle_s: 1.0
-      bias_calibration_s: 1.0
-      bias_calibration_timeout_s: 12.0
-      calibration_max_speed_m_s: 0.06
-      calibration_max_angular_rate_rad_s: 0.25
-      minimum_bias_samples: 30
 
-      # Do not let residual go-to motion trigger the first contact. Detection
-      # is enabled only after XY speed remains below the threshold for the
-      # entire dwell interval.
+      # FC owns the complete post-release curve and its position-hold handoff.
+      # Command/log cadence remains 100 Hz / 10 ms in orchestrator.py.
+      firmware_auto_brake:
+        enabled: true
+        mode: scurve
+        command_mode: attitude
+        response_time_s: 0.14  # Release-admission model; not calibrated roll delay.
+        response_model:
+          enabled: true
+          calibration_file: Interaction/attitude_response.json
+        analytic_profile:
+          shape: velocity_scurve
+          execution: attitude
+          tail_s: 1.2
+          single_s: 1.2  # Required by the current parser; inactive for this shape.
+          handoff: curve_endpoint_forward
+          feedback: unified_vicon15
+          attitude_kp: 0.0
+          attitude_kv: 3.0
+          rate_feedforward: false
+          response_compensation: true
+          response_bandwidth: 12.0
+          position_tracking_bandwidth: 3.0
+          acceleration_residual: true
+          state_matched_start: false
+          # Explicitly preserve the stable baseline. Enabling this applies
+          # mu*g as a deceleration cap and changes stopping time/distance.
+          friction_from_interaction: false
+        stop_distance_m: 0.0  # Free stop; default deceleration cap is 3.6 m/s^2.
+        # Default maximum curve duration: 6 s.
+        curve_log:
+          enabled: true
+          user_id: null  # Set for between-user comparisons.
+          trial_id: null # Use the unique run tag.
+
       initial_contact_arming:
         enabled: true
+        apply_after_each_interaction: true
         max_xy_speed_m_s: 0.03
         stationary_dwell_s: 0.5
+        max_sample_gap_s: 0.10
 
+      # Shared PRE-release candidate response only, not FC curve tuning.
+      # Keep these values until physical release is confirmed. FC compensation
+      # instead uses the calibrated response_model file above.
+      control_handoff:
+        coast_attitude_response_delay_s: 0.12
+        coast_attitude_time_constant_s: 0.08
+        coast_attitude_acceleration_scale: 1.0
+        coast_level_terminal_speed_m_s: 0.03
+        coast_max_acceleration_m_s2: 5.0
+        coast_candidate_tail_cancellation_max_acceleration_m_s2: 1.0
+        coast_command_period_s: 0.02  # Conservative command-hold estimate.
+        brake_max_attitude_deg: 30.0
+
+      # Offboard force estimation / diagnostics, separate from the FC 15-state.
+      mass: 0.17
+      inertia: [0.002, 0.002, 0.003]
       motor_model:
         hover_pwm: 31900
         hover_voltage: 7.8
-        # Latest log replay favors the standard roll convention. Keep this
-        # explicit so it can be independently identified from pitch.
         roll_sign_for_world_thrust: 1
         pitch_sign_for_world_thrust: -1
         angular_accel_scale: [0.0, 0.0, 0.0]
@@ -135,40 +134,20 @@ Interaction:
           accel_per_command: 0.0
           damping_per_s: 0.0
           bias_rad_s2: 0.0
-
       momentum_observer:
         linear_gain: [8.0, 8.0, 8.0]
         angular_gain: [12.0, 12.0, 12.0]
         force_measurement_std: [0.020, 0.020, 0.030]
         torque_measurement_std: [0.00020, 0.00020, 0.00025]
         max_dt_s: 0.05
-
       impulse_estimator:
         window_s: 0.08
         minimum_window_s: 0.05
         max_dt_s: 0.05
-        # Fallbacks only. --interaction replaces these three XYZ arrays with
-        # the values saved by --calibrate in Interaction/wrench_calibration.json.
+        # Fallbacks for saved wrench calibration, not FC attitude compensation.
         model_delay_s: [0.01, 0.0, 0.075]
         model_time_constant_s: [0.0, 0.0, 0.0]
         model_acceleration_scale: [1.0, 1.0, 1.0]
-
-      # Used only by --calibrate. --interaction forcibly disables this motion.
-      calibration_excitation:
-        enabled: false
-        start_delay_s: 1.0
-        duration_s: 30.0
-        # X, Y, then Z are excited separately. The one-second return-to-center
-        # gaps avoid stacking aggressive motion on multiple axes.
-        translation_amplitude_m: [0.12, 0.12, 0.07]
-        translation_frequency_hz: [0.35, 0.35, 0.25]
-        translation_profile: sequential_chirp
-        translation_chirp_end_hz: [1.80, 1.80, 1.10]
-        translation_axis_rest_s: 1.0
-        translation_ramp_s: 0.6
-        yaw_amplitude_deg: 0.0
-        yaw_frequency_hz: 0.23
-
       detection:
         translation:
           component_thresholds: [0.08, 0.08, 0.12]
@@ -177,13 +156,7 @@ Interaction:
           onset_evidence_s: 0.05
           release_time_s: 0.15
           release_ratio: 0.55
-          # This experiment is lateral: ignore the persistent Z observer
-          # residual for contact onset, while retaining Z in estimates/logs.
           onset_axes: [0, 1]
-          # At Contact Start, lock the XY interaction direction from velocity
-          # (falling back to force if speed is tiny), then release once signed
-          # projected force falls below the positive threshold, including when
-          # the projected force becomes negative.
           release_projection_axes: [0, 1]
           release_direction_min_norm: 0.02
         yaw:
@@ -195,42 +168,51 @@ Interaction:
           release_time_s: 0.15
           release_ratio: 0.55
 
-      control_handoff:
-        # Freeze the zero-force virtual stopping point at release. Orientation
-        # braking uses remaining distance plus an attitude-response lookahead;
-        # handoff holds the frozen point unless it has already been passed.
-        coast_position_gain_s2: 4.0
-        coast_velocity_gain_s: 2.5
-        coast_max_acceleration_m_s2: 5.0
-        coast_attitude_response_delay_s: 0.12
-        coast_alignment_position_tolerance_m: 0.04
-        coast_alignment_velocity_tolerance_m_s: 0.08
-        # Keep two samples of confirmation without the previous 0.08 s of
-        # continued braking near zero speed.
-        coast_alignment_dwell_s: 0.02
-        # Diagnostic only: timeout never forces a moving vehicle into position
-        # control, because that could recreate the pullback failure.
-        coast_attitude_timeout_s: 1.50
+      # Plain --calibrate: XYZ excitation only, with zero yaw excitation.
+      # Normal interaction disables startup bias collection and excitation.
+      calibration_nominal_position: [0, 0, 1]
+      observer_settle_s: 1.0
+      bias_calibration_s: 1.0
+      bias_calibration_timeout_s: 12.0
+      calibration_max_speed_m_s: 0.06
+      calibration_max_angular_rate_rad_s: 0.25
+      minimum_bias_samples: 30
+      calibration_excitation:
+        enabled: false
+        start_delay_s: 1.0
+        duration_s: 30.0
+        translation_amplitude_m: [0.12, 0.12, 0.07]
+        translation_frequency_hz: [0.35, 0.35, 0.25]
+        translation_profile: sequential_chirp
+        translation_chirp_end_hz: [1.80, 1.80, 1.10]
+        translation_axis_rest_s: 1.0
+        translation_ramp_s: 0.6
+        yaw_amplitude_deg: 0.0
+        yaw_frequency_hz: 0.23
 
-        # Handoff once actual XY speed is low enough to avoid prolonged
-        # attitude damping carrying the vehicle into reverse motion.
-        brake_xy_speed_m_s: 0.20
-        # Minimum total tilt at normal braking speed. It tapers to zero as the
-        # projected speed approaches brake_xy_speed_m_s, reducing overshoot.
-        brake_min_attitude_deg: 3.0
-        brake_min_attitude_taper_speed_m_s: 0.25
-        # 5 m/s^2 horizontal acceleration requires about 27 degrees of tilt.
-        brake_max_attitude_deg: 30.0
-        brake_velocity_gain_s: 2.0
-        # Total attitude + position coast timeout.
-        brake_timeout_s: 1.5
+      # No experimental sweeps or learned-controller authority in this mission.
+      planar_braking_calibration:
+        enabled: false
+      adaptive_braking_calibration:
+        enabled: false
+      online_prediction_calibration:
+        enabled: false
+      mpc_bootstrap_calibration:
+        enabled: false
+      predictive_braking:
+        enabled: false
+      learning_velocity_mpc_shadow:
+        enabled: false
+        command_authority: false
 
+      # Preserve all flight freshness checks and ordinary calibration limits.
       safety:
         max_frame_age_s: 0.10
         max_state_age_s: 0.10
-        # Calibration stays in position hold and may skip a brief radio/host
-        # scheduling gap. Normal interaction still aborts at max_state_age_s.
+        enforce_state_group_skew: false
         calibration_state_dropout_timeout_s: 0.25
+        calibration_state_group_skew_timeout_s: 0.25
+        calibration_max_protocol_clock_lag_s: 10.0
         max_motor_age_s: 0.15
         max_motor_pose_skew_s: 0.03
         max_state_group_skew_s: 0.03
@@ -239,6 +221,7 @@ Interaction:
         require_motor_data: true
         require_calibrated_angular_model_when_active: true
 
+# Measured workspace boundary; unchanged by configuration cleanup.
 boundary_limits:
   x_min: -1.5
   x_max: 1.5

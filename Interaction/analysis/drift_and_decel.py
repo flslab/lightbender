@@ -87,7 +87,8 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     if config_rec is None:
         raise ValueError("No 'Translation Config' record found in log.")
     BASELINE_THRESHOLD = config_rec['data']['delta_v']
-    STABILIZE_TIME = config_rec['data']['Stabilize Time']
+    # STABILIZE_TIME = config_rec['data']['Stabilize Time']
+    STABILIZE_TIME = config_rec['data']['Grace Period']
     print(f"Baseline delta_v from config: {BASELINE_THRESHOLD}")
     print(f"Stabilize time from config:   {STABILIZE_TIME} s")
 
@@ -96,7 +97,7 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
         (r['data']['time'] for r in records
          if r.get('type') == 'events' and r.get('name') == 'Waiting For User Interaction'),
         None
-    )
+    ) + 5
     if wait_time is None:
         raise ValueError("No 'Waiting For User Interaction' event found in log.")
     print(f"Waiting For User Interaction time: {wait_time}")
@@ -406,7 +407,7 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     _save(fig4, '_vy_log.png')
 
     # ── Figure 5 & 6: paper-quality plots ────────────────────────────────────
-    paper_x0 = first_push_times[0] - t_start - 3.0   # absolute offset from wait_time
+    paper_x0 = first_push_times[0] - t_start - 3.0 # absolute offset from wait_time
     paper_x1 = disengage_events[-1]['time'] - t_start + 3.0 + 1.94
 
     # Shift so paper_x0 == 0 on the paper plots
@@ -419,8 +420,8 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     # Only 2 drift spans: before first push, and after the last grace-time end
     last_grace_end = disengage_events[-1]['time'] + STABILIZE_TIME - t_start
     drift_spans = [
-        (0, _paper_rel(first_push_times[0] - t_start)),
-        (_paper_rel(last_grace_end), paper_xlim[1]),
+        (0, _paper_rel(first_push_times[0] - t_start-0.1)),
+        (_paper_rel(last_grace_end) + 1.4, paper_xlim[1]),
     ]
 
     def _paper_style(ax):
@@ -459,9 +460,9 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     # Figure 6: speed paper plot (symlog)
     fig6, ax6 = plt.subplots(figsize=(10, 6))
     ax6.plot(paper_rel_times, speeds_mm, linewidth=1.2, color='tab:blue')
-    ax6.text(x=1, y=98, ha='center', va='bottom', s='92.0', fontsize=FONT-2, color='tab:purple')
+    ax6.text(x=1, y=baseline_mm + 6, ha='center', va='bottom', s=f'{baseline_mm:.1f}', fontsize=FONT-2, color='tab:purple')
     ax6.axhline(baseline_mm, linestyle='--', color='tab:purple', linewidth=1.5,
-                label=r'$S_D = S_Q = S_H = 92.0~mm/s$')
+                label=f'$S_D = S_Q = S_H = {baseline_mm:.1f}~mm/s$')
     ax6.set_yscale('symlog', linthresh=1.0)
     ax6.set_yticks([0, 1, 10, 100, 1000])
     ax6.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(v)}'))
@@ -476,6 +477,20 @@ def analyze(log_path, drift_window_start=2.0, drift_window_end=8.0, decel_search
     fig6.tight_layout()
 
     fig6.savefig('speed_time.png', dpi=300)
+
+    # Figure 7: py paper plot (position in mm)
+    pys_mm = [f['py'] * 1000 for f in frames]
+
+    fig7, ax7 = plt.subplots(figsize=(10, 6))
+    ax7.plot(paper_rel_times, pys_mm, linewidth=1.2, color='black')
+    _add_drift_spans(ax7, y_text=0.05)
+    ax7.set_xlim(*paper_xlim)
+    ax7.set_xlabel('Time (s)', fontsize=FONT)
+    ax7.set_title('mm', loc='left', fontsize=FONT, x=-0.06)
+    _paper_style(ax7)
+    fig7.tight_layout()
+    fig7.savefig('py_time.png', dpi=300)
+
     plt.show()
 
     # --- Max distance against last push heading during grace time ---
@@ -500,7 +515,15 @@ if __name__ == '__main__':
     # path = sys.argv[1] if len(sys.argv) > 1 else \
     #     "../../logs/lb11_translation_2026-04-16_12-05-41.json" # delta v = 0.13, grace time = 2
 
+    #
+    # path = sys.argv[1] if len(sys.argv) > 1 else \
+    #     "../../../fls-cf-offboard-controller/logs/lb11_translation_2026-04-16_16-02-40.json" # delta v = 0.092, grace time = 1.94
+    # "translation_2026-05-04_15-31-21"
+    #
+    # path = sys.argv[1] if len(sys.argv) > 1 else \
+    #     "../../orchestrator/logs/translation_2026-05-04_15-39-29/lb11_translation_2026-05-04_15-39-29.json" # delta v = 0.092, grace time = 1.94
+    # analyze(path)
 
     path = sys.argv[1] if len(sys.argv) > 1 else \
-        "../../../fls-cf-offboard-controller/logs/lb11_translation_2026-04-16_16-02-40.json" # delta v = 0.092, grace time = 1.94
+        "../../orchestrator/logs/translation_2026-05-05_11-45-56/lb11_translation_2026-05-05_11-45-56.json" # delta v = 0.092, grace time = 1.94
     analyze(path)

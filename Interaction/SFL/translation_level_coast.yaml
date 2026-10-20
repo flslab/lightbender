@@ -1,0 +1,64 @@
+# Independent level-attitude interaction; existing translation_inertia.yaml is unchanged.
+# Sensor starts for potentiometer detection or record_potentiometer: true.
+# duration starts after observer startup; covers preparation, contact, coast and grace.
+# All three methods retain synchronized onboard logging and the shared momentum observer.
+# orientation: roll=pitch=yaw_rate=0; position: PID-aware velocity-following XY targets.
+# grace_start: release allows a fresh interaction to preempt coast after grace_time.
+# grace_start: speed_threshold keeps low-speed capture, grace, then stationary rearming.
+# Threshold: ori coast uses signed speed along interaction; pos coast uses full XY speed.
+# Capture keeps remaining release-based grace; position coast projects the hold target forward.
+# Velocity release uses speed hysteresis; it is not independent proof of hand release.
+name: translation_level_coast
+drones:
+  lb11:
+    target:
+    - 0
+    - -1
+    - 1
+    interaction: single
+Interaction:
+  action: translation
+  config:
+    behavior: level_coast
+    detection_method: potentiometer  # potentiometer | model | vel
+    record_potentiometer: false  # true: record every pot sample even with model/vel detection.
+    vicon_source_metadata: true
+    duration: 60
+    grace_time: 0.3
+    level_coast:
+      command_mode: orientation  # orientation | position; during interaction.
+      coast_command_mode: orientation  # orientation | position; after release; omitted inherits command_mode.
+      grace_start: release  # release | speed_threshold (default)
+      follow_yaw: false  # Position commands use yaw=0; orientation commands use yaw rate 0.
+      yaw_rate_damping: false  # Offboard temporarily bypasses yaw-angle PID; no firmware update.
+      stop_speed_m_s: 0.03  # ori coast: signed speed along interaction; pos coast: XY speed.
+      velocity:
+        onset_speed_m_s: 0.1
+        release_speed_m_s: 0.08
+        onset_dwell_s: 0.03
+        release_dwell_s: 0.05
+        max_sample_gap_s: 0.1
+    # These sensor thresholds are used only with detection_method: potentiometer.
+    virtual_object:
+      contact_detection:
+        force_threshold_n: 0.18
+        onset_dwell_s: 0.03
+      release_behavior:
+        force_drop_n: 0.04
+        candidate_lead_drop_n: 0.005
+        decrease_rate_n_s: 0.05
+        unloaded_force_n: 0.17
+        unloaded_dwell_s: 0.05
+        max_sample_gap_s: 0.15
+        candidate_sensor_stale_timeout_s: 0.25
+        candidate_stall_timeout_s: 0.15
+        force_memory_s: 0.02
+    # Shared settings live in the offboard controller repository.
+    wrench_interaction_profile: level_coast
+boundary_limits:
+  x_min: -1.5
+  x_max: 1.5
+  y_min: -1.5
+  y_max: 1.5
+  z_min: 0.3
+  z_max: 1.5

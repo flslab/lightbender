@@ -1,24 +1,178 @@
 name: translation
 drones:
   lb11:
-    target: [0, 0, 1]
+    target: [1, 0, 1]
 #    target: [-0.0126, -1.7515, 1]
     interaction: single
 
 Interaction:
+
   action: translation
   config:
+    # Select the interaction detector for this task:
+    #   velocity          — original delta_v-based interaction
+    #   momentum_impulse  — finite-window motor/momentum-balance interaction
+#    detection_method: momentum_impulse
+    detection_method: momentum_impulse
+
+    # Phase 2B active-control trial: timed X/Y touches. Each detected touch
+    # switches XY from position hold to attitude/z-distance control, so release
+    # is evaluated without the shadow-mode position PID return transient.
+    # The guided sequence lasts 14 s; leave 3 s for final braking/position hold.
+    duration: 17
+
+    # Parameters retained for detection_method: velocity. Switching methods
+    # requires changing only detection_method above.
     delta_v: 0.92
-#    delta_a: 0
     z: -1
     friction_coefficient: 0
     base_attitude: 1
-    duration: 60
     v_scalar: [10, 10, 5]
     grace_time: 0.5
-    alpha_vel: 1               # velocity blending factor (0=state estimator only, 1=mocap only)
-    mass_lightbender: 0.17      # physical mass of the LightBender drone (kg)
-    mass_virtual: 0.17         # mass of the virtual object being pushed (kg); >1 = heavier feel, shorter motion
+    alpha_vel: 1
+
+    wrench_interaction:
+      # Use Crazyflie stateEstimate/angle-rate logs for interaction detection.
+      # The original full-pose mocap observer remains available with: mocap.
+      state_source: onboard
+
+      # Active test: Contact Start switches to zero-roll/pitch z-distance mode;
+      # Contact End starts velocity braking and then captures a new hold point.
+      shadow_mode: false
+      mass: 0.17
+      inertia: [0.002, 0.002, 0.003]
+      observer_settle_s: 1.0
+      bias_calibration_s: 1.0
+      # Bias is accepted only after one continuous stationary interval. Any
+      # motion clears the samples, so takeoff transients cannot become bias.
+      bias_calibration_timeout_s: 12.0
+      calibration_max_speed_m_s: 0.06
+      calibration_max_angular_rate_rad_s: 0.25
+      minimum_bias_samples: 30
+
+      # Disabled for phase 2 so each prompted touch starts from a hover.
+      calibration_excitation:
+        enabled: false
+        start_delay_s: 2.0
+        duration_s: 15.0
+        translation_amplitude_m: [0.15, 0.15, 0.08]
+        translation_frequency_hz: [0.15, 0.19, 0.23]
+        yaw_amplitude_deg: 0.0
+        yaw_profile: chirp
+        yaw_chirp_start_hz: 0.08
+        yaw_chirp_end_hz: 0.45
+        yaw_ramp_s: 2.0
+        # Retained for compatibility when yaw_profile is changed back to sine.
+        yaw_frequency_hz: 0.23
+
+      # Two 1 s active-control touches. Z is intentionally omitted from this
+      # X/Y release test; its voltage behavior is left unchanged.
+      guided_touch_test:
+        enabled: true
+        countdown_s: 3
+        touch_s: 1.0
+        rest_s: 3.0
+        trials: [X+, Y+]
+
+      motor_model:
+        # Initial collective fit from the 2026-07-24 lb11 hover interval.
+        hover_pwm: 31900
+        hover_voltage: 7.8
+        # Both 2026-08-26 no-touch flights show expected X acceleration is
+        # opposite to measured d(stateEstimate.vx)/dt (r=-0.92 to -0.97).
+        pitch_sign_for_world_thrust: -1
+        # Only the third (yaw) value must be fitted before active yaw response.
+        angular_accel_scale: [0.0, 0.0, 0.0]
+        # Filled from the causal controller.cmd_yaw/controller.r_yaw chirp fit.
+        # Keep disabled until validation and held-out test R² both pass.
+        yaw_command_model:
+          enabled: false
+          accel_per_command: 0.0
+          damping_per_s: 0.0
+          bias_rad_s2: 0.0
+
+      observer:
+        position_measurement_std: [0.004, 0.004, 0.006]
+        orientation_measurement_std: [0.015, 0.015, 0.020]
+        linear_disturbance_process_std: [1.5, 1.5, 2.0]
+        angular_disturbance_process_std: [4.0, 4.0, 3.0]
+        max_measurement_nis: 10000
+
+      # Independent onboard-state momentum residual observer. These are
+      # observer bandwidths, not low-pass filters on estimated velocity.
+      momentum_observer:
+        linear_gain: [8.0, 8.0, 8.0]
+        angular_gain: [12.0, 12.0, 12.0]
+        force_measurement_std: [0.020, 0.020, 0.030]
+        torque_measurement_std: [0.00020, 0.00020, 0.00025]
+        max_dt_s: 0.05
+
+      # XYZ contact decisions use no-contact momentum balance over this short
+      # physical window. Existing velocity at the window start is the inertia;
+      # only motor/gravity impulse is used to predict the window end state.
+      impulse_estimator:
+        window_s: 0.08
+        minimum_window_s: 0.05
+        max_dt_s: 0.05
+        # Per-axis alignment identified consistently across both 2026-08-26
+        # no-touch flights. A single 0.30 s delay was an overfit and is removed.
+        model_delay_s: [0.01, 0.0, 0.075]
+        # No additional filtering of the measured velocity or model input.
+        model_time_constant_s: [0.0, 0.0, 0.0]
+
+      detection:
+        translation:           # responds through X, Y, and Z reference offsets
+          component_thresholds: [0.08, 0.08, 0.12]
+          covariance_floor: [0.015, 0.015, 0.025]
+          confidence_sigma: 2.5
+          onset_evidence_s: 0.05
+          release_time_s: 0.15
+          release_ratio: 0.55
+        yaw:                   # retained for future work; currently disabled
+          enabled: false
+          component_thresholds: [0.0010]
+          covariance_floor: [0.00015]
+          confidence_sigma: 2.5
+          onset_evidence_s: 0.05
+          release_time_s: 0.15
+          release_ratio: 0.55
+
+      # Start from the measured release velocity and ramp it to zero. Capture
+      # position only after both the command and measured velocity have settled.
+      control_handoff:
+        brake_xy_acceleration_m_s2: 0.8
+        brake_xy_speed_m_s: 0.20
+        brake_min_attitude_taper_speed_m_s: 0.25
+        brake_max_attitude_deg: 30.0
+        coast_max_acceleration_m_s2: 5.0
+        coast_attitude_response_delay_s: 0.12
+        coast_alignment_dwell_s: 0.02
+        brake_settle_s: 0.30
+
+      admittance:
+        translation_mass: [0.30, 0.30, 0.45]
+        translation_damping: [1.20, 1.20, 1.80]
+        translation_stiffness: [0.0, 0.0, 0.0]
+        max_offset: [0.50, 0.50, 0.30]
+        max_velocity: [0.40, 0.40, 0.20]
+        max_acceleration: [1.0, 1.0, 0.6]
+        yaw_inertia: 0.010
+        yaw_damping: 0.040
+        yaw_stiffness: 0.0
+        max_yaw_offset: 0.785      # radians (45 degrees)
+        max_yaw_rate: 0.50         # rad/s
+        max_yaw_acceleration: 1.20 # rad/s^2
+
+      safety:
+        max_frame_age_s: 0.10
+        max_state_age_s: 0.10
+        max_state_group_skew_s: 0.03
+        max_motor_age_s: 0.15
+        max_motor_pose_skew_s: 0.03
+        max_motor_state_skew_s: 0.03
+        startup_timeout_s: 5.0
+        require_motor_data: true
+        require_calibrated_angular_model_when_active: true
 
 boundary_limits:
   x_min: -7.0

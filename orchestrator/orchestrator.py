@@ -16,16 +16,46 @@ import logging
 from datetime import datetime
 from functools import partial
 from fabric import Connection
+from estimator_calibration_launch import (
+    run_estimator_calibration,
+    validate_estimator_calibration_options,
+)
 from invoke.exceptions import CommandTimedOut
 import concurrent.futures
 
 # Assumed local modules based on your import list
 from logger import setup_logging
+
+# Drifted Pi clocks have already produced unusable timestamps (a protocol clock
+# was once two minutes behind wall time), and git metadata depends on the clock
+# too, so force a resync before pulling. This is deliberately never fatal: a
+# flight must not depend on reaching an NTP server, so a failed or unreachable
+# sync only prints its status and the launch continues. The braces keep the
+# surrounding && chain intact, so a failed cd/source still aborts the launch.
+TIME_SYNC_CMD = (
+    '{ if [ "$(timedatectl show -p NTPSynchronized --value)" != yes ]; then '
+    '(sudo -n timedatectl set-ntp true && '
+    'sudo -n systemctl restart systemd-timesyncd) >/dev/null 2>&1; '
+    'for _ in $(seq 1 20); do '
+    '[ "$(timedatectl show -p NTPSynchronized --value)" = yes ] && break; '
+    'sleep 0.25; done; '
+    'fi; '
+    'echo "[time-sync] $(date -Is) '
+    'synchronized=$(timedatectl show -p NTPSynchronized --value)"; '
+    'true; } && '
+)
+
 from restart import reboot_crazyflie
 from switch_network import apply_network_mode
 from interaction_launch import (
+    contact_attitude_skips_pointcloud_dispatcher,
+    interaction_adaptive_calibration_args,
     interaction_application_flag,
+    interaction_braking_test_args,
+    interaction_contact_attitude_args,
     interaction_mocap_args,
+    interaction_targeted_calibration_args,
+    resolve_interaction_sensing,
     validate_interaction_modes,
 )
 
@@ -47,6 +77,12 @@ class SwarmOrchestrator:
 
         # Configuration State
         self.manifest = self._load_manifest()
+        self.imu_validation_plan = None
+        if getattr(args,'validate_estimator_imu',None):
+            from imu_validation_mission import ImuValidationMission
+            self.imu_validation_plan = ImuValidationMission(args,self.manifest,BASE_DIR)
+            self.logger.info('IMU validation source: %s',self.imu_validation_plan.source)
+            self.logger.info('Using normal Dispatcher UI and swarm launch; gyro zero refreshes on the floor after startup.')
         self.ctrl_cfg = self.manifest['controller']
         if args.http_port:
             self.ctrl_cfg['http_port'] = args.http_port
@@ -60,6 +96,15 @@ class SwarmOrchestrator:
         self.common_cfg = self.manifest['common']
         self.missions = self._load_missions()
         self.mission = self.missions[0] if self.missions else None
+        # Resolve YAML sensor requirements before any network or flight setup.
+        # Keep CLI args intact so one mission cannot enable sensing in the next.
+        for mission in self.missions or [{}]:
+            launch_args = resolve_interaction_sensing(
+                self.args, mission.get('Interaction', {}).get('config', {}))
+            if getattr(self.args, 'interaction', False):
+                self.logger.info('SFL %s: potentiometer sensing %s',
+                                 mission.get('name', '(unnamed)'),
+                                 'enabled' if launch_args.sense else 'disabled')
 
         # Runtime State
         self.tag = None
@@ -160,6 +205,9 @@ class SwarmOrchestrator:
             self.args.interaction
             or getattr(self.args, 'calibrate', False)
             or getattr(self.args, 'braking_test', False)
+            or getattr(self.args, 'mpc', False)
+            or getattr(self.args, 'baseline', False)
+            or getattr(self.args, 'hover', False)
             or getattr(self.args, 'sense', False)
         ):
             return self._get_drone_cmd_interaction(drone)
@@ -179,6 +227,8 @@ class SwarmOrchestrator:
         translation_config = (
             self.mission.get('Interaction', {}).get('config', {})
         )
+        from interaction_launch import resolve_interaction_sensing
+        launch_args = resolve_interaction_sensing(self.args, translation_config)
         wrench_config = translation_config.get('wrench_interaction')
         detection_method = translation_config.get('detection_method')
         if detection_method is None:
@@ -190,12 +240,42 @@ class SwarmOrchestrator:
                 )
                 if wrench_config is not None else 'velocity'
             )
-        wrench_mode = detection_method in ('momentum_impulse', 'mocap_wrench')
-        mocap_args = interaction_mocap_args(drone, wrench_mode=wrench_mode)
-        application_flag = interaction_application_flag(self.args)
-        sense_arg = "--sense" if getattr(self.args, 'sense', False) else ""
+        wrench_mode = (translation_config.get('behavior') == 'level_coast'
+                       or detection_method in ('momentum_impulse', 'mocap_wrench'))
+        mocap_args = interaction_mocap_args(
+            drone,
+            wrench_mode=wrench_mode,
+            contact_attitude_run=getattr(
+                self.args, 'contact_attitude_run', None
+            ),
+            rigidbody_position_only=getattr(
+                self.args, 'vicon_rigidbody_position_only', False
+            ),
+        )
+        application_flag = interaction_application_flag(launch_args)
+        from interaction_launch import interaction_vicon_diagnostic_args
+        mocap_args += interaction_vicon_diagnostic_args(self.args, translation_config)
+        braking_test_args = interaction_braking_test_args(launch_args)
+        adaptive_calibration_args = interaction_adaptive_calibration_args(launch_args)
+        targeted_calibration_args = interaction_targeted_calibration_args(launch_args)
+        planar_calibration_args = (
+            ' --planar-braking-calibration'
+            if getattr(self.args, 'planar_braking_calibration', False) else ''
+        )
+        contact_attitude_args = interaction_contact_attitude_args(launch_args)
+        active_septic_args = (
+            ' --active-septic-brake-test'
+            if getattr(self.args, 'active_septic_brake_test', False) else ''
+        )
+        sense_arg = "--sense" if getattr(launch_args, 'sense', False) else ""
 
         extra_markers = self.manifest.get('apparatus', None)
+        imu_args = ''
+        git_update = 'git pull && '
+        if getattr(self,'imu_validation_plan',None) is not None:
+            imu_args = ' '+self.imu_validation_plan.controller_args(self.tag)
+            # Local feature deployment can contain uncommitted calibration files.
+            git_update = ''
         extra_marker_args = ""
         if extra_markers:
             for m in extra_markers:
@@ -206,9 +286,10 @@ class SwarmOrchestrator:
         cmd = [
             f"cd {self.common_cfg['work_dir']} && "
             f"source {self.common_cfg['venv_path']}/bin/activate && "
-            "git pull && "
+            + TIME_SYNC_CMD +
+            git_update +
             f"nohup python3 {DRONE_SCRIPT} "
-            f"--orchestrated {application_flag} {sense_arg} --tag {self.tag} ",
+            f"--orchestrated {application_flag}{braking_test_args}{adaptive_calibration_args}{targeted_calibration_args}{planar_calibration_args}{contact_attitude_args}{active_septic_args}{imu_args} {sense_arg} --tag {self.tag} ",
             f"--intractable-illumination" if getattr(self.args, 'intractable_illumination', False) else "",
             f"--ground-test " if self.args.ground else "",
             f"{radio_arg} "
@@ -278,6 +359,7 @@ class SwarmOrchestrator:
         cmd = [
             f"cd {self.common_cfg['work_dir']} && ",
             f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            TIME_SYNC_CMD,
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --orchestrated --tag {self.tag} ",
@@ -319,6 +401,7 @@ class SwarmOrchestrator:
         cmd = [
             f"cd {self.common_cfg['work_dir']} && ",
             f"source {self.common_cfg['venv_path']}/bin/activate && ",
+            TIME_SYNC_CMD,
             "git pull && ",
             f"nohup python3 {DRONE_SCRIPT} ",
             f"--illumination --morphing --orchestrated --tag {self.tag} ",
@@ -369,6 +452,9 @@ class SwarmOrchestrator:
             # Push manifest from in-memory state (reflects any arg overrides) without touching local file
             manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
             conn.put(manifest_buf, remote=f"{self.common_cfg['work_dir']}/swarm_manifest.yaml")
+            if getattr(self,'imu_validation_plan',None) is not None and node_id == self.imu_validation_plan.drone_id:
+                self.imu_validation_download = self.imu_validation_plan.stage(conn,self.common_cfg['work_dir'],self.tag,
+                    python=self.common_cfg['venv_path']+'/bin/python')
             # Run command (detach)
             conn.run(cmd, timeout=2, pty=False)
             return True
@@ -379,7 +465,7 @@ class SwarmOrchestrator:
             self.logger.error(f"  > Error booting {node_type} {node_id}: {e}")
             return False
 
-    def _download_file(self, device_cfg, remote_path, local_path, description):
+    def _download_file(self, device_cfg, remote_path, local_path, description, *, required=False):
         self.logger.info(f"Downloading {description} from {device_cfg.get('id', 'CAM')}...")
         try:
             conn = Connection(host=device_cfg['ip'], user=device_cfg['user'], connect_timeout=10)
@@ -387,6 +473,9 @@ class SwarmOrchestrator:
             self.logger.info(f"Saved: {local_path}")
             return True
         except FileNotFoundError:
+            if required:
+                self.logger.warning(f"Required {description} missing; keeping download pending: {remote_path}")
+                return False
             if not self.emergency:
                 self.logger.info(f"File not found, it will be removed from list.")
                 return True
@@ -650,7 +739,20 @@ class SwarmOrchestrator:
                     # Compute init_pos from mission target + default_height
                     self._compute_init_positions()
 
-                if not self.args.skip_dispatcher:
+                skip_pointcloud_dispatcher = (
+                    contact_attitude_skips_pointcloud_dispatcher(self.args)
+                )
+                if skip_pointcloud_dispatcher:
+                    self.logger.info(
+                        "Skipping unlabeled-marker Dispatcher for rigid-body "
+                        "Vicon localization; using manifest identities: %s",
+                        [
+                            f"{drone['id']} -> "
+                            f"{drone.get('obj_name', drone.get('label'))}"
+                            for drone in self.drones
+                        ],
+                    )
+                if not self.args.skip_dispatcher and not skip_pointcloud_dispatcher:
                     from dispatcher import run_dispatch
                     is_mock = self.args.ground or self.args.droneless
                     self.logger.info("Starting Dispatcher logic to match Vicon coordinates...")
@@ -669,11 +771,25 @@ class SwarmOrchestrator:
                     cmd = self._get_drone_cmd(drone)
                     if self._boot_remote_node(drone, cmd, "Drone"):
                         entry = {'drone': drone, 'tag': self.tag}
+                        if getattr(self,'imu_validation_plan',None) is not None:
+                            entry['imu_validation'] = self.imu_validation_download
+                        curve_config = (self.mission.get('Interaction', {}).get('config', {})
+                            .get('wrench_interaction', {}).get('firmware_auto_brake', {})
+                            .get('curve_log', {}) or {})
+                        if (curve_config.get('enabled') is True
+                                and not getattr(self.args, 'droneless', False)
+                                and not getattr(self.args, 'hover', False)
+                                and any(getattr(self.args, mode, False) for mode in
+                                    ('interaction','calibrate','braking_test','mpc','baseline','sense'))):
+                            entry['curve_log'] = True
                         if (
                             (
                                 self.args.interaction
                                 or getattr(self.args, 'calibrate', False)
                                 or getattr(self.args, 'braking_test', False)
+                                or getattr(self.args, 'mpc', False)
+                                or getattr(self.args, 'baseline', False)
+                                or getattr(self.args, 'hover', False)
                             )
                             and self.common_cfg.get('reference_object')
                         ):
@@ -690,6 +806,10 @@ class SwarmOrchestrator:
                                 self.pending_downloads.append(entry)
                         except Exception as e:
                             self.logger.error(f"Error booting drone: {e}")
+
+            if self.imu_validation_plan is not None and not any(
+                    item.get('tag') == self.tag and item.get('imu_validation') for item in self.pending_downloads):
+                raise RuntimeError('IMU validation controller did not start; no launch will be requested')
 
             if self.args.loadcell:
                 from Interaction.loadcell_worker import loadcell_worker
@@ -772,7 +892,21 @@ class SwarmOrchestrator:
             local = f"{local_dir}/{drone['id']}_{tag}.json"
             success = self._download_file(drone, remote, local, "Log")
 
+            # Preserve both device-clock sidecars and retry missing files;
+            # do not silently call an incomplete recording a successful fetch.
+            if item.get('curve_log'):
+                for suffix in ('curves.jsonl', 'states.jsonl'):
+                    sidecar_ok = self._download_file(drone,
+                        f"{work}/logs/{tag}.{suffix}",
+                        f"{local_dir}/{drone['id']}_{tag}.{suffix}",
+                        suffix, required=True)
+                    success = sidecar_ok and success
+
             # Tracker video and log (only if tracker was launched)
+            if item.get('imu_validation'):
+                from imu_validation_mission import retrieve_validation
+                success = retrieve_validation(item,drone,self._download_file,self.logger) and success
+
             if drone.get("tracker"):
                 tr = f"{work}/logs/video.mp4"
                 tl = f"{local_dir}/{drone['id']}_tracker_{tag}.mp4"
@@ -946,6 +1080,8 @@ class SwarmOrchestrator:
         if self.http_server:
             self.http_server.shutdown()
             self.http_server.server_close()
+        if getattr(self,'imu_validation_plan',None) is not None:
+            self.imu_validation_plan.directory.cleanup()
         #
         # if self.zmq_context:
         #     self.zmq_context.term()
@@ -963,6 +1099,9 @@ class SwarmOrchestrator:
                     self.args.interaction
                     or getattr(self.args, 'calibrate', False)
                     or getattr(self.args, 'braking_test', False)
+                    or getattr(self.args, 'mpc', False)
+                    or getattr(self.args, 'baseline', False)
+                    or getattr(self.args, 'hover', False)
                     or self.args.intractable_illumination
                 ):
                     exp_type = "interaction"
@@ -981,11 +1120,44 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
     parser.add_argument("--interaction", action="store_true", help="interaction application")
+    parser.add_argument('--vicon-source-metadata', action='store_true',
+                        help='record optional Vicon source-frame and pipeline timing diagnostics')
+    parser.add_argument(
+        "--active-septic-brake-test", action="store_true",
+        help=("single USB interaction flight with force sensing, rigid-body "
+              "XYZ-only Vicon, and a pre-arm seventh-order plant-fit gate"),
+    )
+    parser.add_argument(
+        '--active-septic-brake-calibration', action='store_true',
+        help=('one USB calibration flight with rigid-body XYZ, the mission '
+              'fixed-pulse planar braking sweep, and strict fit quality gates'),
+    )
+    parser.add_argument(
+        "--vicon-rigidbody-position-only", action="store_true",
+        help=("use each drone's manifest rigid-body name, log its orientation, "
+              "and forward only XYZ to the flight controller"),
+    )
+    parser.add_argument(
+        "--contact-attitude-run", type=int, choices=(1, 2, 3), default=None,
+        help=(
+            "three-flight attitude comparison: 1=pointcloud/onboard mirror, "
+            "2=rigidbody position-only, 3=rigidbody full extpose"
+        ),
+    )
+    parser.add_argument(
+        "--hover", action="store_true",
+        help="move to world (0, 0, 1) and hold until Ctrl+C",
+    )
+    parser.add_argument(
+        "--baseline", action="store_true",
+        help=("baseline flight: HLC go_to from (0,-1,1) to (0,1,1) "
+              "in 3s, hold 5s, then use position commands to return"),
+    )
     parser.add_argument(
         "--sense", action="store_true",
         help=(
-            "record Arduino potentiometer force and enable configured "
-            "potentiometer-release coasting"
+            "legacy optional potentiometer acquisition for standard interactions; "
+            "level_coast uses only its SFL detection_method selection"
         ),
     )
     parser.add_argument(
@@ -993,11 +1165,66 @@ if __name__ == "__main__":
         help="run contact-free wrench model calibration and save it on each drone",
     )
     parser.add_argument(
+        '--calibrate-estimator-imu', action='store_true',
+        help='cage-supported gravity-magnitude IMU calibration on one Pi; optional automatic validation flight capture',
+    )
+    parser.add_argument('--drone-id', default=None,
+                        help='manifest aircraft ID for --calibrate-estimator-imu')
+    parser.add_argument('--imu-firmware-id', default=None,
+                        help='optional actual flashed firmware build/tag; default unknown, no prompt')
+    parser.add_argument('--imu-fixture-id', default=None,
+                        help='optional body-aligned fixture ID; default unknown, no prompt')
+    parser.add_argument('--imu-reference-note', default=None,
+                        help='optional fixture reference description; default unknown, no prompt')
+    parser.add_argument('--imu-duration-s', type=float, default=None,
+                        help='recording seconds per static pose (default: 4)')
+    parser.add_argument('--imu-settle-s', type=float, default=None,
+                        help='settling seconds per static pose (default: 2)')
+    parser.add_argument('--imu-calibration-method', choices=('gravity_norm', 'six_face'), default=None,
+                        help='gravity_norm (default): 18 arbitrary cage-supported poses + 6 validation poses; six_face: exact body-axis fixture')
+    parser.add_argument('--validate-estimator-imu', nargs='?', const='latest', metavar='SAVED_SESSION', default=None,
+                        help='normal Dispatcher UI and swarm launch for saved IMU validation; latest successful calibration by default')
+    parser.add_argument('--imu-auto-flight', action='store_true',
+                        help='after static fitting, run the built-in default-estimator validation flight; no flight YAML needed')
+    parser.add_argument('--imu-flight-config', default=None,
+                        help='optional advanced override of the built-in validation flight; requires --imu-auto-flight')
+    parser.add_argument('--imu-calibrate-gyro', action='store_true',
+                        help='collect checked fixed-axis ±90 degree turns to fit gyro scale and alignment')
+    parser.add_argument(
+        "--targeted-braking-calibration", action="store_true",
+        help=("during --calibrate, collect the fixed 20-degree +/-Y braking "
+              "duration sweep; it is never enabled by default"),
+    )
+    parser.add_argument(
+        "--adaptive-braking-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=("add online-model-guided planar attitude braking to "
+              "--calibrate (default: disabled)"),
+    )
+    parser.add_argument(
         "--braking-test", action="store_true",
         help=(
-            "run six standalone 20-degree, 0.24 s attitude pulse repeat trials "
+            "run standalone 20-degree, 0.24 s attitude pulse repeat trials (six by default) "
             "without XYZ excitation or changing the saved calibration; no --sense"
         ),
+    )
+    parser.add_argument(
+        "--mpc", action="store_true",
+        help=(
+            "run the dedicated airborne LMPC bootstrap calibration and "
+            "collect offline release-to-rest data; this does not enable "
+            "online LMPC command authority"
+        ),
+    )
+    parser.add_argument(
+        "--braking-test-direction", choices=("both", "positive-y", "negative-y"),
+        default=None,
+        help="select repeat-test direction; requires --braking-test (default: both, -Y first)",
+    )
+    parser.add_argument(
+        "--braking-test-repetitions", type=int, choices=range(1, 4), default=None,
+        help="trials per selected direction; requires --braking-test (default: 3; range: 1-3)",
     )
     parser.add_argument("--intractable-illumination", action="store_true",
                         help="interaction application with illumination")
@@ -1020,10 +1247,39 @@ if __name__ == "__main__":
     parser.add_argument("--blender", type=str, default="", help="Connect to Blender monitor via IP:PORT")
 
     args = parser.parse_args()
+    if args.validate_estimator_imu:
+        if args.calibrate_estimator_imu or args.imu_calibrate_gyro:
+            parser.error('--validate-estimator-imu is flight-only; do not combine with fixture collection')
+        args.calibrate = True
     try:
-        validate_interaction_modes(args)
+        if not args.validate_estimator_imu:
+            validate_estimator_calibration_options(args)
+        # Sensing-dependent protocol checks run again after loading SFL.
+        if not args.calibrate_estimator_imu:
+            validate_interaction_modes(args, defer_sensing=True)
     except ValueError as exc:
         parser.error(str(exc))
 
-    orchestrator = SwarmOrchestrator(args)
+    if args.calibrate_estimator_imu:
+        # Fixture collection is motors-off only. Flight rejoins the SAME local
+        # Dispatcher, detached Pi controller and READY/START path as --calibrate.
+        continue_to_validation = args.imu_auto_flight
+        args.imu_fit_only = True
+        try:
+            code = run_estimator_calibration(args, MANIFEST_FILE, BASE_DIR)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if code or not continue_to_validation:
+            raise SystemExit(code)
+        args.calibrate_estimator_imu = False
+        args.imu_auto_flight = False
+        args.validate_estimator_imu = 'latest'
+        args.calibrate = True
+
+    try:
+        orchestrator = SwarmOrchestrator(args)
+    except (ValueError,OSError) as exc:
+        if args.validate_estimator_imu:
+            parser.error(str(exc))
+        raise
     orchestrator.run()
