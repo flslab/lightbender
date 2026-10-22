@@ -1,0 +1,97 @@
+name: Blender add-on package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'addon-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: Python ${{ matrix.python }} runtime and package tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify installer, package boundaries, and reproducibility
+        run: python -m unittest discover -s tests -p 'test_addon_*.py'
+
+  blender-compatibility:
+    name: Blender ${{ matrix.version }} headless checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Archive names and checksum files are from the official release listings.
+        include:
+          - version: '3.0.1'
+            series: '3.0'
+          - version: '3.6.23'
+            series: '3.6'
+          - version: '4.5.3'
+            series: '4.5'
+          - version: '5.0.1'
+            series: '5.0'
+    env:
+      BLENDER_VERSION: ${{ matrix.version }}
+      BLENDER_BASE_URL: https://download.blender.org/release/Blender${{ matrix.series }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Blender system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libasound2 libegl1 libgl1 libice6 libsm6 libx11-6 libxcursor1 \
+            libxfixes3 libxi6 libxinerama1 libxkbcommon0 libxrandr2 \
+            libxrender1 libxxf86vm1
+      - name: Download and verify official Blender archive
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          checksums="blender-${BLENDER_VERSION}.sha256"
+          curl --fail --location --retry 3 --output "$archive" "${BLENDER_BASE_URL}/${archive}"
+          curl --fail --location --retry 3 --output "$checksums" "${BLENDER_BASE_URL}/${checksums}"
+          awk -v filename="$archive" '$2 == filename { print; found=1 } END { if (!found) exit 1 }' "$checksums" | sha256sum --check --strict
+          mkdir blender
+          tar -xJf "$archive" --strip-components=1 -C blender
+          echo "$RUNNER_TEMP/blender" >> "$GITHUB_PATH"
+      - name: Verify preferences, materials, and animation compatibility
+        run: blender --background --factory-startup --python-exit-code 1 --python tests/blender_addon_compatibility.py
+      - name: Verify marker-grid coordinates and timing
+        run: blender --background --factory-startup --python-exit-code 1 --python tests/blender_marker_grid_coordinates.py
+      - name: Verify defaults and generated drone names
+        run: blender --background --factory-startup --python-exit-code 1 --python tests/blender_addon_defaults.py
+      - name: Verify trajectory export
+        run: blender --background --factory-startup --python-exit-code 1 --python tests/blender_trajectory_export.py
+      - name: Verify extracted ZIP and automatic isolated setup
+        run: blender --background --factory-startup --python-exit-code 1 --python tests/blender_addon_standalone.py
+
+  package:
+    needs: [python-tests, blender-compatibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build standalone add-on
+        run: python authoring/build_addon.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lightbender-blender-addon
+          path: |
+            authoring/dist/*.zip
+            authoring/dist/*.zip.sha256
+          if-no-files-found: error

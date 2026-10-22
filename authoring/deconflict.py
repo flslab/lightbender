@@ -2,32 +2,17 @@ import numpy as np
 import random
 import math
 import itertools
-import matplotlib.pyplot as plt
-import matplotlib
-import seaborn as sns
-import pandas as pd
 import logging
 import yaml
 import os
 import argparse
 import time
-from mpl_toolkits.mplot3d import Axes3D  # Required for 3D plotting
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
 
-try:
-    import networkx as nx
-
-    HAS_NX = True
-except ImportError:
-    HAS_NX = False
-
 # from logger.logger import setup_logging
-
-matplotlib.use('macosx')
-sns.set_theme(style="whitegrid", palette="deep")
 
 # setup_logging()
 
@@ -35,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 # When True, 3D plots are rendered without axes, labels, pane colors, or grids.
 CLEAN_3D_PLOTS = True
+
+
+def _plotting_modules():
+    """Keep plotting packages optional for Blender's --no_viz helpers."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid", palette="deep")
+    return plt, sns
 
 
 # --- Data Structures ---
@@ -729,6 +723,7 @@ def visualize_interference_graph(graph: InterferenceGraph,
     Marks nodes based on selection and movement status.
     """
     try:
+        plt, _ = _plotting_modules()
         if abstract_layout:
             fig, ax = plt.subplots(figsize=(10, 8))
         else:
@@ -752,13 +747,18 @@ def visualize_interference_graph(graph: InterferenceGraph,
 
     if abstract_layout:
         # Generate abstract 2D layout
+        try:
+            import networkx as nx
+        except ImportError:
+            nx = None
+
         edges_list = []
         for u in graph.nodes:
             for v in graph.get_neighbors(u):
                 if u < v:
                     edges_list.append((u, v))
 
-        if HAS_NX:
+        if nx is not None:
             G = nx.Graph()
             G.add_nodes_from(graph.nodes)
             G.add_edges_from(edges_list)
@@ -866,6 +866,9 @@ def visualize_conflict_bar_chart(graph: InterferenceGraph):
     Visualizes the number of downwash and overlap conflicts per point using a grouped bar chart.
     """
     try:
+        plt, sns = _plotting_modules()
+        import pandas as pd
+
         fig, ax = plt.subplots(figsize=(8, 4))
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
@@ -904,6 +907,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
     Visualizes the before and after states of the points in the XY plane.
     """
     try:
+        plt, sns = _plotting_modules()
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4), gridspec_kw={'width_ratios': [1, 7]})
     except Exception as e:
         logger.info(f"Visualization setup failed: {e}")
@@ -995,6 +999,7 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
     Shows the actual length (scaled by perspective) vs the max length limit.
     """
     try:
+        plt, _ = _plotting_modules()
         fig = plt.figure(figsize=(12, 10))
         ax = fig.add_subplot(111, projection='3d')
     except Exception as e:

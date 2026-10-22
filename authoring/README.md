@@ -42,16 +42,73 @@ LightBender visual effects for different illuminations:
 
 ### Installing the Add-On
 
-1. In Blender, go to **Edit > Preferences > Add-ons > Install…**, select `blender_addon.py`, and enable the **LightBender Swarm Animator** add-on.
+Install the **standalone release ZIP**, `lightbender_swarm-1.24.3.zip`. It includes
+all authoring scripts; no repository clone or terminal setup is needed.
 
-2. The panel will appear in the **3D Viewport sidebar** under the **LightBender** tab (`N` key to open).
+1. Disable the old single-file **LightBender Swarm Animator** add-on, if installed.
+   The old `blender_addon` and new `lightbender_swarm` modules register the same
+   operators and must not be enabled together.
+2. In Blender **3.0–4.1**, open **Edit > Preferences > Add-ons > Install…**.
+   In **4.2+**, use **Add-ons > menu > Install from Disk…** (legacy add-on).
+   Select the ZIP without extracting it, then enable **LightBender Swarm Animator**.
+3. Enabling starts dependency setup in a background process. Expand the add-on's
+   Preferences to see progress. First setup needs internet access; on Blender
+   versions with **Allow Online Access**, enable it before setup or use
+   **Set Up / Retry Python Tools** afterward. To enable online access open
+   **Edit > Preferences > System** and enable **Allow Online Access** under the Network segment.
+4. Wait for status to change from **Installing Python tools** to **Python tools ready**.
+   Close preferences window and open the **LightBender** tab in the 3D Viewport sidebar (press `N` if hidden).
 
-3. In **Edit > Preferences > Add-ons**, find **LightBender Swarm Animator** and set the **Repository Directory** to the absolute path of your local clone. The path is saved permanently in Blender's user preferences — you only need to set it once.
+Geometry creation, animation editing, marker generation, rendering, and SFL/
+trajectory export do not need downloaded dependencies. Existing environments
+work offline. Setup installs NumPy, SciPy, PyYAML, and svg.path into Blender's
+per-user configuration directory under `lightbender_swarm/venv-<fingerprint>`;
+it does not install packages into Blender itself. The full setup log is
+`lightbender_swarm/setup.log`, with its absolute location shown in Preferences.
+Dependencies are reused until the requirements, Python executable, platform, or
+optional solver profile changes. A failed setup can be retried from Preferences.
+If the bundled Python cannot create a venv, select a **Python 3.9+ executable** in
+**Setup Python (optional)** and retry. Scientific packages must have compatible
+binary wheels for the selected Python and operating system.
 
-The Set Cover policy can use either the built-in branch-and-bound solver or
-Gurobi. To use Gurobi, install `gurobipy` in the external Python environment
-used by the add-on and configure a valid Gurobi license. Other placement
-policies and the built-in solver do not import or require Gurobi at runtime.
+**Set Cover** defaults to the built-in branch-and-bound solver. To use Gurobi,
+check **Install optional Gurobi solver**, click **Set Up / Retry Python Tools**,
+and configure a valid Gurobi license. No plotting or Gurobi dependency is needed
+for the default authoring workflow. The broader `requirements.txt` remains for
+standalone research scripts and their visualization features.
+
+**Live hardware control** is an optional, separate installation. Set
+**Hardware Repository (optional)** to a checkout containing the configured
+`orchestrator/` stack, and **Hardware Python (optional)** to its interpreter (or
+leave it blank to use the checkout's `venv`/`.venv`). The orchestrator's own
+requirements, hardware manifest, network access, and controller deployment are
+managed by that installation; its current code requires Python 3.10+. The
+add-on opens an interactive terminal on Windows, macOS, or Linux so the
+orchestrator's network/camera confirmation prompts remain visible. A supported
+terminal emulator is required on Linux. Authoring and mission export do not
+require these hardware settings.
+
+Preferences belong to an **installed and enabled add-on**. Running the Python
+file in Blender's Text Editor does not install a Preferences entry.
+To retain settings when **Auto-Save Preferences** is disabled, use **Save Preferences**.
+
+### Building a release
+
+```sh
+python3 authoring/build_addon.py
+```
+
+This creates `authoring/dist/lightbender_swarm-<version>.zip` and its `.sha256`
+checksum. The archive contains one `lightbender_swarm/` package, an internal
+file-hash manifest, and only explicitly allowlisted source files. Local results,
+virtual environments, Blender files, hardware manifests, and credentials are
+excluded. Bump `bl_info["version"]` before a new release. The
+**Blender add-on package** GitHub Actions workflow builds downloadable artifacts
+on a manual run or an `addon-v*` tag; it does not publish a release automatically.
+
+The project currently has no applicable root/add-on license file. Choose and
+add the intended license before publishing the add-on publicly; the build does
+not reuse licenses belonging to unrelated firmware dependencies.
 
 ---
 
@@ -84,6 +141,38 @@ Click **Delete All LightBenders** to clear all LightBenders and their associated
 #### Selected LightBender Controls
 
 These controls appear when a LightBender object (`lb*`) is the active selection.
+
+**Light Module Offset (FLU)**
+
+Each drone has a fixed `[x, y, z]` mounting offset in meters from its origin to
+the light-module hinge: **Forward, Left, Up**. This moves the rods, arc, or ring
+with their LEDs, while the drone origin and onboard camera stay in place.
+New drones default to `[0.075, 0.0, 0.015]` m. The offset rotates with the drone's attitude.
+
+SFL import and both illumination and interaction exports preserve this value
+under each drone:
+
+```yaml
+drones:
+  lb4:
+    light_module_offset: [0.04, 0.0, 0.0]
+    # target and waypoints describe the drone origin
+  lb7:
+    light_module_offset: [0.06, 0.01, -0.02]
+```
+
+Missions without the field retain the previous zero-offset geometry. This is
+separate from `position_offset`, which the controller applies to flight
+positions. The controller does not apply `light_module_offset` again: authored
+targets and waypoints already describe drone origins.
+
+The orbiting-arrow generator accepts repeated `--module-offset DRONE_ID X Y Z`
+arguments, for example `--module-offset lb4 0.04 0 0 --module-offset lb7 0.06 0.01 -0.02`.
+It computes `p_drone = p_module - Rz(yaw) * light_module_offset` independently
+for each drone. `--module-offset-x` remains a fallback for drones without an
+explicit value. Regenerate the orbit after changing a mount to retain the same
+light trajectory; editing the SFL metadata or Blender mount alone moves the
+module relative to the existing drone trajectory.
 
 **Servo Angles**
 
@@ -121,18 +210,18 @@ Click **Import Mission** to parse the YAML and build the animation in the viewpo
 
 #### SVG Transform and Place
 
-Reads an SVG shape and places LightBenders along the shape's strokes using available LightBenders in the manifest. If there are not enough LightBenders in the manifest, it will insert additional LightBenders labeld as extra. 
+Reads an SVG shape and places LightBenders along the shape's strokes using available LightBenders in the manifest. If the manifest has too few drones, additional drones use `lb<number>_<type>_extra`. Manually created drones use `lb<number>_<type>`. Generated numeric IDs increase across types and avoid existing objects and reserved manifest IDs; manifest names are preserved. Drone lookup matches `lb<number>` followed by an underscore or the end of the name.
 
 | Field | Description |
 |---|---|
 | **SVG File** | Path to the source SVG file. |
-| **Max Width / Max Height** | Bounding box (m) to scale the SVG layout into. |
-| **Center X / Center Z** | World-space coordinates for the layout center. |
+| **Max Width / Max Height** | Bounding box (m) to scale the SVG layout into; both default to 0.25 m. |
+| **Center X / Center Z** | World-space coordinates for the layout center; default X = 0 m, Z = 1 m. |
 | **Placement Policy** | **VFG** or **Set Cover** — algorithm used to place drones along the shape's strokes. |
 | **Set Cover Solver** | Shown for Set Cover. Choose dependency-free **Built-in B&B** or the lexicographic **Gurobi** MIP backend. |
 | **LED Color** | Python RGB list (e.g. `[255, 0, 0]`) applied to all placed drones. |
 
-Click **Transform and Place** to run the placement. The button is disabled until an SVG file is selected.
+Click **Transform and Place** to run the placement. On success, **Mission Name** is set to the SVG filename without its extension. **Export SFL** defaults to `<Mission Name>.yaml`, including any edits you make to Mission Name. The button is disabled until an SVG file is selected.
 
 ---
 
@@ -209,13 +298,16 @@ Click **Generate Fly-In/Fly-Out** to write keyframes; **Trash** icon clears them
 
 Generates yaw-relative roll and pitch for the selected LightBenders from their
 animated positions. The operator estimates acceleration over the position-keyed
-frame range, smooths it, and writes per-frame roll/pitch keys while preserving
-existing yaw animation.
+frame range, applies a smooth finite-support filter to avoid acceleration, jerk,
+and snap discontinuities, then fits sparse natural-cubic roll and pitch curves.
+The generated Bezier handles keep attitude, angular velocity, and angular
+acceleration continuous while preserving existing yaw animation.
 
 | Field | Description |
 |---|---|
 | **Max Tilt** | Maximum combined roll/pitch angle produced by horizontal acceleration. |
-| **Smoothing** | Number of frames on either side used to smooth acceleration and braking. Higher values produce slower, softer banking. |
+| **Smoothing** | Number of frames on either side used to blend acceleration, jerk, and snap. Higher values produce slower, softer banking. |
+| **Keyframe Tolerance** | Maximum angular detail discarded while reducing the roll/pitch curves. Higher values generate fewer keyframes. |
 
 Click **Apply to Selected** after selecting one or more position-animated
 LightBenders. Applying replaces any existing roll and pitch curves; location
@@ -413,3 +505,9 @@ Optianly you can visualize the final SFL file using the following command:
 ```bash
 python analysis/rmse_all.py --yaml orchestrator/SFL/lb_author_mission.yaml --lit-only
 ```
+
+### Camera-facing projection correction
+
+Use **Physics & Simulation → Correct Facing (Current Frame)** for selected H/V
+modules. The standalone solver, file interface, exact silhouette model and
+limitations are documented in [README_camera_facing.md](README_camera_facing.md).

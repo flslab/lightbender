@@ -1,0 +1,2 @@
+# Optional Set Cover solver. A suitable Gurobi license is required.
+gurobipy>=12,<14

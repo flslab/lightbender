@@ -5,20 +5,15 @@ import yaml
 import os
 import argparse
 import math
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Set
 from abc import ABC, abstractmethod
-import matplotlib
 
-from set_cover_gurobi import (
+from set_cover_gurobi_f import (
     GurobiUnavailableError,
     SetCoverInfeasibleError,
     solve_set_cover_gurobi,
 )
-
-matplotlib.use('macosx')
-
 
 # --- Data Structures ---
 
@@ -843,6 +838,8 @@ class Allocator:
 
 def visualize_candidates(graph: TargetGraph, candidates: List[Dict], max_length: float):
     """Visualizes all generated candidates with depth offsets to show overlaps."""
+    import matplotlib.pyplot as plt
+
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
@@ -896,6 +893,8 @@ def visualize_candidates(graph: TargetGraph, candidates: List[Dict], max_length:
 
 
 def visualize_placement(graph: TargetGraph, lightbenders: List[Point3D]):
+    import matplotlib.pyplot as plt
+
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 

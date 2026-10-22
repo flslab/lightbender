@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 23),
+    "version": (1, 24, 3),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create and animate LightBenders, export SFL, and export ground-truth trajectories",
@@ -23,37 +23,145 @@ from bpy.props import FloatProperty, StringProperty, EnumProperty, BoolProperty,
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
 
+# The release ZIP installs this file as the package's __init__.py. Keep direct
+# source imports available for development and existing headless test scripts.
+if __package__:
+    from . import addon_runtime
+else:
+    import importlib.util
+    _runtime_spec = importlib.util.spec_from_file_location(
+        "lightbender_addon_runtime", os.path.join(os.path.dirname(__file__), "addon_runtime.py"))
+    addon_runtime = importlib.util.module_from_spec(_runtime_spec)
+    _runtime_spec.loader.exec_module(addon_runtime)
+
+ADDON_ID = __package__ or __name__
+_AUTHORING_RUNTIME = None
+
 DRONE_CAMERA_RENDER_FPS = 120
 MARKER_CYLINDER_HEIGHT_M = 0.001
 GRAVITY_M_S2 = 9.80665
 
 class LightBenderAddonPreferences(bpy.types.AddonPreferences):
-    bl_idname = __name__
+    bl_idname = ADDON_ID
 
     repo_dir: StringProperty(
-        name="Repository Directory",
-        description="Absolute path to the local lightbender repository clone",
+        name="Hardware Repository (optional)",
+        description="LightBender checkout containing orchestrator; not needed for authoring or export",
         subtype='DIR_PATH',
         default="",
     )
 
+    python_executable: StringProperty(
+        name="Setup Python (optional)", subtype='FILE_PATH', default="",
+        description="Python 3.9+ executable used to create the private environment; blank uses Blender's Python",
+    )
+    install_gurobi: BoolProperty(
+        name="Install optional Gurobi solver", default=False,
+        description="Also install gurobipy; a valid Gurobi license is required for licensed models",
+    )
+    orchestrator_python: StringProperty(
+        name="Hardware Python (optional)", subtype='FILE_PATH', default="",
+        description="Python from the separate orchestrator environment; blank uses its repository venv",
+    )
+
     def draw(self, context):
-        self.layout.prop(self, "repo_dir")
+        layout = self.layout
+        runtime = get_authoring_runtime()
+        runtime.poll()
+        layout.label(text=runtime.message)
+        layout.prop(self, "python_executable")
+        layout.prop(self, "install_gurobi")
+        layout.operator("drone.setup_python_tools", text="Set Up / Retry Python Tools")
+        layout.label(text="First setup downloads dependencies into a private virtual environment.")
+        layout.label(text="Setup log: " + str(runtime.log_path))
+        layout.separator()
+        layout.label(text="Optional live hardware control:")
+        layout.prop(self, "repo_dir")
+        layout.prop(self, "orchestrator_python")
+
+
+def get_addon_preferences():
+    addon = bpy.context.preferences.addons.get(ADDON_ID)
+    return addon.preferences if addon else None
+
+
+def get_authoring_runtime():
+    global _AUTHORING_RUNTIME
+    if _AUTHORING_RUNTIME is None:
+        storage = bpy.utils.user_resource('CONFIG', path="lightbender_swarm", create=True)
+        _AUTHORING_RUNTIME = addon_runtime.RuntimeManager(storage)
+    return _AUTHORING_RUNTIME
+
+
+def setup_authoring_runtime():
+    prefs = get_addon_preferences()
+    # Blender 4.2+ exposes an explicit online-access setting. Older releases do
+    # not have it; installation is initiated by enabling this add-on.
+    online = getattr(bpy.app, "online_access", True)
+    ready = get_authoring_runtime().start(
+        bpy.path.abspath(prefs.python_executable) if prefs and prefs.python_executable else "",
+        bool(prefs and prefs.install_gurobi), allow_install=online)
+    if get_authoring_runtime().process and not bpy.app.timers.is_registered(poll_authoring_setup):
+        bpy.app.timers.register(poll_authoring_setup, first_interval=1.0)
+    return ready
+
+
+def poll_authoring_setup():
+    runtime = get_authoring_runtime()
+    runtime.poll()
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'PREFERENCES':
+                area.tag_redraw()
+    return 1.0 if runtime.process else None
+
+
+def authoring_setup_timer():
+    setup_authoring_runtime()
+    return None
+
+
+def require_authoring_tools(operator):
+    if setup_authoring_runtime():
+        return True
+    operator.report({'ERROR'}, get_authoring_runtime().message + ". Open add-on Preferences for status and retry")
+    return False
+
+
+def run_authoring(arguments):
+    return get_authoring_runtime().run(arguments)
+
+
+def load_authoring_yaml(path):
+    return get_authoring_runtime().load_yaml(path)
+
+
+class DRONE_OT_setup_python_tools(bpy.types.Operator):
+    bl_idname = "drone.setup_python_tools"
+    bl_label = "Set Up Python Tools"
+    bl_description = "Create or repair the isolated Python environment; progress is written to setup.log"
+
+    def execute(self, context):
+        ready = setup_authoring_runtime()
+        self.report({'INFO'} if ready or get_authoring_runtime().process else {'WARNING'},
+                    get_authoring_runtime().message)
+        return {'FINISHED'}
 
 
 def get_repo_dir():
-    prefs = bpy.context.preferences.addons.get(__name__)
-    if prefs:
-        return prefs.preferences.repo_dir
+    prefs = get_addon_preferences()
+    if prefs and prefs.repo_dir:
+        return os.path.abspath(bpy.path.abspath(prefs.repo_dir))
     return ""
 
 
 def get_authoring_dir():
-    return os.path.abspath(os.path.join(get_repo_dir(), "authoring"))
+    return str(addon_runtime.authoring_directory())
 
 
 def get_orchestrator_dir():
-    return os.path.abspath(os.path.join(get_repo_dir(), "orchestrator"))
+    repository = get_repo_dir()
+    return os.path.join(repository, "orchestrator") if repository else ""
 
 
 def resolve_marker_map_path(filepath):
@@ -62,7 +170,7 @@ def resolve_marker_map_path(filepath):
     if os.path.isfile(resolved):
         return resolved
     repository_path = os.path.join(get_repo_dir(), filepath)
-    if os.path.isfile(repository_path):
+    if get_repo_dir() and os.path.isfile(repository_path):
         return repository_path
     raise FileNotFoundError(filepath)
 
@@ -219,7 +327,7 @@ def update_marker_map_filepath(props, _context):
 #    Illuminate / Interaction Session State
 # ---------------------------------------------------------------------------
 
-_ILLUMINATE_TERMINAL_TAB = {"tab_ref": None}
+_ORCHESTRATOR_PROCESS = {"process": None}
 
 STATIC_INTERACTION_SESSION = {
     "server_socket": None,
@@ -246,14 +354,22 @@ SWARM_MONITOR_SESSION = {
 }
 
 def get_default_interaction_yaml_path(mission_name):
-    return os.path.join(get_orchestrator_dir(), "SFL", f"{mission_name}.yaml")
+    directory = get_orchestrator_dir()
+    return (os.path.join(directory, "SFL", f"{mission_name}.yaml") if directory
+            else bpy.path.abspath(f"//{mission_name}.yaml"))
 
 
 def get_default_orchestrator_path():
     return os.path.join(get_orchestrator_dir(), "orchestrator.py")
 
 
-def get_controller_python():
+def get_orchestrator_python():
+    prefs = get_addon_preferences()
+    if prefs and prefs.orchestrator_python:
+        candidate = bpy.path.abspath(prefs.orchestrator_python)
+        if os.path.isfile(candidate):
+            return candidate
+        raise RuntimeError("Hardware Python does not exist; update add-on Preferences")
     controller_root = get_repo_dir()
     candidates = [
         os.path.join(controller_root, "venv", "bin", "python"),
@@ -264,7 +380,19 @@ def get_controller_python():
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
-    return "python3"
+    raise RuntimeError("Select the orchestrator's Python environment in add-on Preferences")
+
+
+def require_orchestrator(operator):
+    if not get_orchestrator_dir() or not os.path.isfile(get_default_orchestrator_path()):
+        operator.report({'ERROR'}, "Live hardware requires a Hardware Repository in add-on Preferences")
+        return False
+    try:
+        get_orchestrator_python()
+    except RuntimeError as error:
+        operator.report({'ERROR'}, str(error))
+        return False
+    return True
 
 
 def build_led_formula(props):
@@ -305,6 +433,8 @@ def build_interaction_yaml_text(scene, drones_to_export, include_blender_port=Fa
         safe_formula = build_led_formula(drone.drone_props).replace('"', '\\"')
 
         output_lines.append(f"  {drone.name}:")
+        mount = [round(v, 8) for v in drone.drone_props.light_module_offset]
+        output_lines.append(f"    light_module_offset: {mount}")
         output_lines.append(f"    target: [{x}, {y}, {z}, {yaw}]")
         output_lines.append("    waypoints: []")
         output_lines.append(f"    delta_t: {duration}")
@@ -340,8 +470,51 @@ def parse_interaction_ips(raw_ips):
     return [ip for ip in re.split(r"[\s,;]+", raw_ips.strip()) if ip]
 
 
+def lightbender_name_match(name):
+    """Match a drone ID, with an optional descriptive suffix."""
+    return re.match(r"^lb(\d+)(?:_|$)", name)
+
+
+def is_lightbender(obj):
+    return lightbender_name_match(obj.name) is not None
+
+
+def next_lightbender_name(drone_type, extra=False, reserved=()):
+    """Allocate one sequential ID across types, scenes, and manifest reserves."""
+    names = [obj.name for obj in bpy.data.objects] + list(reserved)
+    ids = [int(match.group(1)) for name in names
+           for match in [lightbender_name_match(name)] if match]
+    number = max(ids, default=-1) + 1
+    suffix = drone_type.removeprefix('TYPE_')
+    return f"lb{number}_{suffix}" + ("_extra" if extra else "")
+
+
 def get_lb_scene_objects(scene):
-    return [obj for obj in scene.objects if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj]
+    return [obj for obj in scene.objects if is_lightbender(obj)]
+
+
+def get_action_fcurves(obj):
+    """Return curves belonging to this object's assigned Action slot.
+
+    Blender 4.4 introduced slotted Actions. Its legacy ``action.fcurves``
+    accessor addresses only the first slot and was removed in Blender 5.0.
+    Keep the legacy path for Blender 3.0 through 4.3, and use the object's
+    channelbag on newer versions, including when its Action is still empty.
+    """
+    animation_data = obj.animation_data
+    action = animation_data.action if animation_data else None
+    if action is None:
+        return ()
+    if not hasattr(action, "slots"):
+        return action.fcurves
+
+    slot = animation_data.action_slot
+    if slot is None:
+        slot = action.slots.new(id_type='OBJECT', name=obj.name)
+        animation_data.action_slot = slot
+    layer = action.layers[0] if action.layers else action.layers.new("LightBender")
+    strip = layer.strips[0] if layer.strips else layer.strips.new(type='KEYFRAME')
+    return strip.channelbag(slot, ensure=True).fcurves
 
 
 def get_location_fcurves(obj):
@@ -352,7 +525,7 @@ def get_location_fcurves(obj):
         return {}
     return {
         fcurve.array_index: fcurve
-        for fcurve in action.fcurves
+        for fcurve in get_action_fcurves(obj)
         if fcurve.data_path == "location" and 0 <= fcurve.array_index < 3
     }
 
@@ -660,19 +833,13 @@ def read_manifest_ips(id_filter=None):
 
 
 def launch_orchestrator(target_script, flags, dark_room=False):
-    python_exec = get_controller_python()
-    cmds = [f"'{python_exec}' '{target_script}'", *flags, "--blender '127.0.0.1:5598'"]
+    command = [get_orchestrator_python(), target_script, *flags,
+               "--blender", "127.0.0.1:5598"]
     if dark_room:
-        cmds.append("--dark")
-    cmd_str = " ".join(cmds)
-
-    apple_script = f'''
-    tell application "Terminal"
-        set newTab to do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
-        activate
-    end tell
-    '''
-    subprocess.Popen(["osascript", "-e", apple_script])
+        command.append("--dark")
+    process = addon_runtime.launch_terminal(command, os.path.dirname(target_script))
+    _ORCHESTRATOR_PROCESS["process"] = process
+    return process
 
 
 def flush_static_interaction_messages():
@@ -763,13 +930,13 @@ def resolve_lb_by_message_id(scene, raw_id):
         return None
     raw_str = str(raw_id)
     exact = scene.objects.get(raw_str)
-    if exact and "servo_1" in exact:
+    if exact and is_lightbender(exact):
         return exact
-    if raw_str.isdigit():
-        return scene.objects.get(f"lb{raw_str}")
-    match = re.search(r"(\d+)", raw_str)
+    match = re.fullmatch(r"(?:lb)?(\d+)(?:_.*)?", raw_str)
     if match:
-        return scene.objects.get(f"lb{match.group(1)}")
+        number = int(match.group(1))
+        return next((obj for obj in get_lb_scene_objects(scene)
+                     if int(lightbender_name_match(obj.name).group(1)) == number), None)
     return None
 
 
@@ -1350,7 +1517,30 @@ class MarkerGridProperties(bpy.types.PropertyGroup):
     )
 
 
+def update_light_module_offset(props, context):
+    """Move the light-module roots in drone FLU, leaving the drone/camera alone."""
+    drone = props.id_data
+    if not isinstance(drone, bpy.types.Object):
+        return
+    for child in drone.children:
+        # Rods, arcs and rings own LEDs directly. This also supports objects
+        # created by older add-on versions without relying on mutable names.
+        if child.type == 'MESH' and any("led_index" in led for led in child.children):
+            child.location = props.light_module_offset
+
+
 class DroneProperties(bpy.types.PropertyGroup):
+    light_module_offset: FloatVectorProperty(
+        name="Light Module Offset (FLU)",
+        description="Mounting offset from drone origin to module hinge in metres: Forward, Left, Up",
+        size=3,
+        default=(0.075, 0.0, 0.015),
+        subtype='TRANSLATION',
+        unit='LENGTH',
+        options=set(),  # A fixed hardware mounting value, not an animation.
+        update=update_light_module_offset,
+    )
+
     drone_type: EnumProperty(
         name="Type",
         description="Light Element Type",
@@ -1602,13 +1792,13 @@ class DroneProperties(bpy.types.PropertyGroup):
     import_max_width: FloatProperty(
         name="Max Width",
         description="Maximum width for the scaled layout",
-        default=2.0
+        default=0.25
     )
 
     import_max_length: FloatProperty(
         name="Max Height",
         description="Maximum height for the scaled layout",
-        default=1.0
+        default=0.25
     )
 
     import_cx: FloatProperty(
@@ -1620,7 +1810,7 @@ class DroneProperties(bpy.types.PropertyGroup):
     import_cy: FloatProperty(
         name="Center Z",
         description="Target Z coordinate for the center",
-        default=0.0
+        default=1.0
     )
 
     import_policy: EnumProperty(
@@ -2117,7 +2307,7 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         # 1. Create Main Drone Body
         bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
         drone_base = context.active_object
-        drone_base.name = "LightBender_Base"
+        drone_base.name = next_lightbender_name(self.drone_type)
         drone_base.empty_display_size = 0.1
 
         # 2. Add Properties
@@ -2245,6 +2435,9 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
         cam_obj.location = (0, 0, 0)
         cam_obj.rotation_euler = (0, 0, math.radians(-90.0))
 
+        # Apply the default mount after the module geometry exists.
+        update_light_module_offset(drone_base.drone_props, context)
+
         # Select Base
         bpy.ops.object.select_all(action='DESELECT')
         drone_base.select_set(True)
@@ -2262,7 +2455,7 @@ class DRONE_OT_delete_all(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         # Find all LightBenders (bases). They are empty objects with "servo_1" and "servo_2" properties.
-        lbs = [obj for obj in scene.objects if "servo_1" in obj and "servo_2" in obj]
+        lbs = [obj for obj in scene.objects if is_lightbender(obj)]
         to_delete = set()
         for lb in lbs:
             def collect_hierarchy(o):
@@ -2453,7 +2646,7 @@ class DRONE_OT_add_drones_to_group(bpy.types.Operator):
 
         added = 0
         for obj in context.selected_objects:
-            if "servo_1" in obj and obj.name.startswith("lb"):
+            if is_lightbender(obj):
                 # Avoid duplicates
                 exists = any(item.obj_ptr == obj for item in group.drones)
                 if not exists:
@@ -2541,9 +2734,8 @@ class DRONE_OT_reverse_de_direction(bpy.types.Operator):
 
         v_min = lb["de_orig_vmin"]
         v_max = lb["de_orig_vmax"]
-        action = lb.animation_data.action
-        fc0 = action.fcurves.find('drone_props.led_pointers[0].value')
-        fc1 = action.fcurves.find('drone_props.led_pointers[1].value')
+        fc0 = get_action_fcurves(lb).find('drone_props.led_pointers[0].value')
+        fc1 = get_action_fcurves(lb).find('drone_props.led_pointers[1].value')
 
         if not fc0 or not fc1:
             return {'FINISHED'}
@@ -2590,10 +2782,10 @@ class DRONE_OT_clear_draw_erase(bpy.types.Operator):
             # Remove pointer keyframe fcurves
             if lb.animation_data and lb.animation_data.action:
                 for ptr_idx in [0, 1]:
-                    fc = lb.animation_data.action.fcurves.find(
+                    fc = get_action_fcurves(lb).find(
                         f'drone_props.led_pointers[{ptr_idx}].value')
                     if fc:
-                        lb.animation_data.action.fcurves.remove(fc)
+                        get_action_fcurves(lb).remove(fc)
 
             # Restore original pointer values saved during generation
             if len(lb.drone_props.led_pointers) >= 2:
@@ -2755,7 +2947,7 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
         f_end = int(round((t_hold + t_trans) * fps))
 
         lbs = [obj for obj in scene.objects
-               if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+               if is_lightbender(obj)]
 
         if not lbs:
             self.report({'WARNING'}, "No LightBenders found in the scene.")
@@ -2962,7 +3154,7 @@ class DRONE_OT_generate_fold(bpy.types.Operator):
         # Set all fold-inserted keyframes to LINEAR
         for lb in lbs:
             if lb.animation_data and lb.animation_data.action:
-                for fc in lb.animation_data.action.fcurves:
+                for fc in get_action_fcurves(lb):
                     for kp in fc.keyframe_points:
                         kp.interpolation = 'LINEAR'
 
@@ -2982,23 +3174,22 @@ class DRONE_OT_clear_fold(bpy.types.Operator):
         scene = context.scene
 
         lbs = [obj for obj in scene.objects
-               if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+               if is_lightbender(obj)]
 
         cleared = 0
         for lb in lbs:
             if lb.animation_data and lb.animation_data.action:
-                action = lb.animation_data.action
                 for dp_path in ('["servo_1"]', '["servo_2"]',
                                 'drone_props.led_pointers[0].value',
                                 'drone_props.led_pointers[1].value'):
-                    fc = action.fcurves.find(dp_path)
+                    fc = get_action_fcurves(lb).find(dp_path)
                     if fc:
-                        action.fcurves.remove(fc)
+                        get_action_fcurves(lb).remove(fc)
                 # Remove location fcurves inserted by fold alignment
                 for axis_i in range(3):
-                    fc = action.fcurves.find('location', index=axis_i)
+                    fc = get_action_fcurves(lb).find('location', index=axis_i)
                     if fc:
-                        action.fcurves.remove(fc)
+                        get_action_fcurves(lb).remove(fc)
 
             dp = lb.drone_props
             if "fold_orig_s1" in lb:
@@ -3167,11 +3358,11 @@ class DRONE_OT_apply_global_expression(bpy.types.Operator):
         drones_to_affect = []
         if self.apply_to_all:
             for obj in scene.objects:
-                if re.match(r"^lb\d+", obj.name) and "servo_1" in obj:
+                if is_lightbender(obj):
                     drones_to_affect.append(obj)
         else:
             for obj in context.selected_objects:
-                if re.match(r"^lb\d+", obj.name) and "servo_1" in obj:
+                if is_lightbender(obj):
                     drones_to_affect.append(obj)
                     
         if not drones_to_affect:
@@ -3292,10 +3483,10 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
 
             # Remove old keyframes for pointers
             if lb.animation_data and lb.animation_data.action:
-                fc1 = lb.animation_data.action.fcurves.find('drone_props.led_pointers[0].value')
-                if fc1: lb.animation_data.action.fcurves.remove(fc1)
-                fc2 = lb.animation_data.action.fcurves.find('drone_props.led_pointers[1].value')
-                if fc2: lb.animation_data.action.fcurves.remove(fc2)
+                fc1 = get_action_fcurves(lb).find('drone_props.led_pointers[0].value')
+                if fc1: get_action_fcurves(lb).remove(fc1)
+                fc2 = get_action_fcurves(lb).find('drone_props.led_pointers[1].value')
+                if fc2: get_action_fcurves(lb).remove(fc2)
 
         # 2. Time Logic & Pathfinding
         current_time = 0.0
@@ -3542,7 +3733,7 @@ class DRONE_OT_generate_draw_erase(bpy.types.Operator):
                 ptr.value = val
                 ptr.keyframe_insert(data_path="value", frame=frame)
 
-            fc = lb.animation_data.action.fcurves.find(f'drone_props.led_pointers[{ptr_idx}].value')
+            fc = get_action_fcurves(lb).find(f'drone_props.led_pointers[{ptr_idx}].value')
             if fc:
                 for kp in fc.keyframe_points:
                     kp.interpolation = 'LINEAR'
@@ -3565,7 +3756,7 @@ def revert_drone_error(obj):
         obj.location.z -= dz
 
         if obj.animation_data and obj.animation_data.action:
-            for fc in obj.animation_data.action.fcurves:
+            for fc in get_action_fcurves(obj):
                 if fc.data_path == "location":
                     if fc.array_index == 1:  # Y axis
                         for kp in fc.keyframe_points:
@@ -3598,7 +3789,7 @@ class DRONE_OT_apply_error(bpy.types.Operator):
 
         for obj in context.scene.objects:
             # Match names like lb1, lb2, lb007, etc.
-            if re.match(r"^lb\d+", obj.name):
+            if is_lightbender(obj):
                 # Ensure we reset any previous error before applying a new one
                 # so the distance remains exactly as requested from original path
                 revert_drone_error(obj)
@@ -3613,7 +3804,7 @@ class DRONE_OT_apply_error(bpy.types.Operator):
 
                 # Offset Animation F-Curves if they exist
                 if obj.animation_data and obj.animation_data.action:
-                    for fc in obj.animation_data.action.fcurves:
+                    for fc in get_action_fcurves(obj):
                         if fc.data_path == "location":
                             if fc.array_index == 1:  # Y
                                 for kp in fc.keyframe_points:
@@ -3648,7 +3839,7 @@ class DRONE_OT_reset_error(bpy.types.Operator):
     def execute(self, context):
         reset_count = 0
         for obj in context.scene.objects:
-            if re.match(r"^lb\d+", obj.name):
+            if is_lightbender(obj):
                 if revert_drone_error(obj):
                     reset_count += 1
 
@@ -3668,7 +3859,7 @@ class DRONE_OT_apply_drift(bpy.types.Operator):
         applied_count = 0
 
         for obj in context.scene.objects:
-            if re.match(r"^lb\d+", obj.name):
+            if is_lightbender(obj):
                 # Ensure animation data exists
                 if not obj.animation_data:
                     obj.animation_data_create()
@@ -3677,12 +3868,12 @@ class DRONE_OT_apply_drift(bpy.types.Operator):
 
                 # Apply noise to X, Y, Z location channels
                 for i in range(3):
-                    fc = obj.animation_data.action.fcurves.find('location', index=i)
+                    fc = get_action_fcurves(obj).find('location', index=i)
 
                     # We need a keyframe for the fcurve to exist
                     if not fc:
                         obj.keyframe_insert(data_path="location", index=i, frame=context.scene.frame_current)
-                        fc = obj.animation_data.action.fcurves.find('location', index=i)
+                        fc = get_action_fcurves(obj).find('location', index=i)
 
                     # Remove any existing noise modifiers so we don't stack them
                     for mod in list(fc.modifiers):
@@ -3715,11 +3906,11 @@ class DRONE_OT_reset_drift(bpy.types.Operator):
     def execute(self, context):
         reset_count = 0
         for obj in context.scene.objects:
-            if re.match(r"^lb\d+", obj.name):
+            if is_lightbender(obj):
                 if obj.animation_data and obj.animation_data.action:
                     cleared = False
                     for i in range(3):
-                        fc = obj.animation_data.action.fcurves.find('location', index=i)
+                        fc = get_action_fcurves(obj).find('location', index=i)
                         if fc:
                             for mod in list(fc.modifiers):
                                 if mod.type == 'NOISE':
@@ -3768,7 +3959,7 @@ def revert_deconflict_stagger(obj):
                     ptr.value = 25.0 + (ptr.value - 25.0) * inv_scale
 
                 if obj.animation_data and obj.animation_data.action:
-                    for fc in obj.animation_data.action.fcurves:
+                    for fc in get_action_fcurves(obj):
                         if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
                             for kp in fc.keyframe_points:
                                 kp.co.y = 25.0 + (kp.co.y - 25.0) * inv_scale
@@ -3779,6 +3970,121 @@ def revert_deconflict_stagger(obj):
     return restored
 
 
+class DRONE_OT_camera_facing(bpy.types.Operator):
+    """Correct selected two-rod silhouettes at the current frame"""
+    bl_idname = "drone.camera_facing"
+    bl_label = "Correct Facing (Current Frame)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    margin_degrees: FloatProperty(name="Facing Margin (deg)", default=10, min=0.1, max=89)
+    min_depth_scale: FloatProperty(name="Minimum Depth Scale", default=0.5, min=0.01, max=1)
+
+    def execute(self, context):
+        if not require_authoring_tools(self):
+            return {'CANCELLED'}
+        import ast
+        import tempfile
+        from mathutils import Matrix
+
+        scene = context.scene
+        camera = scene.camera
+        if camera is None or camera.data.type != 'PERSP':
+            self.report({'ERROR'}, "Select a perspective scene camera")
+            return {'CANCELLED'}
+        drones = [o for o in context.selected_objects if is_lightbender(o)]
+        if not drones:
+            self.report({'ERROR'}, "Select at least one LightBender")
+            return {'CANCELLED'}
+        points, colors = [], {}
+        try:
+            for obj in drones:
+                props = obj.drone_props
+                if props.drone_type not in ('TYPE_H', 'TYPE_V'):
+                    raise ValueError(f"{obj.name}: only straight H/V modules are supported")
+                if (obj.parent or obj.constraints or obj.rotation_mode != 'XYZ'
+                        or any(abs(s-1) > 1e-6 for s in obj.scale)):
+                    raise ValueError(f"{obj.name}: requires unparented, unconstrained XYZ rotation and unit scale")
+                if props.led_mode == 'EXPRESSION':
+                    color = ast.literal_eval(props.led_formula)
+                    lo, hi = 0.0, 50.0
+                else:
+                    ptrs = props.led_pointers
+                    if (len(ptrs) != 2 or ast.literal_eval(props.led_base_color) != [0, 0, 0]
+                            or ast.literal_eval(ptrs[1].color_expression) != [0, 0, 0]):
+                        raise ValueError(f"{obj.name}: use a single uniform lit interval with black outside")
+                    lo, hi = [p.value for p in ptrs]
+                    color = ast.literal_eval(ptrs[0].color_expression)
+                if not isinstance(color, (list, tuple)) or len(color) != 3 or not all(isinstance(c, (int, float)) and math.isfinite(c) and 0 <= c <= 255 for c in color):
+                    raise ValueError(f"{obj.name}: a constant RGB color is required")
+                if not 0 <= lo <= 25 <= hi <= 50:
+                    raise ValueError(f"{obj.name}: lit interval must include hinge index 25")
+                colors[obj.name] = list(color)
+                R = obj.matrix_world.to_3x3()
+                hinge = obj.matrix_world.translation + R @ Vector(props.light_module_offset)
+                if (camera.matrix_world.inverted() @ hinge).z >= -camera.data.clip_start:
+                    raise ValueError(f"{obj.name}: module must be in front of the camera near plane")
+                pos = obj.matrix_world.translation
+                angles = obj.matrix_world.to_euler('XYZ')
+                # LEDs are 2.5 mm ahead of the mechanical rod hinge plane.
+                mount = list(props.light_module_offset)
+                mount[0] += 0.0025
+                points.append(dict(id=obj.name, type=props.drone_type, x=pos.x, y=pos.y, z=pos.z,
+                                   yaw=math.degrees(angles.z), pitch=math.degrees(angles.y), roll=math.degrees(angles.x),
+                                   angle_1=float(obj['servo_1']), angle_2=float(obj['servo_2']),
+                                   length_1=(25-lo)*0.00624, length_2=min(24, hi-25)*0.00624,
+                                   max_lengths=[25*0.00624, 24*0.00624], light_module_offset=mount))
+            document = dict(camera=list(camera.matrix_world.translation), points=points,
+                            margin_degrees=self.margin_degrees, min_depth_scale=self.min_depth_scale)
+            script = os.path.join(get_authoring_dir(), 'camera_facing.py')
+            with tempfile.TemporaryDirectory(prefix='lightbender-facing-') as directory:
+                source, output = [os.path.join(directory, n) for n in ('input.json', 'output.json')]
+                with open(source, 'w') as f:
+                    json.dump(document, f, allow_nan=False)
+                result = run_authoring([script, '--input_file', source, '--output_file', output])
+                if result.returncode:
+                    raise ValueError(result.stderr.strip())
+                with open(output) as f:
+                    solved = json.load(f)['points']
+            failures = [f"{p['id']}: {p.get('reason', p['status'])}" for p in solved if p['status'] not in ('corrected', 'unchanged')]
+            if failures:
+                raise ValueError('; '.join(failures))
+            if {p['id'] for p in solved} != {o.name for o in drones}:
+                raise ValueError('Solver returned unexpected drone IDs')
+            # Apply only after the entire selection has feasible solutions.
+            corrected = 0
+            for p in solved:
+                if p['status'] != 'corrected':
+                    continue
+                obj = scene.objects[p['id']]
+                props = obj.drone_props
+                obj.location = (p['x'], p['y'], p['z'])
+                obj.rotation_euler = (0, 0, math.radians(p['yaw']))
+                obj['servo_1'], obj['servo_2'] = p['angle_1'], p['angle_2']
+                if props.led_mode == 'EXPRESSION':
+                    props.led_mode = 'POINTERS'
+                    props.led_base_color = '[0, 0, 0]'
+                    props.led_pointers.clear()
+                    for color in (colors[obj.name], [0, 0, 0]):
+                        props.led_pointers.add().color_expression = str(color)
+                props.led_pointers[0].value = 25 - p['length_1']/0.00624
+                props.led_pointers[1].value = 25 + p['length_2']/0.00624 + 1e-5
+                if obj.animation_data and obj.animation_data.action:
+                    obj.keyframe_insert(data_path='location', frame=scene.frame_current)
+                    obj.keyframe_insert(data_path='rotation_euler', frame=scene.frame_current)
+                    for key in ('servo_1', 'servo_2'):
+                        obj.keyframe_insert(data_path=f'["{key}"]', frame=scene.frame_current)
+                    for ptr in props.led_pointers:
+                        ptr.keyframe_insert(data_path='value', frame=scene.frame_current)
+                corrected += 1
+            context.view_layer.update()
+            evaluate_leds(scene)
+            self.report({'INFO'}, f"Corrected {corrected} of {len(drones)} LightBenders at frame {scene.frame_current}")
+            return {'FINISHED'}
+        except (ValueError, SyntaxError, TypeError, KeyError, OSError) as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+
 class DRONE_OT_deconflict_stagger(bpy.types.Operator):
     """Call deconflict.py to stagger LightBenders based on camera perspective"""
     bl_idname = "drone.deconflict_stagger"
@@ -3786,6 +4092,8 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        if not require_authoring_tools(self):
+            return {'CANCELLED'}
         import os
         import subprocess
         import re
@@ -3804,7 +4112,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         # Gather drones
         drones = []
         for obj in scene.objects:
-            m = re.match(r"^lb(\d+)", obj.name)
+            m = lightbender_name_match(obj.name)
             if m:
                 drones.append(obj)
 
@@ -3829,7 +4137,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         frames_to_stagger = set()
         for obj in drones:
             if obj.animation_data and obj.animation_data.action:
-                for fc in obj.animation_data.action.fcurves:
+                for fc in get_action_fcurves(obj):
                     if fc.data_path == "location":
                         for kp in fc.keyframe_points:
                             frames_to_stagger.add(int(round(kp.co.x)))
@@ -3839,22 +4147,10 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
             frames_to_stagger = [scene.frame_current]
 
         import tempfile
-        try:
-            addon_dir = os.path.dirname(os.path.realpath(__file__))
-        except NameError:
-            addon_dir = get_authoring_dir()
-
-        input_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_in.yaml")
-        output_yaml = os.path.join(tempfile.gettempdir(), "temp_deconflict_out.yaml")
-
-        deconflict_script = os.path.join(addon_dir, "deconflict.py")
-        if not os.path.exists(deconflict_script):
-            alt_path = os.path.join(get_authoring_dir(), "deconflict.py")
-            if os.path.exists(alt_path):
-                deconflict_script = alt_path
-            else:
-                self.report({'ERROR'}, f"Cannot find deconflict.py at {deconflict_script}")
-                return {'CANCELLED'}
+        workspace = tempfile.TemporaryDirectory(prefix="lightbender-stagger-")
+        input_yaml = os.path.join(workspace.name, "input.yaml")
+        output_yaml = os.path.join(workspace.name, "output.yaml")
+        deconflict_script = os.path.join(get_authoring_dir(), "deconflict.py")
 
         original_frame = scene.frame_current
         applied_at_least_once = False
@@ -3871,7 +4167,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
             points = []
             for obj in drones:
-                m = re.match(r"^lb(\d+)", obj.name)
+                m = lightbender_name_match(obj.name)
                 d_id = int(m.group(1))
 
                 a1 = obj.get("servo_1", 0.0)
@@ -3910,22 +4206,21 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                 scene.frame_set(original_frame)
                 return {'CANCELLED'}
 
-            cmd_str = (
-                f"python3 '{deconflict_script}' "
-                f"--input_file '{input_yaml}' "
-                f"--output_file '{output_yaml}' "
-                f"--threshold_overlap {props.deconflict_overlap} "
-                f"--threshold_downwash {props.deconflict_downwash} "
-                f"--selection_method {props.deconflict_selection} "
-                f"--resolution_order {props.deconflict_resolution} "
-                f"--trajectory_type {props.deconflict_trajectory} "
-                f"--move_direction {props.deconflict_direction} "
-                f"--camera_pos {round(cam_pos.x, 4)} {round(cam_pos.y, 4)} {round(cam_pos.z, 4)} "
-                f"--no_viz"
-            )
+            command = [deconflict_script, "--input_file", input_yaml,
+                       "--output_file", output_yaml,
+                       "--threshold_overlap", str(props.deconflict_overlap),
+                       "--threshold_downwash", str(props.deconflict_downwash),
+                       "--selection_method", props.deconflict_selection,
+                       "--resolution_order", props.deconflict_resolution,
+                       "--trajectory_type", props.deconflict_trajectory,
+                       "--move_direction", props.deconflict_direction,
+                       "--camera_pos", str(round(cam_pos.x, 4)),
+                       str(round(cam_pos.y, 4)), str(round(cam_pos.z, 4)), "--no_viz"]
 
             try:
-                res = subprocess.run(["/bin/zsh", "-l", "-c", cmd_str], check=False, capture_output=True, text=True)
+                if os.path.exists(output_yaml):
+                    os.remove(output_yaml)
+                res = run_authoring(command)
                 if res.returncode != 0:
                     short_err = res.stderr.strip().split('\n')[-1] if res.stderr else "Unknown error"
                     self.report({'ERROR'}, f"Deconflict failed on frame {frame}: {short_err}")
@@ -3967,7 +4262,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                 continue
 
             for obj in drones:
-                m = re.match(r"^lb(\d+)", obj.name)
+                m = lightbender_name_match(obj.name)
                 d_id = int(m.group(1))
                 if d_id in out_points:
                     p = out_points[d_id]
@@ -3989,7 +4284,7 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                         # Scale pointer keyframes manually only if single frame
                         if len(frames_to_stagger) == 1:
                             if obj.animation_data and obj.animation_data.action:
-                                for fc in obj.animation_data.action.fcurves:
+                                for fc in get_action_fcurves(obj):
                                     if "led_pointers" in fc.data_path and fc.data_path.endswith(".value"):
                                         for kp in fc.keyframe_points:
                                             kp.co.y = 25.0 + (kp.co.y - 25.0) * scale_factor
@@ -4029,7 +4324,7 @@ class DRONE_OT_deconflict_reset(bpy.types.Operator):
         import re
         reset_count = 0
         for obj in context.scene.objects:
-            if re.match(r"^lb\d+", obj.name):
+            if is_lightbender(obj):
                 if revert_deconflict_stagger(obj):
                     reset_count += 1
 
@@ -4051,7 +4346,7 @@ def evaluate_leds(scene):
     if t < 0: t = 0
 
     # 1. Find all Drone Bases
-    drones = [obj for obj in scene.objects if "servo_1" in obj and "servo_2" in obj]
+    drones = [obj for obj in scene.objects if is_lightbender(obj)]
 
     for drone in drones:
         props = drone.drone_props
@@ -4287,6 +4582,8 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        if not require_authoring_tools(self):
+            return {'CANCELLED'}
         scene = context.scene
         props = scene.drone_props
         fps = scene.render.fps
@@ -4296,26 +4593,12 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
             self.report({'ERROR'}, "No valid file selected in the SFL file field")
             return {'CANCELLED'}
 
-        # --- Parse YAML via external python (Blender may lack PyYAML) ---
         def load_yaml_safe(fpath):
             try:
-                import yaml
-                with open(fpath, 'r', encoding='utf-8') as f:
-                    return yaml.safe_load(f)
-            except ImportError:
-                try:
-                    python_exec = get_controller_python()
-                    cmd = [
-                        python_exec,
-                        "-c",
-                        "import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8'))))",
-                        fpath
-                    ]
-                    json_str = subprocess.check_output(cmd, text=True)
-                    return json.loads(json_str)
-                except Exception as e:
-                    self.report({'ERROR'}, f"Failed to parse YAML: {e}")
-                    return None
+                return load_authoring_yaml(fpath)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                self.report({'ERROR'}, f"Failed to parse YAML: {error}")
+                return None
 
         mission_data = load_yaml_safe(filepath)
         if mission_data is None:
@@ -4325,6 +4608,20 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
         if not drones_dict or not isinstance(drones_dict, dict):
             self.report({'ERROR'}, "SFL file has no 'drones' dictionary")
             return {'CANCELLED'}
+
+        # Validate mounts before creating anything so malformed metadata cannot
+        # leave a partially imported swarm. Old missions retain zero offset.
+        module_offsets = {}
+        for drone_name, drone_data in drones_dict.items():
+            if not isinstance(drone_data, dict):
+                continue
+            value = drone_data.get('light_module_offset', [0.0, 0.0, 0.0])
+            if (not isinstance(value, (list, tuple)) or len(value) != 3
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) for v in value)):
+                self.report({'ERROR'}, f"{drone_name}: light_module_offset must be three finite FLU numbers in metres")
+                return {'CANCELLED'}
+            module_offsets[drone_name] = value
 
         # --- Load manifest for type inference if available ---
         manifest_types = {}
@@ -4370,7 +4667,9 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
             # --- Create the LightBender ---
             bpy.ops.drone.add_drone(drone_type=drone_type)
             obj = context.active_object
-            obj.name = drone_name
+            if lightbender_name_match(drone_name):
+                obj.name = drone_name
+            obj.drone_props.light_module_offset = module_offsets[drone_name]
 
             # --- Set initial position from target ---
             tx = float(target[0]) if len(target) > 0 else 0.0
@@ -4470,7 +4769,7 @@ class IMPORT_OT_mission_yaml(bpy.types.Operator):
 
                 # Set keyframe interpolation to linear
                 if obj.animation_data and obj.animation_data.action:
-                    for fcurve in obj.animation_data.action.fcurves:
+                    for fcurve in get_action_fcurves(obj):
                         for kp in fcurve.keyframe_points:
                             kp.interpolation = 'LINEAR'
 
@@ -4502,7 +4801,7 @@ class EXPORT_OT_drone_trajectory(bpy.types.Operator):
 
     @staticmethod
     def selected_drone(context):
-        drones = [obj for obj in context.selected_objects if "servo_1" in obj]
+        drones = [obj for obj in context.selected_objects if is_lightbender(obj)]
         return drones[0] if len(drones) == 1 else None
 
     def invoke(self, context, event):
@@ -4594,12 +4893,14 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
     filepath: StringProperty(subtype="FILE_PATH")
 
     def invoke(self, context, event):
+        mission_name = context.scene.drone_props.export_mission_name.strip() or "blender_mission"
+        self.filepath = os.path.join(os.path.dirname(self.filepath), mission_name + ".yaml")
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
         scene = context.scene
-        drones_to_export = [obj for obj in context.selected_objects if "servo_1" in obj and "servo_2" in obj]
+        drones_to_export = [obj for obj in context.selected_objects if is_lightbender(obj)]
 
         if not drones_to_export:
             self.report({'ERROR'}, "No LightBenders selected")
@@ -4638,6 +4939,8 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
 
         for drone in drones_to_export:
             output_lines.append(f"  {drone.name}:")
+            mount = [round(v, 8) for v in drone.drone_props.light_module_offset]
+            output_lines.append(f"    light_module_offset: {mount}")
             waypoints = []
             servos = []
             pointer_data = []
@@ -4647,7 +4950,7 @@ class EXPORT_OT_drone_yaml(bpy.types.Operator):
             if use_keyframes:
                 keys = set()
                 if drone.animation_data and drone.animation_data.action:
-                    for fcurve in drone.animation_data.action.fcurves:
+                    for fcurve in get_action_fcurves(drone):
                         for kp in fcurve.keyframe_points:
                             if start_frame <= kp.co.x <= end_frame:
                                 keys.add(kp.co.x)
@@ -4751,13 +5054,15 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
     bl_label = "Illuminate"
 
     def execute(self, context):
+        if not require_orchestrator(self):
+            return {'CANCELLED'}
         scene = context.scene
         props = scene.drone_props
 
         # Select all lb# drones
         drones_to_export = []
         for obj in scene.objects:
-            if re.match(r"^lb\d+", obj.name) and "servo_1" in obj and "servo_2" in obj:
+            if is_lightbender(obj):
                 drones_to_export.append(obj)
 
         if not drones_to_export:
@@ -4780,11 +5085,6 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
             self.report({'ERROR'}, "Failed to generate SFL")
             return {'CANCELLED'}
 
-        python_exec = get_controller_python()
-        cmd_str = f"'{python_exec}' '{target_script}' --illumination --blender '127.0.0.1:5598'"
-        if props.export_dark_room:
-            cmd_str += " --dark"
-
         # Open swarm monitor socket before launching so orchestrator can connect
         open_swarm_monitor_socket()
         props.swarm_logs_fetched = False
@@ -4792,18 +5092,9 @@ class EXPORT_OT_export_and_illuminate(bpy.types.Operator):
         props.swarm_stopping = False
         props.swarm_drones.clear()
 
-        # Open Mac Terminal – capture the tab reference for stop button
-        apple_script = f'''
-        tell application "Terminal"
-            set newTab to do script "cd \\"{os.path.dirname(target_script)}\\" && {cmd_str}"
-            activate
-            return id of window 1
-        end tell
-        '''
-
         try:
-            result = subprocess.run(["osascript", "-e", apple_script], capture_output=True, text=True)
-            _ILLUMINATE_TERMINAL_TAB["tab_ref"] = result.stdout.strip()
+            launch_orchestrator(target_script, ["--illumination"],
+                                dark_room=props.export_dark_room)
             props.illuminate_running = True
             self.report({'INFO'}, "Exported and started orchestrator")
         except Exception as e:
@@ -4827,7 +5118,7 @@ class DRONE_OT_stop_illuminate(bpy.types.Operator):
 
         # Wait for all_stopped from orchestrator before resetting state
         props.swarm_stopping = True
-        _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
+        _ORCHESTRATOR_PROCESS["process"] = None
         return {'FINISHED'}
 
 
@@ -4846,7 +5137,7 @@ class EXPORT_OT_interaction_yaml(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-        drones_to_export = [obj for obj in context.selected_objects if "servo_1" in obj and "servo_2" in obj]
+        drones_to_export = [obj for obj in context.selected_objects if is_lightbender(obj)]
 
         if not drones_to_export:
             self.report({'ERROR'}, "No LightBenders selected")
@@ -4869,6 +5160,8 @@ class EXPORT_OT_export_and_interact(bpy.types.Operator):
     bl_label = "Illuminate (Interaction)"
 
     def execute(self, context):
+        if not require_orchestrator(self):
+            return {'CANCELLED'}
         scene = context.scene
         props = scene.drone_props
         drones_to_export = get_lb_scene_objects(scene)
@@ -5023,7 +5316,7 @@ class DRONE_OT_stop_illuminate_interaction(bpy.types.Operator):
         props.interaction_connected_count = 0
         props.edit_active = False
         props.swarm_stopping = True
-        _ILLUMINATE_TERMINAL_TAB["tab_ref"] = None
+        _ORCHESTRATOR_PROCESS["process"] = None
         return {'FINISHED'}
 
 
@@ -5363,7 +5656,7 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
 
                 action = obj.animation_data.action
                 action.name = f"MyGridAnimation_{obj.name}"
-                for curve in action.fcurves:
+                for curve in get_action_fcurves(obj):
                     for point in curve.keyframe_points:
                         point.interpolation = 'CONSTANT'
 
@@ -5556,7 +5849,7 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
                 # Set interpolation to CONSTANT and add CYCLES modifier
                 action = obj.animation_data.action
                 action.name = f"Blink_{obj.name}"
-                for fc in action.fcurves:
+                for fc in get_action_fcurves(obj):
                     if fc.data_path == "color":
                         for kp in fc.keyframe_points:
                             kp.interpolation = 'CONSTANT'
@@ -5608,7 +5901,7 @@ class DRONE_OT_generate_marker_grid(bpy.types.Operator):
                 action = obj.animation_data.action
                 if not action.name.startswith("Blink_"):
                     action.name = f"Visibility_{obj.name}"
-                for fc in action.fcurves:
+                for fc in get_action_fcurves(obj):
                     if fc.data_path in {"hide_render", "hide_viewport"}:
                         for kp in fc.keyframe_points:
                             kp.interpolation = 'CONSTANT'
@@ -5638,13 +5931,17 @@ class DRONE_OT_render_drone_cameras(bpy.types.Operator):
         scene = context.scene
         props = scene.marker_grid_props
 
+        if not bpy.app.build_options.codec_ffmpeg:
+            self.report({'ERROR'}, "This Blender build does not include FFmpeg video support.")
+            return {'CANCELLED'}
+
         if not bpy.data.filepath:
             self.report({'ERROR'}, "Please save the Blend file first.")
             return {'CANCELLED'}
 
         bpy.ops.wm.save_mainfile()
 
-        selected_drones = [obj for obj in context.selected_objects if "servo_1" in obj]
+        selected_drones = [obj for obj in context.selected_objects if is_lightbender(obj)]
         if not selected_drones:
             self.report({'WARNING'}, "No LightBenders selected.")
             return {'CANCELLED'}
@@ -5676,7 +5973,10 @@ class DRONE_OT_render_drone_cameras(bpy.types.Operator):
             scene.render.resolution_y = 400
             scene.render.fps = DRONE_CAMERA_RENDER_FPS
             scene.render.fps_base = 1.0
-            scene.render.image_settings.file_format = "FFMPEG"
+            if hasattr(scene.render.image_settings, "media_type"):
+                scene.render.image_settings.media_type = "VIDEO"
+            else:
+                scene.render.image_settings.file_format = "FFMPEG"
             scene.render.image_settings.color_mode = "RGB"
             scene.render.ffmpeg.format = "MPEG4"
             scene.render.ffmpeg.codec = "H264"
@@ -5710,7 +6010,10 @@ scene.render.resolution_x = 640
 scene.render.resolution_y = 400
 scene.render.fps = {DRONE_CAMERA_RENDER_FPS}
 scene.render.fps_base = 1.0
-scene.render.image_settings.file_format = "FFMPEG"
+if hasattr(scene.render.image_settings, "media_type"):
+    scene.render.image_settings.media_type = "VIDEO"
+else:
+    scene.render.image_settings.file_format = "FFMPEG"
 scene.render.image_settings.color_mode = "RGB"
 scene.render.ffmpeg.format = "MPEG4"
 # Always override settings stored in the .blend file. H.264's realtime preset
@@ -5741,6 +6044,8 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        if not require_authoring_tools(self):
+            return {'CANCELLED'}
         import os
         import subprocess
         import tempfile
@@ -5754,43 +6059,42 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
             self.report({'ERROR'}, f"SVG File not found: {svg_path}")
             return {'CANCELLED'}
 
-        # try:
-        #     addon_dir = os.path.dirname(os.path.realpath(__file__))
-        # except NameError:
         addon_dir = get_authoring_dir()
         transform_script = os.path.join(addon_dir, "transform.py")
         place_script = os.path.join(addon_dir, "place.py")
 
-        temp_dir = tempfile.gettempdir()
+        workspace = tempfile.TemporaryDirectory(prefix="lightbender-place-")
+        temp_dir = workspace.name
         target_graph_yaml = os.path.join(temp_dir, "temp_target_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_target_layout.yaml")
 
         # 1. Call transform.py
         cmd_transform = [
-            "python3", f"'{transform_script}'",
-            "-i", f"'{svg_path}'",
-            "-o", f"'{target_graph_yaml}'",
+            transform_script,
+            "-i", svg_path,
+            "-o", target_graph_yaml,
             "-mw", str(props.import_max_width),
             "-ml", str(props.import_max_length),
             "-cy", str(props.import_cx),
             "-cz", str(props.import_cy)
         ]
-        res1 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_transform)], capture_output=True, text=True)
+        res1 = run_authoring(cmd_transform)
         if res1.returncode != 0:
             self.report({'ERROR'}, f"Transform failed: {res1.stderr}")
             return {'CANCELLED'}
 
         # 2. Call place.py
         cmd_place = [
-            "python3", f"'{place_script}'",
-            "--input", f"'{target_graph_yaml}'",
-            "--output", f"'{target_layout_yaml}'",
+            place_script,
+            "--input", target_graph_yaml,
+            "--output", target_layout_yaml,
             "--policy", props.import_policy,
             "--set_cover_solver", props.import_set_cover_solver,
+            "--set_cover_log", os.path.join(temp_dir, "set_cover_log.json"),
             "--max_len", "0.16",
             "--no_viz"
         ]
-        res2 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_place)], capture_output=True, text=True)
+        res2 = run_authoring(cmd_place)
         if res2.returncode != 0:
             self.report({'ERROR'}, f"Place failed: {res2.stderr}")
             return {'CANCELLED'}
@@ -5801,10 +6105,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
 
         def load_yaml_safe(filepath):
             try:
-                # Use external Python to parse YAML and dump as JSON since Blender might lack PyYAML
-                cmd_yaml2json = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{filepath}'"
-                json_str = subprocess.check_output(["/bin/zsh", "-l", "-c", cmd_yaml2json], text=True)
-                return json.loads(json_str)
+                return load_authoring_yaml(filepath)
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to parse YAML file {filepath}: {e}")
                 return {}
@@ -5895,6 +6196,8 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
                 if t in ('H', 'V'):
                     inventory[t].append(d['id'])
 
+        manifest_ids = [drone_id for ids in inventory.values() for drone_id in ids]
+
         # 5. Spawn Drones
         warnings = []
         created_counts = {'H': 0, 'V': 0}
@@ -5905,7 +6208,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
                 lb_id = inventory[t].pop(0)
             else:
                 created_counts[t] += 1
-                lb_id = f"lb_extra_{t}_{created_counts[t]}"
+                lb_id = next_lightbender_name(t, extra=True, reserved=manifest_ids)
                 warnings.append(lb_id)
 
             bpy.ops.drone.add_drone(drone_type=f'TYPE_{t}')
@@ -5955,6 +6258,7 @@ class DRONE_OT_transform_and_place(bpy.types.Operator):
         except Exception:
             pass
 
+        props.export_mission_name = os.path.splitext(os.path.basename(svg_path))[0]
         return {'FINISHED'}
 
 
@@ -5981,7 +6285,7 @@ class DRONE_OT_generate_flyin(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Get target drones (lb*)
-        lbs = [obj for obj in scene.objects if re.match(r"^lb\d+", obj.name) and "servo_1" in obj]
+        lbs = [obj for obj in scene.objects if is_lightbender(obj)]
         if not lbs:
             self.report({'WARNING'}, "No LightBenders found.")
             return {'CANCELLED'}
@@ -6098,10 +6402,9 @@ class DRONE_OT_generate_flyin(bpy.types.Operator):
             orig_pos = orig_positions[lb]
 
             # Clear existing location fcurves
-            action = lb.animation_data.action
             for i in range(3):
-                fc = action.fcurves.find('location', index=i)
-                if fc: action.fcurves.remove(fc)
+                fc = get_action_fcurves(lb).find('location', index=i)
+                if fc: get_action_fcurves(lb).remove(fc)
 
             # Insert keys
             lb.location = orig_pos
@@ -6147,7 +6450,7 @@ class DRONE_OT_clear_flyin(bpy.types.Operator):
 
     def execute(self, context):
         import re
-        lbs = [obj for obj in context.scene.objects if re.match(r"^lb\d+", obj.name)]
+        lbs = [obj for obj in context.scene.objects if is_lightbender(obj)]
         for lb in lbs:
             # Restore location
             if "flyin_orig_x" in lb:
@@ -6160,8 +6463,8 @@ class DRONE_OT_clear_flyin(bpy.types.Operator):
                 
                 if lb.animation_data and lb.animation_data.action:
                     for i in range(3):
-                        fc = lb.animation_data.action.fcurves.find('location', index=i)
-                        if fc: lb.animation_data.action.fcurves.remove(fc)
+                        fc = get_action_fcurves(lb).find('location', index=i)
+                        if fc: get_action_fcurves(lb).remove(fc)
 
             # Restore explicit property backup
             if "flyin_orig_base" in lb:
@@ -6198,7 +6501,7 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
         props = scene.drone_props
         selected = [
             obj for obj in context.selected_objects
-            if "servo_1" in obj and "servo_2" in obj
+            if is_lightbender(obj)
         ]
         if not selected:
             self.report({'ERROR'}, "Select at least one LightBender")
@@ -6226,13 +6529,12 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
                 accelerations = sample_flight_accelerations(
                     obj, location_fcurves, first_frame, last_frame, fps, smoothing)
 
-                action = obj.animation_data.action
                 for axis in (0, 1):
-                    existing = action.fcurves.find("rotation_euler", index=axis)
+                    existing = get_action_fcurves(obj).find("rotation_euler", index=axis)
                     if existing:
-                        action.fcurves.remove(existing)
+                        get_action_fcurves(obj).remove(existing)
 
-                yaw_fcurve = action.fcurves.find("rotation_euler", index=2)
+                yaw_fcurve = get_action_fcurves(obj).find("rotation_euler", index=2)
                 base_yaw = obj.rotation_euler.z
                 obj.rotation_mode = 'XYZ'
                 attitudes = []
@@ -6259,7 +6561,7 @@ class DRONE_OT_apply_flight_attitude(bpy.types.Operator):
                         group="Flight Attitude")
 
                 for axis in (0, 1):
-                    generated = action.fcurves.find("rotation_euler", index=axis)
+                    generated = get_action_fcurves(obj).find("rotation_euler", index=axis)
                     if generated:
                         set_flight_attitude_bezier_handles(
                             generated,
@@ -6300,6 +6602,8 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        if not require_authoring_tools(self):
+            return {'CANCELLED'}
         import os
         import math
         import subprocess
@@ -6323,8 +6627,8 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
 
         lbs = []
         for obj in scene.objects:
-            m = re.match(r"^lb(\d+)", obj.name)
-            if m and "servo_1" in obj:
+            m = lightbender_name_match(obj.name)
+            if m:
                 d_id = int(m.group(1))
                 lbs.append((obj, d_id))
 
@@ -6333,7 +6637,8 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
             return {'CANCELLED'}
 
         addon_dir = get_authoring_dir()
-        temp_dir = tempfile.gettempdir()
+        workspace = tempfile.TemporaryDirectory(prefix="lightbender-morph-")
+        temp_dir = workspace.name
         target_graph_yaml = os.path.join(temp_dir, "temp_morph_graph.yaml")
         target_layout_yaml = os.path.join(temp_dir, "temp_morph_layout.yaml")
         p1_json = os.path.join(temp_dir, "morph_p1.json")
@@ -6341,31 +6646,31 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
         match_out_json = os.path.join(temp_dir, "morph_match_out.json")
 
         cmd_transform = [
-            "python3", f"'{os.path.join(addon_dir, 'transform.py')}'",
-            "-i", f"'{svg_path}'", "-o", f"'{target_graph_yaml}'",
+            os.path.join(addon_dir, 'transform.py'),
+            "-i", svg_path, "-o", target_graph_yaml,
             "-mw", str(props.import_max_width), "-ml", str(props.import_max_length),
             "-cy", str(props.import_cx), "-cz", str(props.import_cy)
         ]
-        res1 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_transform)], capture_output=True, text=True)
+        res1 = run_authoring(cmd_transform)
         if res1.returncode != 0:
             self.report({'ERROR'}, f"Transform failed: {res1.stderr}")
             return {'CANCELLED'}
 
         cmd_place = [
-            "python3", f"'{os.path.join(addon_dir, 'place.py')}'",
-            "--input", f"'{target_graph_yaml}'", "--output", f"'{target_layout_yaml}'",
+            os.path.join(addon_dir, 'place.py'),
+            "--input", target_graph_yaml, "--output", target_layout_yaml,
             "--policy", props.import_policy,
             "--set_cover_solver", props.import_set_cover_solver,
+            "--set_cover_log", os.path.join(temp_dir, "set_cover_log.json"),
             "--max_len", "0.16", "--no_viz"
         ]
-        res2 = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_place)], capture_output=True, text=True)
+        res2 = run_authoring(cmd_place)
         if res2.returncode != 0 or not os.path.exists(target_layout_yaml):
             self.report({'ERROR'}, f"Place failed: {res2.stderr}")
             return {'CANCELLED'}
 
         def load_yaml_safe(filepath):
-            cmd = f"python3 -c \"import yaml, json, sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))\" '{filepath}'"
-            return json.loads(subprocess.check_output(["/bin/zsh", "-l", "-c", cmd], text=True))
+            return load_authoring_yaml(filepath)
 
         try:
             layout_data = load_yaml_safe(target_layout_yaml)
@@ -6423,8 +6728,8 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
         with open(p1_json, 'w') as f: json.dump(p1_data, f)
         with open(p2_json, 'w') as f: json.dump(p2_data, f)
 
-        cmd_match = ["python3", f"'{os.path.join(addon_dir, 'morph_match.py')}'", f"'{p1_json}'", f"'{p2_json}'", f"'{match_out_json}'"]
-        res_match = subprocess.run(["/bin/zsh", "-l", "-c", " ".join(cmd_match)], capture_output=True, text=True)
+        cmd_match = [os.path.join(addon_dir, 'morph_match.py'), p1_json, p2_json, match_out_json]
+        res_match = run_authoring(cmd_match)
         if res_match.returncode != 0:
             self.report({'ERROR'}, f"Match failed: {res_match.stderr}")
             return {'CANCELLED'}
@@ -6539,7 +6844,7 @@ class DRONE_OT_generate_morph(bpy.types.Operator):
         # Make keyframes linear
         for obj, _ in lbs:
             if obj.animation_data and obj.animation_data.action:
-                for fc in obj.animation_data.action.fcurves:
+                for fc in get_action_fcurves(obj):
                     for kp in fc.keyframe_points:
                         kp.interpolation = 'LINEAR'
 
@@ -6586,7 +6891,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
         layout.separator()
 
         # --- Selected Drone Controls ---
-        if obj and "servo_1" in obj:
+        if obj and is_lightbender(obj):
             obj_props = obj.drone_props
             is_semi = 'SEMI' in obj_props.drone_type
             is_ring = 'RING' in obj_props.drone_type
@@ -6596,6 +6901,7 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             
             drone_type_label = obj_props.drone_type.replace("TYPE_", "")
             col.label(text=f"Type: {drone_type_label}")
+            col.prop(obj_props, "light_module_offset")
 
             # Hide Actuation controls for Ring types
             if is_ring:
@@ -6659,13 +6965,10 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
 
         box.prop(props, "import_svg_filepath")
 
-        row = box.row()
-        row.prop(props, "import_max_width")
-        row.prop(props, "import_max_length")
-
-        row = box.row()
-        row.prop(props, "import_cx")
-        row.prop(props, "import_cy")
+        box.prop(props, "import_max_width")
+        box.prop(props, "import_max_length")
+        box.prop(props, "import_cx")
+        box.prop(props, "import_cy")
 
         row = box.row()
         row.prop(props, "import_policy")
@@ -6906,6 +7209,7 @@ class VIEW3D_PT_lb_simulators(bpy.types.Panel):
         box.prop(props, "deconflict_trajectory")
         box.prop(props, "deconflict_direction")
 
+        box.operator("drone.camera_facing", text="Correct Facing (Current Frame)")
         row = box.row(align=True)
         row.operator("drone.deconflict_stagger", text="Stagger")
         row.operator("drone.deconflict_reset", text="Reset Stagger")
@@ -7243,6 +7547,7 @@ class VIEW3D_PT_lb_marker_grid(bpy.types.Panel):
 
 classes = (
     LightBenderAddonPreferences,
+    DRONE_OT_setup_python_tools,
     ShortRangeTileTiming,
     MarkerGridAnimationEvent,
     MarkerGridProperties,
@@ -7282,6 +7587,7 @@ classes = (
     DRONE_OT_reset_error,
     DRONE_OT_apply_drift,
     DRONE_OT_reset_drift,
+    DRONE_OT_camera_facing,
     DRONE_OT_deconflict_stagger,
     DRONE_OT_deconflict_reset,
     DRONE_OT_generate_marker_grid,
@@ -7346,9 +7652,22 @@ def register():
     if on_load_reset_properties not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(on_load_reset_properties)
 
+    if not bpy.app.timers.is_registered(authoring_setup_timer):
+        bpy.app.timers.register(authoring_setup_timer, first_interval=0.5)
+
 
 def unregister():
     close_static_interaction_session()
+    close_swarm_monitor_session()
+
+    for callback in (authoring_setup_timer, poll_authoring_setup,
+                     static_interaction_timer, swarm_monitor_timer):
+        if bpy.app.timers.is_registered(callback):
+            bpy.app.timers.unregister(callback)
+    STATIC_INTERACTION_SESSION["timer_registered"] = False
+    SWARM_MONITOR_SESSION["timer_registered"] = False
+    if _AUTHORING_RUNTIME is not None:
+        _AUTHORING_RUNTIME.close()
 
     if update_leds_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(update_leds_handler)

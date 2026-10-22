@@ -1,0 +1,6 @@
+# Runtime for the bundled Blender helpers (Python 3.9+).
+# pip selects releases that support the runtime's Python version.
+numpy>=1.26.4,<3
+scipy>=1.13.1,<2
+PyYAML>=6.0.2,<7
+svg.path>=6.3,<8
