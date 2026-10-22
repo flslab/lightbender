@@ -42,7 +42,7 @@ LightBender visual effects for different illuminations:
 
 ### Installing the Add-On
 
-Install the **standalone release ZIP**, `lightbender_swarm-1.24.3.zip`. It includes
+Install the **standalone release ZIP**: [Download LightBender Swarm Animator v1.24.3](https://github.com/flslab/lightbender/releases/download/addon-v1.24.3/lightbender_swarm-1.24.3.zip). It includes
 all authoring scripts; no repository clone or terminal setup is needed.
 
 1. Disable the old single-file **LightBender Swarm Animator** add-on, if installed.
