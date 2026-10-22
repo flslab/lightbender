@@ -14,8 +14,6 @@ import shutil
 import socket
 import logging
 import shlex
-import math
-import uuid
 from datetime import datetime
 from functools import partial
 from fabric import Connection
@@ -62,7 +60,8 @@ from interaction_launch import (
     validate_interaction_modes,
 )
 from marker_grid_client import MarkerGridClient
-from camera.pose_estimation import CameraPoseMixin, CAMERA_POSE_FAILURE_STATUSES
+from camera.pose_estimation import CameraPoseMixin
+from camera.nodes import CameraNodesMixin
 
 # from Interaction.vicon_noise_tracker import run_tracker
 from pathlib import Path
@@ -156,7 +155,7 @@ def validate_marker_tile_ownership(manifest):
             seen.add(key)
 
 
-class SwarmOrchestrator(CameraPoseMixin):
+class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
     def __init__(self, args):
         setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -180,7 +179,7 @@ class SwarmOrchestrator(CameraPoseMixin):
             self.ctrl_cfg['zmq_ack_port'] = args.zmq_ack_port
         self.drones = self.manifest.get('drones', [])
         validate_marker_tile_ownership(self.manifest)
-        self.camera_cfg = self.manifest.get('camera_node')
+        self._configure_camera_nodes()
         self.radio_node = self.manifest.get('radio_node')
         self.marker_grid_cfg = self.manifest.get('marker_grid_node')
         self.common_cfg = self.manifest['common']
@@ -753,7 +752,7 @@ class SwarmOrchestrator(CameraPoseMixin):
             )
         return ""
 
-    def _get_camera_cmd(self):
+    def _get_camera_cmd(self, camera_cfg=None):
         camera_params = [
             "--autofocus-mode", "manual",
             "--lens-position", "0.5",
@@ -765,7 +764,7 @@ class SwarmOrchestrator(CameraPoseMixin):
         else:
             camera_params += ["--gain", "0.8"]
 
-        camera_cfg = self.camera_cfg or {}
+        camera_cfg = camera_cfg if camera_cfg is not None else (self.camera_cfg or {})
         work_dir = shlex.quote(
             camera_cfg.get('work_dir', self.common_cfg['work_dir'])
         )
@@ -799,7 +798,12 @@ class SwarmOrchestrator(CameraPoseMixin):
             if node_type == "Drone":
                 self._prepare_drone_localizer(conn, node_id)
             # Push manifest from in-memory state (reflects any arg overrides) without touching local file
-            manifest_buf = io.BytesIO(yaml.dump(self.manifest).encode('utf-8'))
+            remote_manifest = self.manifest
+            if node_type == "Camera":
+                # Each recorder uses the existing single-camera protocol, with
+                # its own run ID. Never give camera_2 the primary's pose config.
+                remote_manifest = dict(self.manifest, camera_node=device_cfg)
+            manifest_buf = io.BytesIO(yaml.dump(remote_manifest).encode('utf-8'))
             remote_work_dir = device_cfg.get('work_dir', self.common_cfg['work_dir'])
             conn.put(manifest_buf, remote=f"{remote_work_dir}/swarm_manifest.yaml")
             if getattr(self,'imu_validation_plan',None) is not None and node_id == self.imu_validation_plan.drone_id:
@@ -874,7 +878,7 @@ class SwarmOrchestrator(CameraPoseMixin):
         self.manifest   = updated
         self.ctrl_cfg   = updated["controller"]
         self.drones     = updated.get("drones", [])
-        self.camera_cfg = updated.get("camera_node")
+        self._configure_camera_nodes()
         self.radio_node = updated.get("radio_node")
         self.marker_grid_cfg = updated.get("marker_grid_node")
         self.logger.info(f"Network switch complete. Controller IP: {self.ctrl_cfg['ip']}")
@@ -1127,18 +1131,7 @@ class SwarmOrchestrator(CameraPoseMixin):
 
             # Pose estimation must finish before controller commands/manifests
             # are built, so the camera is deliberately launched before drones.
-            if self.camera_cfg:
-                if not self.args.skip_record:
-                    camera_started = self._boot_remote_node(
-                        self.camera_cfg, self._get_camera_cmd(), "Camera"
-                    )
-                    if not camera_started:
-                        raise RuntimeError("failed to launch camera node")
-                    if self._camera_pose_enabled():
-                        self._wait_for_camera_pose()
-                        self._confirm_camera_pose()
-            else:
-                self.logger.warning("No camera_node found. Skipping.")
+            self._boot_cameras()
 
             self.pub_socket.send_json({"cmd": "_"})
             time.sleep(2)
@@ -1379,42 +1372,13 @@ class SwarmOrchestrator(CameraPoseMixin):
             total_drones = len([d for d in self.missions[mission_index]['drones'] if d in manifest_drones])
         else:
             total_drones = len(self.drones)
-        camera_required = bool(
-            self.camera_cfg and not getattr(self.args, 'skip_record', False)
-        )
-        camera_ready_deadline = None
-        camera_ready_timeout_s = None
-        if camera_required and not self.camera_ready:
-            camera_ready_timeout_s = float(
-                self.camera_cfg.get('ready_timeout_s', 15.0)
-            )
-            if (
-                not math.isfinite(camera_ready_timeout_s)
-                or camera_ready_timeout_s <= 0
-            ):
-                raise ValueError(
-                    "camera_node.ready_timeout_s must be positive"
-                )
-            camera_ready_deadline = (
-                time.monotonic() + camera_ready_timeout_s
-            )
+        camera_deadlines = self._camera_ready_deadlines()
 
         while (
-            (
-                len(self.ready_ids) < total_drones
-                or (camera_required and not self.camera_ready)
-            )
+            (len(self.ready_ids) < total_drones or self._pending_camera_ids())
             and self.running.is_set()
         ):
-            if (
-                camera_required
-                and not self.camera_ready
-                and time.monotonic() >= camera_ready_deadline
-            ):
-                raise RuntimeError(
-                    "camera did not become ready within "
-                    f"{camera_ready_timeout_s:g}s"
-                )
+            self._check_camera_deadlines(camera_deadlines, 'become ready')
             try:
                 msg = self.pull_socket.recv_json()
                 sender_id = msg.get('id')
@@ -1423,25 +1387,9 @@ class SwarmOrchestrator(CameraPoseMixin):
                 if self._handle_marker_grid_event(msg):
                     continue
 
-                if sender_id == 'CAM':
-                    if not self._camera_message_matches_run(msg):
-                        self.logger.warning(
-                            "Ignoring stale camera status for run %s",
-                            msg.get('run_id'),
-                        )
-                        continue
-                    if (
-                        status in CAMERA_POSE_FAILURE_STATUSES
-                        or status in {'FAILED', 'CAMERA_RECORDING_FAILED'}
-                    ):
-                        raise RuntimeError(
-                            "camera node failed before readiness: "
-                            f"{msg.get('error', status)}"
-                        )
-                    if status == 'READY':
-                        self.camera_ready = True
-                        self.logger.info("Camera Node Ready.")
-                elif isinstance(sender_id, str) and "lb" in sender_id:
+                if self._handle_camera_runtime_event(msg):
+                    continue
+                if isinstance(sender_id, str) and "lb" in sender_id:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
                         self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
@@ -1454,85 +1402,6 @@ class SwarmOrchestrator(CameraPoseMixin):
                         })
             except zmq.Again:
                 continue  # Timeout, loop back to check self.running
-
-    def _handle_camera_runtime_event(self, msg):
-        if msg.get('id') != 'CAM':
-            return False
-        if not self._camera_message_matches_run(msg):
-            self.logger.warning(
-                "Ignoring stale camera runtime status for run %s",
-                msg.get('run_id'),
-            )
-            return True
-        status = msg.get('status')
-        if status in {
-            'FAILED', 'CAMERA_RECORDING_FAILED',
-            *CAMERA_POSE_FAILURE_STATUSES,
-        }:
-            raise RuntimeError(
-                f"camera runtime failure: {msg.get('error', status)}"
-            )
-        if status == 'RECORDING':
-            self.logger.info("Camera recording confirmed.")
-        return True
-
-    def _start_camera_recording(self):
-        """Start and verify video capture before any drone receives START."""
-        if not self.camera_cfg or getattr(self.args, 'skip_record', False):
-            return
-        timeout_s = float(self.camera_cfg.get('recording_start_timeout_s', 8.0))
-        if not math.isfinite(timeout_s) or timeout_s <= 0:
-            raise ValueError(
-                "camera_node.recording_start_timeout_s must be positive"
-            )
-        request_id = uuid.uuid4().hex
-        self.pub_socket.send_json({
-            'cmd': 'START_CAMERA',
-            'run_id': self.camera_run_id,
-            'request_id': request_id,
-        })
-        deadline = time.monotonic() + timeout_s
-        while self.running.is_set():
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"camera did not confirm recording within {timeout_s:g}s"
-                )
-            try:
-                msg = self.pull_socket.recv_json()
-            except zmq.Again:
-                continue
-            if self._handle_marker_grid_event(msg):
-                continue
-            if msg.get('id') != 'CAM':
-                self.logger.warning(
-                    "Ignoring status while starting camera: %s", msg
-                )
-                continue
-            if not self._camera_message_matches_run(msg):
-                self.logger.warning(
-                    "Ignoring stale camera recording status for run %s",
-                    msg.get('run_id'),
-                )
-                continue
-            status = msg.get('status')
-            if status == 'RECORDING':
-                if msg.get('request_id') != request_id:
-                    self.logger.warning(
-                        "Ignoring stale camera recording acknowledgement %s",
-                        msg.get('request_id'),
-                    )
-                    continue
-                self.logger.info("Camera recording confirmed before launch.")
-                return
-            if status in {
-                'FAILED', 'CAMERA_RECORDING_FAILED',
-                *CAMERA_POSE_FAILURE_STATUSES,
-            }:
-                raise RuntimeError(
-                    "camera could not start recording: "
-                    f"{msg.get('error', status)}"
-                )
-        raise RuntimeError("camera recording start was interrupted")
 
     def _monitor_flight(self):
         launched_drones = len(self.ready_ids)
@@ -1612,22 +1481,7 @@ class SwarmOrchestrator(CameraPoseMixin):
             self.logger.warning(f"Could not reset marker grid to blink: {error}")
         self._stop_marker_grid_controller()
 
-        # Stop Camera
-        if self.camera_cfg and self.pub_socket and not self.args.skip_record:
-            self.logger.info("Stopping Camera...")
-            self.pub_socket.send_json({"cmd": "STOP_CAMERA"})
-            time.sleep(2)
-
-            # Download Video
-            if self.took_off:
-                camera_work_dir = self.camera_cfg.get(
-                    'work_dir', self.common_cfg['work_dir']
-                )
-                remote = f"{camera_work_dir}/mission_footage.mp4"
-                local_dir = f"./logs/{self.tag}"
-                os.makedirs(local_dir, exist_ok=True)
-                local = f"{local_dir}/{self.tag}.mp4"
-                self._download_file(self.camera_cfg, remote, local, "Mission Video")
+        self._stop_cameras_and_download()
 
         # Retry Pending Downloads (Logs)
         if self.took_off:

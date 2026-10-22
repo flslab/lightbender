@@ -24,7 +24,7 @@ Open `swarm_manifest.yaml` and update the following settings to match your envir
 - **`mocap`**: Set `type` (for example, `vicon`) and `ip` (the mocap server address). The orchestrator passes both to drone controllers and uses `ip` for its Vicon dispatcher and optional reference-object noise tracker. Older manifests default to Vicon at `192.168.1.39`. The dispatcher and noise tracker currently require `type: vicon`.
 - **`common.localizer_work_dir`**: Optional path to the marker-localization checkout on each drone; it defaults to `/home/fls/fls-marker-localization`. When that Git checkout exists, drone boot pulls it with a fast-forward-only update and runs its incremental high-rate release build before launching the controller.
 - **`drones`**: Define the drones participating in the swarm. For each drone, make sure the `ip`, `uri`, hardware `type` (H or V), and `servo_offsets` match your actual hardware configurations.
-- **`camera_node` / `radio_node`**: Provide the corresponding IP addresses and usernames for the remote nodes if you are using them for recording or CrazyRadio communication.
+- **`camera_nodes` / `radio_node`**: Provide the corresponding IP addresses and usernames for the remote nodes if you are using them for recording or CrazyRadio communication.
 - **`marker_grid_node`**: Define the dedicated Raspberry Pi Zero W, its marker-grid checkout/virtual environment, grid JSON, UDP port, and GPIO levels. Set optional `hypergrid_tiles` to a list of `[i, j]` coordinates to light only those tiles' HyperGrid LEDs; omit it to light all HyperGrid tiles (an empty list lights none). The orchestrator validates and launches this node before it launches any drone. A drone that owns a MyGrid tile declares `marker_tile: [i, j]`.
 
 The marker grid is deliberately not a drone peer. A drone requests a state
@@ -55,6 +55,53 @@ Before running an experiment, you need to configure the uploader credentials:
    - `GOOGLE_CLIENT_SECRET`: Path to your downloaded OAuth client secret JSON file.
    - `GDRIVE_FOLDER_ID`: The ID of the shared Google Drive folder where data should be uploaded to.
    If you need to generate a new OAuth client secret JSON file, follow the instructions here: https://developers.google.com/workspace/guides/create-credentials
+
+
+### Multiple recording cameras
+
+List recording hosts under `camera_nodes`. Each camera has a unique `id` and
+an `enabled` boolean. Both `camera` and `camera_2` are enabled in the manifest:
+
+```yaml
+camera_nodes:
+  - id: CAM
+    enabled: true
+    ip: camera
+    user: fls
+  - id: CAM_2
+    enabled: true
+    ip: camera_2
+    user: fls
+```
+
+Set `enabled: false` to omit a host from startup, readiness checks, recording,
+and video downloads. `--skip-record` skips all cameras; `--record` records with
+all enabled cameras without drone operation. Each host may override `work_dir`,
+`venv_path`, `ready_timeout_s` (15), `recording_start_timeout_s` (8), and
+`stop_timeout_s` (15). Every enabled recorder must acknowledge readiness and
+recording before swarm launch. Each host receives its own run ID through a
+camera-specific manifest, using the current controller `camera_node.py` protocol.
+After the experiment the orchestrator waits for the recording processes to exit
+and saves `logs/<tag>/<camera-id>_<tag>.mp4` for every enabled host.
+
+The legacy single `camera_node` mapping is still accepted, including its
+`enabled` flag (default true). Use either `camera_nodes` or `camera_node`.
+Only one enabled camera may enable `pose_estimation`, since the swarm uses one
+authored camera transform; other cameras record from their own viewpoints.
+
+To provision a Raspberry Pi recording host:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git python3-venv python3-yaml python3-zmq python3-numpy python3-opencv ffmpeg rpicam-apps
+git clone https://github.com/flslab/fls-cf-offboard-controller.git /home/fls/fls-cf-offboard-controller
+python3 -m venv --system-site-packages /home/fls/env
+/home/fls/env/bin/python -c 'import yaml, zmq, numpy, cv2'
+rpicam-vid --list-cameras
+```
+
+The orchestrator supplies the controller address and per-host camera settings
+automatically when launching each recorder.
 
 ## Usage
 

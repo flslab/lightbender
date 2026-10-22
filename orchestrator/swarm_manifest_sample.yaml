@@ -109,21 +109,30 @@ mission:
   delta_t: 0.0
   require_handshake: true
 
-camera_node:
-  ip: 192.168.1.90
-  user: fls
-  ready_timeout_s: 15.0
-  # Optional RGB-camera preflight pose. These paths are on the camera Pi.
-  pose_estimation:
-    enabled: false
-    grid_file: /home/fls/fls-marker-localization/high_rate_localizer/config/hypergrid-mygrid-4x4.json
-    calibration_file: /home/fls/fls-cf-offboard-controller/config/rgb_camera.json
-    rough_position_xyz: [2.336, -0.040, 0.85]
-    # rough_yaw_rad: 3.141592653589793
-    # desired_position_xyz defaults to the SFL camera field.
-    # look_at_xyz defaults to [0, 0, camera_z] for a level camera.
-    timeout_s: 20.0
-    estimation_timeout_s: 18.0
+camera_nodes:
+  - id: CAM
+    enabled: true
+    ip: camera
+    user: fls
+    ready_timeout_s: 15.0
+    # Optional RGB-camera preflight pose. These paths are on the camera Pi.
+    pose_estimation:
+      enabled: false
+      grid_file: /home/fls/fls-marker-localization/high_rate_localizer/config/hypergrid-mygrid-4x4.json
+      calibration_file: /home/fls/fls-cf-offboard-controller/config/rgb_camera.json
+      rough_position_xyz: [2.336, -0.040, 0.85]
+      # rough_yaw_rad: 3.141592653589793
+      # desired_position_xyz defaults to the SFL camera field.
+      # look_at_xyz defaults to [0, 0, camera_z] for a level camera.
+      timeout_s: 20.0
+      estimation_timeout_s: 18.0
+  - id: CAM_2
+    enabled: true
+    ip: camera_2
+    user: fls
+    ready_timeout_s: 15.0
+    pose_estimation:
+      enabled: false
 
 radio_node:
   ip: 192.168.1.90
