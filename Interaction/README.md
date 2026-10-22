@@ -13,6 +13,39 @@ Once the file was generated and configured, run:
 ```bash
 python3 "$(git rev-parse --show-toplevel)/orchestrator/orchestrator.py" --interaction --intractable-illumination
 ```
+
+For momentum-model identification, run the separate contact-free flow:
+
+```bash
+python3 "$(git rev-parse --show-toplevel)/orchestrator/orchestrator.py" --calibrate
+```
+
+This stores per-axis delay, first-order time constant, and acceleration scale
+on each drone in `Interaction/wrench_calibration.json`. Normal `--interaction`
+runs load that file automatically and never issue the calibration excitation.
+Plain calibration runs only the XYZ wrench-model stage. Add
+`--adaptive-braking-calibration` to explicitly run the model-guided planar
+attitude/braking stage as well.
+Prediction-model validation and legacy planar-fit validation are independent.
+An adaptive run may retain an existing valid planar fit while saving a newly
+validated prediction model; without an existing valid planar fit, first run the
+fixed baseline opt-out above.
+Adaptive candidates are eligible only when the predicted horizon endpoint is
+within 0.05 m/s of zero projected velocity and 3 degrees of level attitude.
+The `translation_inertia` mission currently uses fourteen paired-direction
+attitude trials. Its 0.16/0.24/0.32-second tiers are retained and the new
+0.45-second tier is repeated three times so measured speeds near 1.5 m/s can
+enter training, receive an independent held-out validation, and only then be
+used by an adaptive trial. Because this changes the exact calibration protocol,
+collect a new fixed baseline first:
+
+```bash
+python3 "$(git rev-parse --show-toplevel)/orchestrator/orchestrator.py" \
+  --calibrate --no-adaptive-braking-calibration
+```
+
+Do not reuse the earlier 0.32-second planar fit as evidence that the new speed
+tier is covered; confirm the measured brake-entry range in the resulting log.
 The following videos show:
 
 - [Shahram and Shuqin interacting with a happy emoji.](https://youtu.be/_huysBvEuR4)

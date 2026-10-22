@@ -71,3 +71,6 @@ mock_orchestrator
 Interaction/analysis/results
 .skills
 skills/
+
+# Local MMSys paper analysis, data, and generated figures
+/MMSys/

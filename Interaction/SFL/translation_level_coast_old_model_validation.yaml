@@ -3,14 +3,14 @@
 name: translation_level_coast_old_model_validation
 drones:
   lb11:
-    target: [0, -1, 1]
+    target: [0.7, 1, 1]
     interaction: single
 Interaction:
   action: translation
   config:
     behavior: level_coast
     detection_method: model  # potentiometer | model | vel
-    record_potentiometer: false  # Record calibrated compression/force with any detection method.
+    record_potentiometer: true  # Record calibrated compression/force with any detection method.
     vicon_source_metadata: true
     duration: 60
     contact_validation_capture:
@@ -21,7 +21,7 @@ Interaction:
       initial_no_touch_s: 10.0
     grace_time: 1
     level_coast:
-      command_mode: orientation  # position | orientation; during interaction.
+      command_mode: position  # position | orientation; during interaction.
       coast_command_mode: scurve  # position | orientation | scurve; after release; omitted inherits command_mode.
       estimator_switch_at: detect  # detect | release (default); switch to estimator 3 for S-curve.
       estimator_hover_xy: true  # Reuse saved X/Y compensation; first fit settles 2s + samples 3s; needs eskfXY firmware.

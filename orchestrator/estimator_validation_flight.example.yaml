@@ -1,0 +1,18 @@
+# Optional advanced override only. Standard IMU validation needs no flight YAML.
+# Only the default estimator runs onboard. Estimator 3 runs offline after download.
+mocap_host: 192.168.1.39
+tracking_mode: pointcloud
+# Place the aircraft at this Vicon position before flight.
+initial_position_m: [0, -0.6, 0.24]
+attitude_reference: default_estimator
+center_m: [0, -0.6, 1.0]
+boundary_m: [[-1.5, 1.5], [-1.5, 1.5], [0.3, 1.5]]
+minimum_voltage: 7.0
+
+# Optional high-rate RAM input window; requires diagnostic recorder firmware.
+# Estimator 3 remains disabled. Download/replay runs after landing.
+# ram_trace:
+#   phase: +Y_out
+#   offset_s: 1.0
+#   hz: 1000
+#   duration_ms: 600
