@@ -54,6 +54,11 @@ Interaction:
         force_memory_s: 0.02
     wrench_interaction_profile: level_coast
     wrench_interaction:
+      firmware_auto_brake:
+        # F1 reset policy: true keeps the existing behavior; false disables it.
+        reset_on_mode_change: true  # pidCtl.resetMode; control-mode changes.
+        reset_xy_on_scurve_transition: true  # hlCommander.pRelRstXY; S-curve entry/hold.
+        stop_deceleration_m_s2: 3.6  # Current paper firmware limit: <= 3.6 m/s^2.
       force_estimator: specific_force  # specific_force: raw IMU; momentum: original model.
       specific_force:
         window_s: 0.08
