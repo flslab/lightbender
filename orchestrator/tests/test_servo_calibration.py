@@ -7,6 +7,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+import yaml
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -106,6 +107,8 @@ class SimulatedCalibration(ServoCalibrationMixin):
 class ClosedLoopTests(unittest.TestCase):
     def run_simulation(self, simulation, failure=False):
         with tempfile.TemporaryDirectory() as temp, patch.object(calibration, '__file__', str(Path(temp)/'servo_calibration.py')):
+            simulation.manifest_path = Path(temp)/'swarm_manifest.yaml'
+            simulation.manifest_path.write_text(yaml.safe_dump(simulation.manifest))
             if failure:
                 with self.assertRaises(RuntimeError):
                     simulation._calibrate_illumination_servos()
@@ -116,6 +119,7 @@ class ClosedLoopTests(unittest.TestCase):
     def test_correct_sign_closed_loop_converges_and_retains_offsets(self):
         simulation = SimulatedCalibration()
         report = self.run_simulation(simulation)
+        self.assertEqual(report['manifest_saved_offsets']['lb1'], simulation.offsets)
         self.assertEqual([r['status'] for r in report['drones']['lb1']['rods']], ['converged']*2)
         self.assertAlmostEqual(simulation.offsets[0], 8., delta=.7)
         self.assertAlmostEqual(simulation.offsets[1], -5., delta=.7)
@@ -226,6 +230,58 @@ class ClosedLoopTests(unittest.TestCase):
         rod = RodAdjustment(180., 15., (-15., 15.), DEFAULTS)
         rod.observe(170.)
         self.assertEqual(rod.status, 'limit_reached')
+
+
+class ManifestPersistenceTests(unittest.TestCase):
+    def inputs(self):
+        entry = dict(id='lb1', initial_offsets=[-5., 5.], offsets=[-1.2, 3.4])
+        report = dict(tag='test-run', completed=True, drones={'lb1': dict(verification_pass=1,
+            rods=[dict(status='converged', measured_deg=180.2), dict(status='converged', measured_deg=270.3)])})
+        return entry, report
+
+    def test_preserves_comments_other_drones_and_later_manual_settings(self):
+        original = "# swarm settings\nmission: {require_handshake: true}\ndrones:\n  - id: lb1 # identity\n    servo_offsets: [-5, 5] # hardware offsets\n    type: V\n  - id: lb7\n    servo_offsets: [0, 0]\n"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'swarm.yaml'
+            path.write_text(original)
+            entry, report = self.inputs()
+            saved = calibration.save_manifest_results(path, [entry], report, DEFAULTS)
+            text = path.read_text()
+            data = yaml.safe_load(text)
+            self.assertEqual(saved['lb1'], [-1.2, 3.4])
+            self.assertIn('# swarm settings', text)
+            self.assertIn('# identity', text)
+            self.assertIn('# hardware offsets', text)
+            self.assertEqual(data['drones'][1], dict(id='lb7', servo_offsets=[0, 0]))
+            self.assertTrue(data['drones'][0]['servo_calibration_result']['verified'])
+            # A second calibration replaces the prior result instead of adding duplicate keys.
+            entry['initial_offsets'] = saved['lb1']
+            entry['offsets'] = [-1., 3.]
+            calibration.save_manifest_results(path, [entry], report, DEFAULTS)
+            self.assertEqual(path.read_text().count('servo_calibration_result:'), 1)
+            self.assertEqual(yaml.safe_load(path.read_text())['drones'][0]['servo_offsets'], [-1., 3.])
+
+    def test_failed_cleanup_records_result_but_keeps_original_offsets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'swarm.yaml'
+            path.write_text('drones:\n  - id: lb1\n    servo_offsets:\n      - -5\n      - 5\n')
+            entry, report = self.inputs()
+            report['cleanup_error'] = 'missing acknowledgement'
+            calibration.save_manifest_results(path, [entry], report, DEFAULTS)
+            drone = yaml.safe_load(path.read_text())['drones'][0]
+            self.assertEqual(drone['servo_offsets'], [-5, 5])
+            self.assertFalse(drone['servo_calibration_result']['verified'])
+            self.assertEqual(drone['servo_calibration_result']['error'], 'missing acknowledgement')
+
+    def test_refuses_to_overwrite_offsets_edited_during_calibration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'swarm.yaml'
+            original = 'drones: [{id: lb1, servo_offsets: [9, 9]}]\n'
+            path.write_text(original)
+            entry, report = self.inputs()
+            with self.assertRaisesRegex(RuntimeError, 'edited during calibration'):
+                calibration.save_manifest_results(path, [entry], report, DEFAULTS)
+            self.assertEqual(path.read_text(), original)
 
 
 class TransportTests(unittest.TestCase):

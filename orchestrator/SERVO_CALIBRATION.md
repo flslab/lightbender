@@ -42,3 +42,17 @@ angles, not the first values accepted during initial calibration. These are
 camera-based measurements; tighter acceptance does not remove camera-model
 bias or guarantee sub-degree physical accuracy. Calibration can take longer
 or fail when the requested tolerance cannot be confirmed.
+
+## Saved results
+
+After calibration and cleanup, the orchestrator atomically updates the local
+`swarm_manifest.yaml`. Verified offsets are stored in each participating
+drone's `servo_offsets` and become the starting offsets on the next launch.
+Failed, unverified, or unacknowledged results never replace previous offsets.
+`servo_calibration_result` stores the run tag, verification status, latest
+measured angles/errors, and saved offsets, including failure information.
+
+Comments and unrelated settings are preserved. If servo offsets were edited
+during calibration, the save is refused rather than overwriting the edit.
+Save failures are logged and included as `manifest_save_error` in the run's
+calibration JSON; they do not discard the calibration recording or results.

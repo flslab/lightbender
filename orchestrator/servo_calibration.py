@@ -3,9 +3,14 @@ import json
 import math
 import time
 import uuid
+import copy
+import os
+import stat
+import tempfile
 from pathlib import Path
 
 import zmq
+import yaml
 
 
 DEFAULTS = dict(enabled=False, camera_id='CAM', timeout_s=60.,
@@ -16,6 +21,87 @@ DEFAULTS = dict(enabled=False, camera_id='CAM', timeout_s=60.,
                 confirmation_measurements=2, verification_passes=1,
                 min_color_pixels=6, min_span_px=8., association_radius_px=80.,
                 led_pitch_m=.00624, failure_policy='abort')
+
+
+def save_manifest_results(path, entries, report, config):
+    """Patch only calibration fields, preserving comments and unrelated edits."""
+    path = Path(path)
+    original = path.read_text()
+    document = yaml.safe_load(original)
+    tree = yaml.compose(original)
+    drones_node = next(value for key, value in tree.value if key.value == 'drones')
+    expected = copy.deepcopy(document)
+    by_id = {drone['id']: drone for drone in expected['drones']}
+    nodes = {}
+    for node in drones_node.value:
+        fields = {key.value: (key, value) for key, value in node.value}
+        name = yaml.safe_load(original[fields['id'][1].start_mark.index:fields['id'][1].end_mark.index])
+        if name in nodes:
+            raise ValueError(f'duplicate manifest drone {name}')
+        nodes[name] = fields
+    edits = []
+    for entry in entries:
+        name = entry['id']
+        drone, fields = by_id[name], nodes[name]
+        existing = drone.get('servo_offsets', [0., 0.])
+        if existing != entry['initial_offsets']:
+            raise RuntimeError(f'{name}: servo offsets were edited during calibration; refusing to overwrite them')
+        result = report['drones'].get(name, {})
+        rods = result.get('rods', [])
+        eligible = (report['completed'] and not report.get('error') and not report.get('cleanup_error')
+                    and result.get('verification_pass') == config['verification_passes'])
+        offsets = list(existing)
+        for index, rod in enumerate(rods):
+            if eligible and rod['status'] == 'converged':
+                offsets[index] = entry['offsets'][index]
+        metadata = dict(tag=report['tag'], verified=eligible and len(rods) == 2 and
+                        all(rod['status'] == 'converged' for rod in rods),
+                        rods=rods, saved_offsets=offsets)
+        if report.get('error') or report.get('cleanup_error'):
+            metadata['error'] = report.get('cleanup_error') or report['error']
+        additions = []
+        for field, value in (('servo_offsets', offsets), ('servo_calibration_result', metadata)):
+            drone[field] = value
+            text = yaml.safe_dump(value, default_flow_style=True, width=100000, sort_keys=False).strip()
+            if field in fields:
+                node = fields[field][1]
+                if isinstance(node, (yaml.SequenceNode, yaml.MappingNode)) and not node.flow_style:
+                    text = ' '*max(0, fields[field][0].start_mark.column+2-node.start_mark.column)+text
+                start = node.start_mark.index
+                end = start + len(original[start:node.end_mark.index].rstrip())
+                edits.append((start, end, text))
+            else:
+                indent = fields['id'][0].start_mark.column
+                additions.append(' '*indent+field+': '+text+'\n')
+        if additions:
+            anchor = original.find('\n', fields['id'][1].end_mark.index)
+            if anchor < 0:
+                anchor = len(original)
+                insertion = '\n'+''.join(additions)
+            else:
+                anchor += 1
+                insertion = ''.join(additions)
+            edits.append((anchor, anchor, insertion))
+    updated = original
+    for start, end, text in sorted(edits, reverse=True):
+        updated = updated[:start]+text+updated[end:]
+    if yaml.safe_load(updated) != expected:
+        raise ValueError('manifest layout cannot be safely patched; original retained')
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+        if path.read_text() != original:
+            raise RuntimeError('manifest changed while saving; original retained')
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {entry['id']: by_id[entry['id']]['servo_offsets'] for entry in entries}
 
 
 def configure(manifest, args, cameras, missions):
@@ -304,6 +390,19 @@ class ServoCalibrationMixin:
             report['applied_offsets'] = {entry['id']: entry['offsets'] for entry in entries}
             if cleanup_error:
                 report['cleanup_error'] = str(cleanup_error)
+            if not self.running.is_set() or self.emergency:
+                report.setdefault('error', 'calibration interrupted before cleanup completed')
+            try:
+                saved = save_manifest_results(getattr(self, 'manifest_path',
+                    Path(__file__).resolve().parent/'swarm_manifest.yaml'), entries, report, config)
+                report['manifest_saved_offsets'] = saved
+                for drone in self.manifest.get('drones', []):
+                    if drone['id'] in saved:
+                        drone['servo_offsets'] = list(saved[drone['id']])
+                self.logger.info('Saved calibration results to swarm manifest: %s', saved)
+            except Exception as caught:
+                report['manifest_save_error'] = str(caught)
+                self.logger.error('Could not save servo calibration results to manifest: %s', caught)
             (directory/'servo_calibration.json').write_text(json.dumps(report, indent=2, allow_nan=False))
             if cleanup_error:
                 raise RuntimeError('servo calibration cleanup failed; illumination will not start') from cleanup_error
