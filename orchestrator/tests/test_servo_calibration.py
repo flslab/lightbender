@@ -31,6 +31,16 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(configure({'servo_calibration': {'enabled': True}},
                                    SimpleNamespace(kill=[]), [], [])['enabled'])
 
+    def test_verification_disabled_by_default_and_zero_is_valid(self):
+        manifest, missions, cameras = configuration()
+        config = configure(manifest, SimpleNamespace(illumination=True), cameras, missions)
+        self.assertEqual(config['verification_passes'], 0)
+        for value in (-1, True, 1.5):
+            manifest, missions, cameras = configuration()
+            manifest['servo_calibration']['verification_passes'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                configure(manifest, SimpleNamespace(illumination=True), cameras, missions)
+
     def test_enable_cli_and_validate_before_launch(self):
         manifest, missions, cameras = configuration()
         manifest['servo_calibration']['enabled'] = False
@@ -70,7 +80,7 @@ class SimulatedCalibration(ServoCalibrationMixin):
     def __init__(self, bias=(-8., 5.), stalled=False, invisible=False, policy='abort'):
         self.manifest, self.missions, self.cameras = configuration()
         self.servo_calibration_cfg = dict(DEFAULTS, enabled=True, max_iterations=8,
-            tolerance_deg=.7, settle_s=.001, failure_policy=policy)
+            tolerance_deg=.7, settle_s=.001, failure_policy=policy, verification_passes=1)
         self.running = threading.Event()
         self.running.set()
         self.emergency = False
@@ -115,6 +125,14 @@ class ClosedLoopTests(unittest.TestCase):
             else:
                 simulation._calibrate_illumination_servos()
             return json.loads((Path(temp)/'logs/test/servo_calibration.json').read_text())
+
+    def test_no_verification_pass_still_persists_successful_offsets(self):
+        simulation = SimulatedCalibration()
+        simulation.servo_calibration_cfg['verification_passes'] = 0
+        report = self.run_simulation(simulation)
+        self.assertEqual(report['drones']['lb1']['verification_pass'], 0)
+        self.assertTrue(all(o['phase'] == 'initial' for o in report['drones']['lb1']['observations']))
+        self.assertEqual(report['manifest_saved_offsets']['lb1'], simulation.offsets)
 
     def test_correct_sign_closed_loop_converges_and_retains_offsets(self):
         simulation = SimulatedCalibration()
@@ -235,7 +253,7 @@ class ClosedLoopTests(unittest.TestCase):
 class ManifestPersistenceTests(unittest.TestCase):
     def inputs(self):
         entry = dict(id='lb1', initial_offsets=[-5., 5.], offsets=[-1.2, 3.4])
-        report = dict(tag='test-run', completed=True, drones={'lb1': dict(verification_pass=1,
+        report = dict(tag='test-run', completed=True, drones={'lb1': dict(verification_pass=DEFAULTS['verification_passes'],
             rods=[dict(status='converged', measured_deg=180.2), dict(status='converged', measured_deg=270.3)])})
         return entry, report
 

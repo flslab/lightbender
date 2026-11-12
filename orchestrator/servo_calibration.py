@@ -18,7 +18,7 @@ DEFAULTS = dict(enabled=False, camera_id='CAM', timeout_s=60.,
                 max_iterations=10, tolerance_deg=.75, gain=.7, max_step_deg=3.,
                 max_correction_deg=15., stall_iterations=3,
                 min_improvement_deg=.25, consensus_frames=5, max_spread_deg=1.,
-                confirmation_measurements=2, verification_passes=1,
+                confirmation_measurements=2, verification_passes=0,
                 min_color_pixels=6, min_span_px=8., association_radius_px=80.,
                 led_pitch_m=.00624, failure_policy='abort')
 
@@ -134,13 +134,15 @@ def configure(manifest, args, cameras, missions):
         raise ValueError('servo_calibration.calibration_file must be a path on the front camera')
     if config['failure_policy'] not in ('abort', 'continue'):
         raise ValueError('servo calibration failure_policy must be abort or continue')
-    for field in set(DEFAULTS) - {'enabled', 'camera_id', 'failure_policy'}:
+    for field in set(DEFAULTS) - {'enabled', 'camera_id', 'failure_policy', 'verification_passes'}:
         value = config[field]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f'servo_calibration.{field} must be positive and finite')
     for field in ('max_iterations', 'stall_iterations', 'consensus_frames', 'min_color_pixels', 'confirmation_measurements', 'verification_passes'):
         if not isinstance(config[field], int):
             raise ValueError(f'servo_calibration.{field} must be an integer')
+    if isinstance(config['verification_passes'], bool) or config['verification_passes'] < 0:
+        raise ValueError('servo_calibration.verification_passes must be a nonnegative integer')
     if config['gain'] > 1 or config['max_correction_deg'] > 45:
         raise ValueError('servo calibration gain must be <= 1 and max_correction_deg <= 45')
     if not missions:

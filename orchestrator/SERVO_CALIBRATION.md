@@ -11,15 +11,22 @@ A previously converged rod resumes correction if it drifts outside tolerance,
 and a missing measurement clears its confirmation count. Summaries always
 show the latest measurement, including missing values.
 
-After all drones finish initial calibration, a mandatory verification sweep
-remeasures each drone and corrects any new error. Each pass allows up to ten
+Verification sweeps are disabled by default (`verification_passes: 0`).
+Set `verification_passes: 1` to remeasure every drone after initial calibration
+and correct any new error. Each pass allows up to ten
 measurement attempts per drone. The entire phase still has a 60-second budget,
 servo travel/offset bounds, stall detection, battery checks, rollback and the
 configured abort/continue policy. A failed initial pass does not spend another
 pass retrying a stalled or limited servo. With the default abort policy, any
 unverified or inaccurate rod prevents illumination START.
 
-Relevant manifest settings:
+Edit the top-level `servo_calibration` section in `swarm_manifest.yaml`:
+
+- `consensus_frames`: consistent camera frames per estimate.
+- `max_spread_deg`: allowed variation between frames, in degrees.
+- `confirmation_measurements`: consecutive acceptable estimates required.
+- `max_iterations`: maximum attempts per drone per pass.
+- `verification_passes`: extra sweeps after initial calibration; zero disables them.
 
 ```yaml
 servo_calibration:
@@ -31,7 +38,7 @@ servo_calibration:
   consensus_frames: 5
   max_spread_deg: 1.0
   confirmation_measurements: 2
-  verification_passes: 1
+  verification_passes: 0
   timeout_s: 60.0
   failure_policy: abort
 ```

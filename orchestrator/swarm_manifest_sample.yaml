@@ -122,6 +122,10 @@ servo_calibration:
   max_correction_deg: 15.0        # maximum change from existing manifest offsets
   stall_iterations: 3
   failure_policy: abort          # continue restores failed rods' original offsets
+  consensus_frames: 5
+  max_spread_deg: 1.0
+  confirmation_measurements: 2
+  verification_passes: 0
 
 camera_nodes:
   - id: CAM
