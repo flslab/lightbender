@@ -91,6 +91,7 @@ class CameraNodesMixin:
 
     def _prepare_camera_run(self):
         super()._prepare_camera_run()
+        self.servo_calibration_recording_camera_id = None
         self.camera_ready_ids = set()
         self.requested_camera_ids = set()
         for config in self._active_cameras():
@@ -206,12 +207,13 @@ class CameraNodesMixin:
         wanted = getattr(self, 'requested_camera_ids', set())
         for config in configs:
             camera_id = self._camera_id(config)
-            if not self.took_off and camera_id not in wanted:
+            calibration_requested = getattr(self, 'servo_calibration_recording_camera_id', None) == camera_id
+            if not self.took_off and camera_id not in wanted and not calibration_requested:
                 continue
             try:
                 # The recorder exits after SIGINT closes the video. Wait for
                 # that exit instead of copying a file still being finalized.
-                timeout = _timeout(config, 'stop_timeout_s', 15)
+                timeout = max(_timeout(config, 'stop_timeout_s', 15), 70 if calibration_requested else 0)
                 check = 'while pgrep -f "^python3 .*camera_node[.]py( |$)" >/dev/null; do sleep 0.25; done'
                 with Connection(host=config['ip'], user=config['user'], connect_timeout=10) as conn:
                     conn.run(f'timeout {timeout:g}s bash -c {shlex.quote(check)}',
@@ -219,8 +221,17 @@ class CameraNodesMixin:
                 work = config.get('work_dir', self.common_cfg['work_dir'])
                 local_dir = Path('./logs') / self.tag
                 local_dir.mkdir(parents=True, exist_ok=True)
-                local = local_dir / f'{camera_id}_{self.tag}.mp4'
-                self._download_file(config, f'{work}/mission_footage.mp4', str(local),
-                                    f'Mission Video ({camera_id})', required=True)
+                if calibration_requested:
+                    for suffix in ('mp4', 'frames.jsonl'):
+                        remote = f"{work}/logs/servo_calibration/{config['run_id']}.{suffix}"
+                        local = local_dir / f'{camera_id}_{self.tag}_servo_calibration.{suffix}'
+                        self._download_file(config, remote, str(local),
+                                            f'Servo Calibration ({camera_id}, {suffix})', required=True)
+                # Calibration can abort before mission recording ever starts.
+                # Do not retrieve a stale mission_footage.mp4 from a prior run.
+                if not self._servo_calibration_enabled() or camera_id in wanted:
+                    local = local_dir / f'{camera_id}_{self.tag}.mp4'
+                    self._download_file(config, f'{work}/mission_footage.mp4', str(local),
+                                        f'Mission Video ({camera_id})', required=True)
             except Exception as error:
                 self.logger.error('Could not finalize/download camera %s: %s', camera_id, error)

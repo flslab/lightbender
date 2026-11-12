@@ -62,6 +62,7 @@ from interaction_launch import (
 from marker_grid_client import MarkerGridClient
 from camera.pose_estimation import CameraPoseMixin
 from camera.nodes import CameraNodesMixin
+from servo_calibration import ServoCalibrationMixin
 
 # from Interaction.vicon_noise_tracker import run_tracker
 from pathlib import Path
@@ -155,7 +156,7 @@ def validate_marker_tile_ownership(manifest):
             seen.add(key)
 
 
-class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
+class SwarmOrchestrator(ServoCalibrationMixin, CameraNodesMixin, CameraPoseMixin):
     def __init__(self, args):
         setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -199,6 +200,7 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
         self.camera_run_id = None
         self.marker_grid_sha256 = None
         self._configure_camera_pose()
+        self._configure_servo_calibration()
 
         # Runtime State
         self.tag = None
@@ -462,7 +464,7 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
         if drone.get('flowdeck'):
             localization_flags = "--check-deck bcFlow2" 
         elif drone.get('vicon'):
-            localization_flags = "--vicon --light-module-offset 0.075 0.0 -0.040"
+            localization_flags = "--vicon"
         if drone.get('save_vicon'):
             localization_flags += " --save-vicon "
         
@@ -487,7 +489,6 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
             f"--servo-offsets {' '.join(str(o) for o in servo_offsets)} " if servo_count > 0 else " ",
             f"--takeoff-altitude {alt} ",
             f"{smooth_controller_rate}",
-            "--camera-offset 0.04 0 0 --marker-offset 0 0 0",
             "--velocity-p 1.0",
             "--log",
             # "--skip-arm",
@@ -1108,6 +1109,7 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
             self._apply_network_mode()
             # Network switching may replace the live manifest dictionaries.
             self._configure_camera_pose()
+            self._configure_servo_calibration()
             self._prepare_camera_run()
             if not self.running.is_set():
                 return
@@ -1253,7 +1255,8 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
                 else:
                     input(">>> All Green. Press ENTER to Launch Swarm (Ctrl+C to Abort)...")
                     # time.sleep(10)
-            self._start_camera_recording()
+            if not self._servo_calibration_enabled():
+                self._start_camera_recording()
             self.logger.info("Broadcasting START...")
             self.pub_socket.send_json({"cmd": "START"})
             self.took_off = True
@@ -1272,8 +1275,7 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
                         else:
                             input(f">>> Mission {i+1}/{len(self.missions)}: All at target. Press ENTER to proceed (Ctrl+C to Abort)...")
                     if i == 0:
-                        # time.sleep(5)
-                        pass
+                        self._calibrate_illumination_servos()
                     # Confirmation can remain open indefinitely. Re-check the
                     # recorder immediately before every mission START so a
                     # queued failure or dead camera cannot be followed by a
@@ -1564,6 +1566,8 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--illumination", action="store_true", help="illumination application")
+    parser.add_argument("--calibrate-servos", action="store_true",
+                        help="calibrate rod servo offsets before illumination")
     parser.add_argument("--interaction", action="store_true", help="interaction application")
     parser.add_argument('--vicon-source-metadata', action='store_true',
                         help='record optional Vicon source-frame and pipeline timing diagnostics')

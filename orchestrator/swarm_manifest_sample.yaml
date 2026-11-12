@@ -109,6 +109,20 @@ mission:
   delta_t: 0.0
   require_handshake: true
 
+# Optional front-camera feedback before the first illumination START.
+# Requires matching controller/camera code in fls-cf-offboard-controller.
+servo_calibration:
+  enabled: false                  # or pass --calibrate-servos with --illumination
+  camera_id: CAM                  # explicitly select the front recording camera
+  calibration_file: /home/fls/fls-cf-offboard-controller/config/rgb_camera.json
+  timeout_s: 60.0                 # total feedback budget for the entire swarm
+  max_iterations: 10               # per drone; both rods measured independently
+  tolerance_deg: 0.75
+  max_step_deg: 3.0
+  max_correction_deg: 15.0        # maximum change from existing manifest offsets
+  stall_iterations: 3
+  failure_policy: abort          # continue restores failed rods' original offsets
+
 camera_nodes:
   - id: CAM
     enabled: true
