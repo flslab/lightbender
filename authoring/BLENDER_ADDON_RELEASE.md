@@ -33,7 +33,29 @@ explicit user settings, or private temporary directories. Localhost endpoints
 used for Blender/orchestrator communication remain intentional configuration
 defaults.
 
+## Body scale (1.25.2)
+
+Full LightBenders have a positive Body Scale setting for creation and per-object
+edits. It scales only the aircraft instance and adjusts Light Module Offset by
+the same ratio to keep the unscaled rods/LEDs at the hinge. Shared mesh data,
+the drone origin, and the onboard camera are preserved. The actual adjusted
+offset continues through both SFL export paths.
+
+## Rod visibility correction (1.25.1)
+
+The shared `rod_visibility.py` helper detects foreground dark rods and supplies
+colored transfers after placement, extinguishing the covered rear spans. Stagger uses actual LED profiles,
+physical rod lengths, module offsets, and orientations. Display and mission
+export use the same corrected color expressions; Reset Stagger restores the
+original expressions. The standalone authoring scripts use the same solver and
+carry its interval data into SVG/3D figures and mission formulas.
+
 ## What the ZIP contains
+
+Version 1.25.0 adds the full carbon-fiber aircraft option. Its Blender 3.0 mesh
+library and provenance JSON are bundled under `assets/`; aircraft instances
+share the loaded mesh. The creation setting applies to Create and Transform
+and Place. The editable Fusion source copy is not needed at runtime.
 
 ```text
 lightbender_swarm/
@@ -45,11 +67,15 @@ lightbender_swarm/
   README.md
   BLENDER_ADDON_RELEASE.md
   release_manifest.json
+  assets/
+    lightbender_full.blend
+    lightbender_full.json
   authoring/
     transform.py
     place.py
     set_cover_gurobi_f.py
     deconflict.py              # Stagger
+    rod_visibility.py          # Analytic rod occlusion and colored spans
     morph_match.py
     camera_facing.py
 ```

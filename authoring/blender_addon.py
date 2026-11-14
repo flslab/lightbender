@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LightBender Swarm Animator",
     "author": "Hamed Alimohammadzadeh",
-    "version": (1, 24, 3),
+    "version": (1, 25, 2),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > LightBender",
     "description": "Create and animate LightBenders, export SFL, and export ground-truth trajectories",
@@ -1525,11 +1525,56 @@ def update_light_module_offset(props, context):
     for child in drone.children:
         # Rods, arcs and rings own LEDs directly. This also supports objects
         # created by older add-on versions without relying on mutable names.
-        if child.type == 'MESH' and any("led_index" in led for led in child.children):
+        if child.get("lightbender_full_model") or (
+                child.type == 'MESH' and any("led_index" in led for led in child.children)):
             child.location = props.light_module_offset
+            if child.get("lightbender_full_model"):
+                child.scale = (props.body_scale,) * 3
+
+
+def get_body_scale(props):
+    return props.get("body_scale", 1.0)
+
+
+def set_body_scale(props, value):
+    """Scale the aircraft about the drone origin and keep its hinge attached."""
+    if not math.isfinite(value):
+        return
+    # Custom RNA setters must enforce the hard bound for Python assignments too.
+    value = max(0.000001, value)
+    previous = get_body_scale(props)
+    props["body_scale"] = value
+    if isinstance(props.id_data, bpy.types.Object) and props.model_mode == 'FULL':
+        # The shared CAD mesh is authored about its hinge, not the drone origin.
+        # Moving that hinge by the same ratio scales the body about the origin
+        # without scaling the sibling rods or their LEDs. Keep the actual mount
+        # in light_module_offset so exports and placement tools see it too.
+        props.light_module_offset = Vector(props.light_module_offset) * (value / previous)
 
 
 class DroneProperties(bpy.types.PropertyGroup):
+    model_mode: EnumProperty(
+        name="Model",
+        description="Geometry used for newly created LightBenders, including Transform and Place",
+        items=[
+            ('MODULE_ONLY', "Lighting Module Only", "Generate the lighting module"),
+            ('FULL', "Full LightBender", "Include the simplified carbon-fiber aircraft model"),
+        ],
+        default='MODULE_ONLY',
+    )
+
+    body_scale: FloatProperty(
+        name="Body Scale",
+        description="Scale the full aircraft body and its hinge offset, keeping rods and LEDs their original size",
+        default=1.0,
+        min=0.000001,
+        soft_min=0.1,
+        soft_max=3.0,
+        options=set(),
+        get=get_body_scale,
+        set=set_body_scale,
+    )
+
     light_module_offset: FloatVectorProperty(
         name="Light Module Offset (FLU)",
         description="Mounting offset from drone origin to module hinge in metres: Forward, Left, Up",
@@ -2102,6 +2147,21 @@ def get_structure_material():
 #    Geometry & Setup Operator
 # ------------------------------------------------------------------------
 
+def get_full_lightbender_mesh():
+    """Load the bundled mesh once; every aircraft shares its mesh and materials."""
+    for mesh in bpy.data.meshes:
+        if mesh.get("lightbender_asset") == 'carbon_fiber_v11_render_v1':
+            return mesh
+    path = os.path.join(os.path.dirname(__file__), 'assets', 'lightbender_full.blend')
+    if not os.path.isfile(path):
+        raise RuntimeError("Full LightBender asset is missing. Reinstall the complete add-on ZIP.")
+    with bpy.data.libraries.load(path, link=False) as (source, target):
+        if 'LightBender_Full_Mesh' not in source.meshes:
+            raise RuntimeError("Full LightBender asset does not contain the expected mesh")
+        target.meshes = ['LightBender_Full_Mesh']
+    return target.meshes[0]
+
+
 class OBJECT_OT_add_drone(bpy.types.Operator):
     """Create a new LightBender with Light Elements"""
     bl_idname = "drone.add_drone"
@@ -2305,6 +2365,14 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
 
     def execute(self, context):
         # 1. Create Main Drone Body
+        model_mode = context.scene.drone_props.model_mode
+        full_mesh = None
+        if model_mode == 'FULL':
+            try:
+                full_mesh = get_full_lightbender_mesh()
+            except (RuntimeError, OSError) as error:
+                self.report({'ERROR'}, str(error))
+                return {'CANCELLED'}
         bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
         drone_base = context.active_object
         drone_base.name = next_lightbender_name(self.drone_type)
@@ -2312,6 +2380,14 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
 
         # 2. Add Properties
         drone_base.drone_props.drone_type = self.drone_type
+        drone_base.drone_props.model_mode = model_mode
+        if model_mode == 'FULL':
+            drone_base.drone_props.body_scale = context.scene.drone_props.body_scale
+        if full_mesh is not None:
+            aircraft = bpy.data.objects.new("LightBender_Full_Model", full_mesh)
+            context.collection.objects.link(aircraft)
+            aircraft.parent = drone_base
+            aircraft["lightbender_full_model"] = True
 
         is_semi = 'SEMI' in self.drone_type
         is_ring = 'RING' in self.drone_type
@@ -2366,7 +2442,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             rod1.name = "Rod_1"
             rod1.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-            bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
+            rod1.data.transform(Matrix.Translation((0, ROD_LEN / 2, 0)))
+            rod1.location = (0, 0, 0)
             rod1.parent = drone_base
             rod1.data.materials.append(get_structure_material())
             rod1.hide_render = True
@@ -2387,7 +2464,8 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             rod2.name = "Rod_2"
             rod2.scale = (ROD_THICKNESS, ROD_LEN, ROD_THICKNESS)
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-            bpy.ops.object.origin_set(type='ORIGIN_CURSOR', center='MEDIAN')
+            rod2.data.transform(Matrix.Translation((0, ROD_LEN / 2, 0)))
+            rod2.location = (0, 0, 0)
             rod2.parent = drone_base
             rod2.data.materials.append(get_structure_material())
             rod2.hide_render = True
@@ -2418,6 +2496,13 @@ class OBJECT_OT_add_drone(bpy.types.Operator):
             var.targets[0].id = drone_base
             var.targets[0].data_path = '["servo_2"]'
             d.driver.expression = "-radians(angle)"
+
+        # Full aircraft renders include the existing procedural rod/arc/ring
+        # structure; lighting-only mode retains its LED-only render behavior.
+        if model_mode == 'FULL':
+            for child in drone_base.children:
+                if child.type == 'MESH' and any('led_index' in led for led in child.children):
+                    child.hide_render = False
 
         # 4. Attach Downward-Facing Camera
         cam_data = bpy.data.cameras.new(name="Drone_Camera_Data")
@@ -3928,6 +4013,132 @@ class DRONE_OT_reset_drift(bpy.types.Operator):
 #    Deconfliction Feature
 # ------------------------------------------------------------------------
 
+def stagger_lighting_geometry(obj, scene):
+    """Export physical rods and colored intervals, including gaps, at this frame."""
+    props = obj.drone_props
+    if props.drone_type not in ('TYPE_H', 'TYPE_V'):
+        raise ValueError(f'{obj.name}: Stagger supports straight H/V rods')
+    if obj.parent or obj.constraints or any(abs(s-1) > 1e-6 for s in obj.scale):
+        raise ValueError(f'{obj.name}: Stagger requires unparented, unconstrained objects with unit scale')
+    spacing = .00624
+    pointers = sorted(props.led_pointers, key=lambda p:p.value)
+    # Exact pointer boundaries, plus cells for expressions varying by LED.
+    cuts = {0.,25.,49.} | {i+.5 for i in range(49)}
+    if props.led_mode == 'POINTERS':
+        cuts.update(p.value for p in pointers if 0 < p.value < 49)
+    cuts = sorted(cuts)
+    time_value = max(0., (scene.frame_current-scene.frame_start)/scene.render.fps)
+    profiles = [[],[]]
+    for lo,hi in zip(cuts,cuts[1:]):
+        midpoint = (lo+hi)*.5
+        expr = props.led_formula if props.led_mode == 'EXPRESSION' else props.led_base_color
+        if props.led_mode == 'POINTERS':
+            for pointer in pointers:
+                if midpoint >= pointer.value:
+                    expr = pointer.color_expression
+        rgb = eval(expr, {}, {'i':int(round(midpoint)), 't':time_value,
+                             'N':50, 'math':math, 'random':random})
+        if not isinstance(rgb,(list,tuple)) or len(rgb) < 3 or not all(
+                isinstance(c,(int,float)) and math.isfinite(c) for c in rgb[:3]):
+            raise ValueError(f'{obj.name}: LED expressions must return finite RGB colors')
+        multiplier = 255. if max(rgb[:3]) <= 1 else 1.
+        color = [min(255.,max(0.,c*multiplier)) for c in rgb[:3]]
+        if max(color) <= 0:
+            continue
+        rod = 0 if hi <= 25 else 1
+        a,b = ((25-hi)*spacing,(25-lo)*spacing) if rod == 0 else ((lo-25)*spacing,(hi-25)*spacing)
+        profiles[rod].append([a,b,color])
+    intervals,colors = [],[]
+    for profile in profiles:
+        merged = []
+        for a,b,color in sorted(profile):
+            if merged and abs(a-merged[-1][1]) < 1e-8 and color == merged[-1][2]:
+                merged[-1][1] = b
+            else:
+                merged.append([a,b,color])
+        intervals.append([[a,b] for a,b,_ in merged])
+        colors.append([color for _,_,color in merged])
+    rotation = obj.matrix_world.to_3x3()
+    directions = [rotation @ Vector((0,math.cos(math.radians(obj[key])),
+                                      -math.sin(math.radians(obj[key]))))
+                  for key in ('servo_1','servo_2')]
+    return dict(lit_intervals=intervals, lit_colors=colors,
+                length_1=max((b for a,b in intervals[0]),default=0.),
+                length_2=max((b for a,b in intervals[1]),default=0.),
+                rod_lengths=[.156,.15], max_length_limit=.156, rod_radius=.0015,
+                module_offset=list(rotation @ Vector(props.light_module_offset)),
+                rod_directions=[list(v) for v in directions])
+
+
+def apply_stagger_lighting_patches(obj, frames, scene, scales=None):
+    """Overlay repair colors without replacing pointer animation.
+
+    Repairs are baked at staggered keyframes and held until the next sample;
+    visibility along the interpolated flight trajectory is not guaranteed.
+    """
+    scales = scales or {}
+    if not any(frames.values()) and all(abs(s-1) < 1e-8 for s in scales.values()):
+        return False
+    props = obj.drone_props
+    if 'deconflict_orig_lighting' not in obj:
+        obj['deconflict_orig_lighting'] = json.dumps(dict(
+            base=props.led_base_color, formula=props.led_formula,
+            pointers=[p.color_expression for p in props.led_pointers]))
+    ordered = sorted(frames)
+    clauses = []
+    for j,frame in enumerate(ordered):
+        timing = []
+        if len(ordered) > 1:
+            if j:
+                timing.append(f't >= {(frame-scene.frame_start)/scene.render.fps!r}')
+            if j+1 < len(ordered):
+                timing.append(f't < {(ordered[j+1]-scene.frame_start)/scene.render.fps!r}')
+        for patch in frames[frame]:
+            a,b = patch['start']/.00624, patch['end']/.00624
+            lo,hi = (25-b,25-a) if patch['rod'] == 1 else (25+a,25+b)
+            lo,hi = max(0 if patch['rod']==1 else 26,lo), min(25 if patch['rod']==1 else 49,hi)
+            if hi < lo:
+                continue
+            condition = ' and '.join(timing+[f'{lo-1e-6!r} <= i <= {hi+1e-6!r}'])
+            clauses.append((condition,patch['color']))
+    def wrapped(expr):
+        # Keep index-dependent expressions aligned with the scaled pointer bounds.
+        # The time variable remains live; only the spatial LED index is remapped.
+        import ast
+        original = expr
+        for j,frame in reversed(list(enumerate(ordered))):
+            scale = scales.get(frame,1.)
+            if abs(scale-1) < 1e-8:
+                value = original
+            else:
+                index = f'(25+(i-25)/{scale!r})'
+                tree = ast.parse(original,mode='eval')
+                names = sorted({n.id for n in ast.walk(tree) if isinstance(n,ast.Name)}
+                               & {'t','N','math','random'})
+                params = ','.join(['i',*names])
+                values = ','.join([f'max(0,min(49,int(round({index}))))',*names])
+                # Bind the remapped index without rewriting local variables in
+                # comprehensions or lambdas inside the user's expression.
+                value = f'(lambda {params}: ({original}))({values}) if 0 <= {index} <= 49 else [0,0,0]'
+            if len(ordered) == 1:
+                expr = value
+            else:
+                timing = []
+                if j:
+                    timing.append(f't >= {(frame-scene.frame_start)/scene.render.fps!r}')
+                if j+1 < len(ordered):
+                    timing.append(f't < {(ordered[j+1]-scene.frame_start)/scene.render.fps!r}')
+                expr = f'({value}) if ({" and ".join(timing)}) else ({expr})'
+        for condition,color in reversed(clauses):
+            expr = f'({color!r}) if ({condition}) else ({expr})'
+        return expr
+    props.led_base_color = wrapped(props.led_base_color)
+    props.led_formula = wrapped(props.led_formula)
+    for pointer in props.led_pointers:
+        pointer.color_expression = wrapped(pointer.color_expression)
+    return bool(clauses)
+
+
 def revert_deconflict_stagger(obj):
     restored = False
     restored_action = False
@@ -3966,6 +4177,14 @@ def revert_deconflict_stagger(obj):
                                 kp.handle_left.y = 25.0 + (kp.handle_left.y - 25.0) * inv_scale
                                 kp.handle_right.y = 25.0 + (kp.handle_right.y - 25.0) * inv_scale
                             fc.update()
+        restored = True
+    if 'deconflict_orig_lighting' in obj:
+        saved = json.loads(obj['deconflict_orig_lighting'])
+        obj.drone_props.led_base_color = saved['base']
+        obj.drone_props.led_formula = saved['formula']
+        for pointer,expression in zip(obj.drone_props.led_pointers,saved['pointers']):
+            pointer.color_expression = expression
+        del obj['deconflict_orig_lighting']
         restored = True
     return restored
 
@@ -4138,7 +4357,8 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
         for obj in drones:
             if obj.animation_data and obj.animation_data.action:
                 for fc in get_action_fcurves(obj):
-                    if fc.data_path == "location":
+                    if (fc.data_path in ('location','rotation_euler','["servo_1"]','["servo_2"]')
+                            or 'led_pointers' in fc.data_path or 'light_module_offset' in fc.data_path):
                         for kp in fc.keyframe_points:
                             frames_to_stagger.add(int(round(kp.co.x)))
 
@@ -4154,6 +4374,8 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
         original_frame = scene.frame_current
         applied_at_least_once = False
+        lighting_frames = {obj.name:{} for obj in drones}
+        lighting_scales = {obj.name:{} for obj in drones}
 
         if len(frames_to_stagger) > 1:
             for frame in frames_to_stagger:
@@ -4176,31 +4398,23 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
 
                 points.append({
                     'id': d_id,
-                    'x': round(obj.location.x, 4),
-                    'y': round(obj.location.y, 4),
-                    'z': round(obj.location.z, 4),
-                    'length_1': 0.08,
-                    'length_2': 0.08,
+                    'x': obj.location.x,
+                    'y': obj.location.y,
+                    'z': obj.location.z,
                     'angle_1': a1,
                     'angle_2': a2,
                     'yaw': yaw,
-                    'max_length_limit': 0.16
                 })
+                try:
+                    points[-1].update(stagger_lighting_geometry(obj,scene))
+                except (ValueError,TypeError,NameError,SyntaxError,ZeroDivisionError) as error:
+                    self.report({'ERROR'}, str(error))
+                    scene.frame_set(original_frame)
+                    return {'CANCELLED'}
 
             try:
                 with open(input_yaml, 'w') as f:
-                    f.write("points:\n")
-                    for p in points:
-                        f.write(f"- id: {p['id']}\n")
-                        f.write(f"  x: {p['x']}\n")
-                        f.write(f"  y: {p['y']}\n")
-                        f.write(f"  z: {p['z']}\n")
-                        f.write(f"  length_1: {p['length_1']}\n")
-                        f.write(f"  length_2: {p['length_2']}\n")
-                        f.write(f"  angle_1: {p['angle_1']}\n")
-                        f.write(f"  angle_2: {p['angle_2']}\n")
-                        f.write(f"  yaw: {p['yaw']}\n")
-                        f.write(f"  max_length_limit: {p['max_length_limit']}\n")
+                    json.dump({'points':points}, f, allow_nan=False)  # JSON is valid YAML.
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to write yaml: {e}")
                 scene.frame_set(original_frame)
@@ -4234,31 +4448,11 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
             if not os.path.exists(output_yaml):
                 continue
 
-            out_points = {}
-            curr_p = {}
             try:
-                with open(output_yaml, 'r') as f:
-                    for line in f:
-                        stripped = line.strip()
-                        if stripped.startswith('- id:'):
-                            if curr_p and 'id' in curr_p:
-                                out_points[curr_p['id']] = curr_p
-                            try:
-                                curr_p = {'id': int(stripped.split(':')[1].strip())}
-                            except ValueError:
-                                curr_p = {}
-                        elif stripped.startswith('x:') and curr_p:
-                            curr_p['x'] = float(stripped.split(':')[1].strip())
-                        elif stripped.startswith('y:') and curr_p:
-                            curr_p['y'] = float(stripped.split(':')[1].strip())
-                        elif stripped.startswith('z:') and curr_p:
-                            curr_p['z'] = float(stripped.split(':')[1].strip())
-                        elif stripped.startswith('scale_factor:') and curr_p:
-                            curr_p['scale_factor'] = float(stripped.split(':')[1].strip())
-                if curr_p and 'id' in curr_p:
-                    out_points[curr_p['id']] = curr_p
-            except Exception as e:
-                print(f"Failed to parse output on frame {frame}: {e}")
+                output = load_authoring_yaml(output_yaml)
+                out_points = {p['id']:p for p in output['points']}
+            except (OSError, ValueError, KeyError) as error:
+                self.report({'ERROR'}, f'Failed to read stagger output: {error}')
                 continue
 
             for obj in drones:
@@ -4266,6 +4460,8 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                 d_id = int(m.group(1))
                 if d_id in out_points:
                     p = out_points[d_id]
+                    lighting_frames[obj.name][frame] = p.get('occlusion_patches', [])
+                    lighting_scales[obj.name][frame] = p.get('scale_factor',1.)
                     obj.location.x = p.get('x', obj.location.x)
                     obj.location.y = p.get('y', obj.location.y)
                     obj.location.z = p.get('z', obj.location.z)
@@ -4293,7 +4489,12 @@ class DRONE_OT_deconflict_stagger(bpy.types.Operator):
                                         fc.update()
                     applied_at_least_once = True
 
+        corrected = sum(apply_stagger_lighting_patches(obj, lighting_frames[obj.name], scene, lighting_scales[obj.name])
+                        for obj in drones)
         scene.frame_set(original_frame)
+        evaluate_leds(scene)
+        if corrected:
+            self.report({'INFO'}, f'Corrected foreground LED occlusion on {corrected} LightBenders.')
 
         if applied_at_least_once:
             context.view_layer.update()
@@ -6878,6 +7079,10 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
 
         # --- Drone Creation ---
         layout.label(text="Add LightBender:")
+        layout.row().prop(props, "model_mode", expand=True)
+        row = layout.row()
+        row.enabled = props.model_mode == 'FULL'
+        row.prop(props, "body_scale")
         row = layout.row()
         row.prop(props, "drone_type", text="")
 
@@ -6901,6 +7106,9 @@ class VIEW3D_PT_drone_swarm(bpy.types.Panel):
             
             drone_type_label = obj_props.drone_type.replace("TYPE_", "")
             col.label(text=f"Type: {drone_type_label}")
+            row = col.row()
+            row.enabled = obj_props.model_mode == 'FULL'
+            row.prop(obj_props, "body_scale")
             col.prop(obj_props, "light_module_offset")
 
             # Hide Actuation controls for Ring types
@@ -6963,6 +7171,10 @@ class VIEW3D_PT_lb_generative_layouts(bpy.types.Panel):
         layout.label(text="SVG Transform and Place:", icon='GRAPH')
         box = layout.box()
 
+        box.row().prop(props, "model_mode", expand=True)
+        row = box.row()
+        row.enabled = props.model_mode == 'FULL'
+        row.prop(props, "body_scale")
         box.prop(props, "import_svg_filepath")
 
         box.prop(props, "import_max_width")

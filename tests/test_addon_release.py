@@ -26,6 +26,7 @@ class AddonReleaseTests(unittest.TestCase):
             contents = b"# release fixture\n" if filename.endswith(".py") else b"release fixture\n"
             if filename == "blender_addon.py":
                 contents = b'bl_info = {"version": (1, 24, 0)}\nraise RuntimeError("must not import")\n'
+            (source / filename).parent.mkdir(parents=True, exist_ok=True)
             (source / filename).write_bytes(contents)
         return source
 
@@ -78,6 +79,16 @@ class AddonReleaseTests(unittest.TestCase):
             (source / "transform.py").write_text("def broken(\n", encoding="utf-8")
             with self.assertRaises(SyntaxError):
                 BUILDER.build_release(source)
+
+    def test_missing_aircraft_asset_fails_before_replacing_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.source_tree(directory)
+            output = Path(directory) / "existing.zip"
+            output.write_bytes(b"old release")
+            (source / "assets/lightbender_full.blend").unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "lightbender_full.blend"):
+                BUILDER.build_release(source, output)
+            self.assertEqual(output.read_bytes(), b"old release")
 
     def test_version_is_read_without_executing_source(self):
         self.assertEqual(BUILDER.addon_version('bl_info = {"version": (2, 4)}\nraise RuntimeError()'), "2.4.0")

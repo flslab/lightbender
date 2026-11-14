@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
+from rod_visibility import RodVisibilityIndex
+from body_occlusion import BodyOcclusionEvaluator, body_occlusion_report
 
 # from logger.logger import setup_logging
 
@@ -46,6 +48,18 @@ class Point3D:
     yaw: float  # Yaw in degrees (Rotation about +Z)
     max_length_limit: float
     split_info: Optional[Dict[str, int]] = None
+    # Optional physical geometry / lighting supplied by Blender. Legacy layouts
+    # use max_length_limit rods lit continuously from zero to length_1/length_2.
+    rod_lengths: Optional[List[float]] = None
+    lit_intervals: Optional[List[List[List[float]]]] = None
+    lit_colors: Optional[List[List[object]]] = None
+    rod_directions: Optional[List[List[float]]] = None
+    module_offset: Tuple[float, float, float] = (0., 0., 0.)
+    rod_radius: float = .0015
+    # World offset to the full aircraft mesh's mechanical hinge origin.
+    # None uses module_offset; callers modeling the LED surface separately
+    # provide this to avoid shifting the aircraft by the LED plane offset.
+    body_mesh_offset: Optional[List[float]] = None
 
     @property
     def position(self) -> np.ndarray:
@@ -162,7 +176,7 @@ def get_optical_axis(points: List[Point3D], camera_pos: np.ndarray) -> np.ndarra
     """Computes the optical axis by connecting camera to points centroid."""
     if not points:
         return np.array([0, 0, 1])
-    positions = np.array([p.position for p in points])
+    positions = np.array([p.position + np.asarray(p.module_offset) for p in points])
     centroid = np.mean(positions, axis=0)
     axis = centroid - camera_pos
     norm = np.linalg.norm(axis)
@@ -190,8 +204,9 @@ def calculate_perspective_scale(orig_pos: np.ndarray, new_pos: np.ndarray, camer
 def calculate_scaled_lengths(point: Point3D, new_pos: np.ndarray, camera_pos: np.ndarray, optical_axis: np.ndarray) -> \
         Tuple[float, float]:
     """Computes the physical lengths of lines after perspective scaling using optical axis distance."""
-    orig_pos = np.array([point.x, point.y, point.z])
-    scale = calculate_perspective_scale(orig_pos, new_pos, camera_pos, optical_axis)
+    offset = np.asarray(point.module_offset)
+    orig_pos = point.position + offset
+    scale = calculate_perspective_scale(orig_pos, new_pos + offset, camera_pos, optical_axis)
     return point.length_1 * scale, point.length_2 * scale
 
 
@@ -211,6 +226,7 @@ class ResolutionOrder(Enum):
     TOP_Z = auto()
     BOTTOM_Z = auto()
     RANDOM = auto()
+    BODY_OCCLUSION = auto()  # Resolve projected body blockers before less obstructive drones.
 
 
 class TrajectoryType(Enum):
@@ -349,6 +365,9 @@ class ResolutionStrategy:
         self.allow_split = allow_split
 
     def resolve(self, graph: InterferenceGraph, points_to_move: List[int]) -> Tuple[Dict[int, np.ndarray], List[Tuple[Point3D, np.ndarray]]]:
+        if self.order == ResolutionOrder.BODY_OCCLUSION:
+            self.body_visibility = BodyOcclusionEvaluator(
+                graph.points, graph.initial_positions, self.camera_pos, self.optical_axis)
         # 1. Determine Processing Order
         ordered_points = self._sort_points(graph, points_to_move)
         logger.info(f"  Resolution Order: {ordered_points}")
@@ -374,7 +393,7 @@ class ResolutionStrategy:
             # Determine Trajectory Vector (normalized)
             # This vector points AWAY from the camera by default
             if self.trajectory == TrajectoryType.LINE_OF_SIGHT:
-                vec = original_pos - self.camera_pos
+                vec = original_pos + np.asarray(point_data.module_offset) - self.camera_pos
                 norm = np.linalg.norm(vec)
                 traj_vec = vec / norm if norm > 0 else np.array([0, 0, 1])
             else:
@@ -419,6 +438,7 @@ class ResolutionStrategy:
                 point_data.split_info = {'parent_id': pid, 'segment': 1}
                 
                 graph.initial_positions[pid] = mid1
+                point_data.x, point_data.y, point_data.z = map(float, mid1)
                 
                 if self.trajectory == TrajectoryType.LINE_OF_SIGHT:
                     vec1 = mid1 - self.camera_pos
@@ -466,10 +486,17 @@ class ResolutionStrategy:
 
             final_positions[pid] = new_pos
 
+        visibility = RodVisibilityIndex(graph.points, graph.initial_positions,
+                                        self.camera_pos, self.optical_axis, final_positions)
+        self.lighting = visibility.repaired_lighting()
         return final_positions, complementary_points
 
     def _sort_points(self, graph, points):
-        if self.order == ResolutionOrder.SAME_AS_PHASE_2:
+        if self.order == ResolutionOrder.BODY_OCCLUSION:
+            visibility = self.body_visibility.evaluate(details=True)
+            risk = {item['drone_id']: item['occluded_projected_length'] for item in visibility['blockers']}
+            return sorted(points, key=lambda pid: (-risk.get(pid, 0.), -graph.degree(pid), pid))
+        elif self.order == ResolutionOrder.SAME_AS_PHASE_2:
             return points  # Assuming list passed in order of selection
         elif self.order == ResolutionOrder.MAX_DEGREE:
             return sorted(points, key=lambda n: graph.degree(n), reverse=True)
@@ -488,19 +515,26 @@ class ResolutionStrategy:
         Checks if the new position violates the max length constraint based on perspective scaling.
         L_new = L_original * (dist_new / dist_original) using optical axis distance.
         """
-        scale = calculate_perspective_scale(current_pos, new_pos, self.camera_pos, self.optical_axis)
+        offset = np.asarray(point_data.module_offset)
+        scale = calculate_perspective_scale(current_pos+offset, new_pos+offset,
+                                            self.camera_pos, self.optical_axis)
 
         # Check both lengths
         l1_new = point_data.length_1 * scale
         l2_new = point_data.length_2 * scale
 
-        if l1_new > point_data.max_length_limit or l2_new > point_data.max_length_limit:
+        limits = point_data.rod_lengths or [point_data.max_length_limit]*2
+        if l1_new > limits[0] or l2_new > limits[1]:
             # We don't log this as debug constantly because HYBRID/TOWARDS might trigger it often
             return False
         return True
 
     def _find_position(self, pid, point_data, traj_vec, search_directions, placed_positions, graph):
         original_pos = graph.initial_positions[pid]
+
+        if self.order == ResolutionOrder.BODY_OCCLUSION:
+            return self._find_body_visible_position(pid, point_data, traj_vec,
+                                                    search_directions, placed_positions, graph)
 
         # Define search steps
         step_size = 0.01
@@ -569,6 +603,36 @@ class ResolutionStrategy:
             logger.info(f"      Failed to find valid position in layers for Point {pid}.")
             return original_pos
 
+    def _find_body_visible_position(self, pid, point_data, traj_vec, search_directions,
+                                    placed_positions, graph):
+        """Minimize sampled body occlusion over otherwise feasible LOS candidates.
+
+        Unresolved drones stay at their tentative positions when scoring the
+        current choice. Distance breaks ties. This is a greedy initial-layout
+        heuristic; it does not certify a global or future visibility optimum.
+        """
+        original = graph.initial_positions[pid]
+        if self.placement == PlacementType.MIN_DISTANCE:
+            distances = (i*.01 for i in range(400))
+        else:
+            distances = (i*self.layer_config['spacing'] for i in range(self.layer_config['count']))
+        best, best_score = None, math.inf
+        for distance in distances:
+            for sign in search_directions:
+                candidate = original+sign*distance*traj_vec
+                if sign < 0 and np.dot(candidate-self.camera_pos, self.optical_axis) <= .1:
+                    continue
+                if not self._check_perspective_constraint(point_data, original, candidate):
+                    continue
+                if not self._is_valid(candidate, placed_positions, graph, current_id=pid):
+                    continue
+                score = self.body_visibility.evaluate({**placed_positions, pid: candidate})
+                if score < best_score-1e-12:
+                    best, best_score = candidate, score
+                if score <= 1e-12:
+                    return candidate
+        return best if best is not None else original
+
     def _is_valid(self, candidate_pos, placed_positions, graph, current_id=None):
         """Checks if candidate_pos interferes with any placed points in XY plane."""
         for neighbor_id, neighbor_pos in placed_positions.items():
@@ -599,6 +663,10 @@ class ModularInterferenceSolver:
               layer_config: dict = None,
               allow_split: bool = False) -> Tuple[List[int], Dict[int, np.ndarray], List[Tuple[Point3D, np.ndarray]]]:
 
+        if allow_split and any(p.lit_intervals is not None or p.rod_directions is not None
+                               or any(p.module_offset) for p in self.graph.points.values()):
+            raise ValueError('Splitting is unsupported for custom lighting profiles or module transforms')
+
         # Phase 2: Selection
         logger.info(f"\n--- Phase 2: Selection ({selection_method.name}) ---")
         selector = self._get_selector(selection_method)
@@ -621,6 +689,7 @@ class ModularInterferenceSolver:
         )
 
         final_positions, extra_points = resolver.resolve(self.graph, points_to_move)
+        self.lighting = resolver.lighting
 
         return points_to_move, final_positions, extra_points
 
@@ -664,23 +733,29 @@ def load_points_from_yaml(filepath: str) -> List[Point3D]:
             angle_2=p_data.get('angle_2', 0.0),
             yaw=p_data.get('yaw', 0.0),  # Default Yaw is 0.0
             max_length_limit=p_data.get('max_length_limit', 10.0),
-            split_info=p_data.get('split_info', None)
+            split_info=p_data.get('split_info', None),
+            rod_lengths=p_data.get('rod_lengths'), lit_intervals=p_data.get('lit_intervals'),
+            lit_colors=p_data.get('lit_colors'),
+            rod_directions=p_data.get('rod_directions'), module_offset=p_data.get('module_offset', (0.,0.,0.)),
+            rod_radius=p_data.get('rod_radius', .0015),
+            body_mesh_offset=p_data.get('body_mesh_offset')
         ))
     logger.info(f"Loaded {len(points)} points from {filepath}")
     return points
 
 
 def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[int, np.ndarray], camera_pos: np.ndarray,
-                        optical_axis: np.ndarray):
+                        optical_axis: np.ndarray, lighting=None):
     """Saves the updated points (position and scaled lengths) to a YAML file."""
     output_data = []
     for p in points:
         # Get new position (or original if not moved)
         new_pos = positions.get(p.id, np.array([p.x, p.y, p.z]))
-        orig_pos = np.array([p.x, p.y, p.z])
+        offset = np.asarray(p.module_offset)
+        orig_pos = np.array([p.x, p.y, p.z])+offset
 
         # Determine scale factor based on optical axis distance
-        scale_factor = calculate_perspective_scale(orig_pos, new_pos, camera_pos, optical_axis)
+        scale_factor = calculate_perspective_scale(orig_pos, new_pos+offset, camera_pos, optical_axis)
 
         # Calculate new lengths based on perspective
         l1_new = p.length_1 * scale_factor
@@ -701,14 +776,31 @@ def save_points_to_yaml(filepath: str, points: List[Point3D], positions: Dict[in
         }
         if p.split_info is not None:
             p_dict['split_info'] = p.split_info
+        if p.lit_intervals is not None:
+            p_dict['lit_intervals'] = [[[float(a*scale_factor),float(b*scale_factor)] for a,b in intervals]
+                                     for intervals in p.lit_intervals]
+            if p.lit_colors is not None:
+                p_dict['lit_colors'] = p.lit_colors
+        if lighting and p.id in lighting:
+            # Keep source spans identifiable in experiment endpoint comparisons.
+            source = p.lit_intervals if p.lit_intervals is not None else [[[0.,p.length_1]],[[0.,p.length_2]]]
+            p_dict['source_lit_intervals'] = [[[float(a*scale_factor),float(b*scale_factor)] for a,b in row]
+                                             for row in source]
+            p_dict['source_lit_colors'] = p.lit_colors
+            p_dict.update(lighting[p.id])
+        for key in ('rod_lengths', 'rod_directions', 'module_offset', 'rod_radius', 'body_mesh_offset'):
+            value = getattr(p, key)
+            if value is not None:
+                p_dict[key] = list(value) if key == 'module_offset' else value
         output_data.append(p_dict)
 
     try:
         with open(filepath, 'w') as f:
-            yaml.dump({'points': output_data}, f, sort_keys=False)
+            yaml.safe_dump({'points': output_data}, f, sort_keys=False)
         logger.info(f"Saved {len(output_data)} updated points to {filepath}")
     except Exception as e:
         logger.error(f"Failed to save output YAML: {e}")
+        raise
 
 
 def visualize_interference_graph(graph: InterferenceGraph,
@@ -993,7 +1085,7 @@ def visualize_solution_2d(graph: InterferenceGraph,
 
 
 def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.ndarray], camera_pos: np.ndarray,
-                           optical_axis: np.ndarray):
+                           optical_axis: np.ndarray, lighting=None):
     """
     Visualizes points and their attached lines in 3D for both before and after states.
     Shows the actual length (scaled by perspective) vs the max length limit.
@@ -1081,26 +1173,25 @@ def visualize_3d_structure(points: List[Point3D], final_positions: Dict[int, np.
                    label=f"Point {p.id}" if p.id == 0 else "")
         ax.text(new_pos[0], new_pos[1], new_pos[2], f" {p.id}", fontsize=9)
 
-        # Calculate new physical lengths based on perspective scaling using optical axis
-        l1_final, l2_final = calculate_scaled_lengths(p, new_pos, camera_pos, optical_axis)
-
-        # Line 1 (Green-ish) - Max Limit then Actual
-        tip1_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_1, p.yaw)
-        ax.plot([new_pos[0], tip1_max[0]], [new_pos[1], tip1_max[1]], [new_pos[2], tip1_max[2]],
-                color='green', alpha=0.2, linewidth=1, linestyle=':')
-
-        tip1_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l1_final, p.angle_1, p.yaw)
-        ax.plot([new_pos[0], tip1_act[0]], [new_pos[1], tip1_act[1]], [new_pos[2], tip1_act[2]],
-                color='green', alpha=0.9, linewidth=2, linestyle='-')
-
-        # Line 2 (Magenta-ish) - Max Limit then Actual
-        tip2_max = get_line_tip(new_pos[0], new_pos[1], new_pos[2], p.max_length_limit, p.angle_2, p.yaw)
-        ax.plot([new_pos[0], tip2_max[0]], [new_pos[1], tip2_max[1]], [new_pos[2], tip2_max[2]],
-                color='magenta', alpha=0.2, linewidth=1, linestyle=':')
-
-        tip2_act = get_line_tip(new_pos[0], new_pos[1], new_pos[2], l2_final, p.angle_2, p.yaw)
-        ax.plot([new_pos[0], tip2_act[0]], [new_pos[1], tip2_act[1]], [new_pos[2], tip2_act[2]],
-                color='magenta', alpha=0.9, linewidth=2, linestyle='-')
+        hinge = new_pos+np.asarray(p.module_offset)
+        l1_final,l2_final = calculate_scaled_lengths(p,new_pos,camera_pos,optical_axis)
+        scale = calculate_perspective_scale(orig_pos+np.asarray(p.module_offset),hinge,camera_pos,optical_axis)
+        profile = (lighting or {}).get(p.id)
+        intervals = (profile['lit_intervals'] if profile else
+                     [[[a*scale,b*scale] for a,b in row] for row in p.lit_intervals]
+                     if p.lit_intervals is not None else [[[0,l1_final]],[[0,l2_final]]])
+        colors = profile['lit_colors'] if profile else p.lit_colors
+        for rod,row in enumerate(intervals):
+            direction = (np.asarray(p.rod_directions[rod]) if p.rod_directions else
+                         get_line_tip(0,0,0,1,p.angle_1 if rod==0 else p.angle_2,p.yaw))
+            tip = hinge+direction*(p.rod_lengths[rod] if p.rod_lengths else p.max_length_limit)
+            default_color = 'green' if rod==0 else 'magenta'
+            ax.plot(*np.array([hinge,tip]).T,color=default_color,alpha=.2,linewidth=1,linestyle=':')
+            for j,(start,end) in enumerate(row):
+                color = colors[rod][j] if colors is not None else None
+                color = np.asarray(color)/255 if color is not None else default_color
+                ax.plot(*(hinge+np.array([start,end])[:,None]*direction).T,
+                        color=color,alpha=.9,linewidth=2,linestyle='-')
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
@@ -1307,7 +1398,8 @@ if __name__ == "__main__":
     utilization = (total_length / max_capacity * 100) if max_capacity > 0 else 0
 
     # 7. Save Results
-    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
+    save_points_to_yaml(args.output_file, points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS,
+                        lighting=solver.lighting)
 
     # 8. Visualize Results (Optional)
     if not args.no_viz:
@@ -1322,7 +1414,7 @@ if __name__ == "__main__":
         visualize_solution_2d(graph, moved, positions, np.array(CAMERA_POS))
         # 3D Structure Visualization
         print("Close the plot window to continue")
-        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS)
+        visualize_3d_structure(points_data, positions, np.array(CAMERA_POS), OPTICAL_AXIS, solver.lighting)
 
     
     if args.csv:

@@ -168,6 +168,21 @@ targets and waypoints already describe drone origins.
 
 The orbiting-arrow generator accepts repeated `--module-offset DRONE_ID X Y Z`
 arguments, for example `--module-offset lb4 0.04 0 0 --module-offset lb7 0.06 0.01 -0.02`.
+Each invocation writes three missions from the same reference arrow. For example,
+`python3 orchestrator/generate_camera_facing_arrow_sfl.py orchestrator/SFL/arrow.yaml`
+(from the repository root) writes:
+
+- `arrow.yaml`: the camera-facing version with folded yaw and silhouette compensation.
+- `arrow_normal.yaml`: outward radial yaw, initially facing toward the camera, with fixed servos and full rods.
+- `arrow_normal_facing_away.yaml`: inward radial yaw, initially facing away, with mirrored head servos that preserve the same world-space arrow and full rods. Body servos remain `[0, 180]` in every version.
+
+All three share the light-module hinge paths, arrow direction, timing, and mounts.
+Drone origins differ because mount compensation uses each variant's yaw. Normal
+variants turn through one continuous revolution and hold the final yaw. The camera
+sets their shared starting point, but does not correct their orientation during the orbit.
+Existing output files are checked before writing any mission; `--force` replaces them.
+The default FLU mount is `[0.075, 0, 0.015]` metres, matching the Blender add-on.
+
 It computes `p_drone = p_module - Rz(yaw) * light_module_offset` independently
 for each drone. `--module-offset-x` remains a fallback for drones without an
 explicit value. Regenerate the orbit after changing a mount to retain the same
@@ -383,7 +398,33 @@ Resolves downwash and overlap conflicts by shifting LightBenders toward or away 
 | **Trajectory Type** | **Line of Sight** — move along the camera ray; **Global** — move along the global centroid. |
 | **Move Direction** | **Away** from camera, **Towards** camera, or **Hybrid** (choose the direction that minimizes distance). |
 
-Click **Stagger** to apply; **Reset Stagger** to restore original positions.
+Click **Stagger** to apply; **Reset Stagger** restores original positions and LED colors.
+
+Stagger also checks whether a dark physical rod lies in front of a lit rod from
+its design camera. It transfers the rear color onto the overlapping foreground
+span and turns off that covered portion on the rear rod. Uncovered rear light,
+existing foreground colors, and other dark gaps are preserved. When several dark
+rods overlap the source, only the frontmost receives the transferred light. The shared
+`deconflict.py` implementation runs without Blender. `run_experiment.sh`,
+`lb_author.sh`, and the NSF figure generator automatically receive the same fix;
+SVG/3D plots and SFL export consume the corrected intervals. No extra flag is needed.
+
+The YAML retains `length_1`/`length_2` for the original design and adds
+`lit_intervals`, `lit_colors`, and `occlusion_patches` where corrections occur.
+Intervals are physical distances from each hinge in metres; colors are RGB
+0–255, with `null` meaning the pipeline's chosen default color. Patch colors of
+`[0, 0, 0]` turn off transferred source spans; `lit_intervals` contains only the
+final lit spans. Source intervals
+are retained for experiment endpoint comparisons; those metrics measure the
+original design, not correction coverage. Screen bounding boxes prune unrelated
+rods before analytic overlap/depth checks; the pass does not render images.
+
+Corrections target the design camera. Crossing rods and short spans are limited
+by LED spacing, and the check covers rods rather than aircraft bodies. Blender
+samples transform, servo, mount-offset, and pointer keyframes, holding corrections
+until the next sampled frame. Visibility between samples is not guaranteed;
+re-run Stagger after editing lighting or the camera. Index-dependent LED formulas
+are spatially remapped when perspective scaling changes their lit lengths.
 
 ---
 
@@ -456,6 +497,21 @@ The script runs the following steps sequentially, ensuring the input file of eac
 4. **Convert to SFL (`convert_to_mission.py`)**: Converts the staggered layout into an SFL mission file.
 5. **Orchestrator (`orchestrator.py`)**: (Optional) Triggers the swarm orchestrator to illuminate the deconflicted mission layout.
 
+SFL conversion uses the shared `module_assignment.py` helper: lines within 15°
+of horizontal prefer V modules, and lines within 15° of vertical prefer H modules.
+Servo ranges, physical rod limits when supplied, and inventory availability
+still govern compatibility. Assignments preserve rod directions and move lit
+lengths/colors with the corresponding rods when swapping servo slots.
+
+Stagger also supports `--resolution_order BODY_OCCLUSION`. This heuristic uses
+the full Blender drone mesh, mounted at the mechanical light-module hinge and
+rotated with yaw. It prioritizes blockers and scores feasible positions by
+sampled projected lit length hidden behind the actual triangle surfaces,
+preserving holes in the frame. It applies to the initial layout; later motion
+can introduce occlusions. The SVG orbit generator selects this order by default;
+see [SVG orbit authoring](../orchestrator/README_orbiting_shape.md) for its full-rod
+collision checks and generated reports.
+
 ### Setup Python Virtual Environment
 
 If you have not already, go to the lightbender/ directory and create a Python virtual environment:
@@ -511,3 +567,32 @@ python analysis/rmse_all.py --yaml orchestrator/SFL/lb_author_mission.yaml --lit
 Use **Physics & Simulation → Correct Facing (Current Frame)** for selected H/V
 modules. The standalone solver, file interface, exact silhouette model and
 limitations are documented in [README_camera_facing.md](README_camera_facing.md).
+
+### Full aircraft model
+
+Use the **Lighting Module Only / Full LightBender** radio buttons to choose the
+geometry for newly created LightBenders. The same setting appears above
+**Create** and in **SVG Transform and Place**, and applies to both workflows.
+The default remains Lighting Module Only. Existing objects are unchanged when
+you change this creation setting.
+
+Full LightBender includes a simplified export of
+`LightBenderFLS_v11_CF_carbon_fiber`. The Raspberry Pi and carrier retain their
+boards and major components; tiny electronics and CAD LED rod assemblies are
+omitted. LEDs and rods continue to use the add-on's procedural geometry and
+servo drivers. Full mode renders the procedural structure too; module-only mode
+keeps its LED-only rendering behavior. Aircraft instances share one mesh and its
+materials. The shaft
+tip sits at the lighting hinge, including after editing Light Module Offset.
+
+**Body Scale** is enabled only for Full LightBender. Set a positive factor
+(default `1.0`; for example, `0.5` for half size or `2.0` for double size).
+The creation setting applies to Create and SVG Transform and Place. To resize
+an existing aircraft, select its LightBender root and edit Body Scale under
+Selected LightBender Controls. Only the aircraft body mesh changes size;
+rod lengths, LED sizes, drone origin, and onboard camera stay unchanged.
+Light Module Offset scales proportionally with each change so the rods remain
+attached to the body's hinge. The adjusted offset is also used by SFL exports.
+
+See `authoring/fusion/README.md` in the source checkout to regenerate the Fusion
+copy and bundled Blender library.
