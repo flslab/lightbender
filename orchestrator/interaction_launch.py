@@ -298,10 +298,16 @@ def interaction_contact_attitude_args(args):
     return '' if run is None else f' --contact-attitude-run {run}'
 
 
-def contact_attitude_skips_pointcloud_dispatcher(args):
-    """Rigid-body comparison runs already have stable manifest identities."""
-    return (getattr(args, 'contact_attitude_run', None) in (2, 3)
-            or getattr(args, 'vicon_rigidbody_position_only', False))
+def contact_attitude_skips_pointcloud_dispatcher(args, drones=None):
+    """Rigid-body routes use manifest identities, not unlabeled markers."""
+    run = getattr(args, 'contact_attitude_run', None)
+    if run in (2, 3) or getattr(args, 'vicon_rigidbody_position_only', False):
+        return True
+    if run is not None or not getattr(args, 'interaction', False) or not drones:
+        return False
+    return all(drone.get('interaction_localization',
+                         'pointcloud' if drone.get('init_pos') else 'rigidbody')
+               in ('rigidbody', 'rigidbody_position_only') for drone in drones)
 
 
 def interaction_mocap_args(
@@ -352,6 +358,12 @@ def interaction_mocap_args(
         'interaction_localization',
         'pointcloud' if position else 'rigidbody',
     )
+    if localization_mode == 'rigidbody_position_only':
+        if not object_name:
+            raise ValueError(
+                f"Drone {drone['id']} requires obj_name or label for rigidbody localization"
+            )
+        return f"--vicon-rigidbody-position-only {shlex.quote(str(object_name))} "
     if localization_mode == 'pointcloud':
         if not position:
             raise ValueError(f"Drone {drone['id']} requires init_pos for pointcloud localization")

@@ -809,8 +809,22 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
             if getattr(self,'imu_validation_plan',None) is not None and node_id == self.imu_validation_plan.drone_id:
                 self.imu_validation_download = self.imu_validation_plan.stage(conn,self.common_cfg['work_dir'],self.tag,
                     python=self.common_cfg['venv_path']+'/bin/python')
+            if node_type in {"Drone", "Camera"}:
+                # Protect the entire setup chain, including git pull, from SSH
+                # teardown. Nohup on Python alone leaves earlier preparation
+                # steps writing to a closed SSH pipe, so the node never starts.
+                boot_log = f"{remote_work_dir}/{node_type.lower()}_{node_id}_boot.log"
+                cmd = (
+                    f"nohup bash -c {shlex.quote(cmd)} "
+                    f"> {shlex.quote(boot_log)} 2>&1 < /dev/null &"
+                )
+                self.logger.info(f"  > {node_type} {node_id} startup output: {boot_log}")
             # Run command (detach)
             conn.run(cmd, timeout=2, pty=False)
+            if node_type in {"Drone", "Camera"}:
+                self.logger.info(
+                    f"  > {node_type} {node_id} startup submitted; waiting for READY."
+                )
             return True
         except CommandTimedOut:
             self.logger.info(f"  > {node_type} {node_id} started successfully (timed out as expected).")
@@ -1152,7 +1166,7 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
                     # self._compute_init_positions()
 
                 skip_pointcloud_dispatcher = (
-                    contact_attitude_skips_pointcloud_dispatcher(self.args)
+                    contact_attitude_skips_pointcloud_dispatcher(self.args, self.drones)
                 )
                 if skip_pointcloud_dispatcher:
                     self.logger.info(
@@ -1392,8 +1406,16 @@ class SwarmOrchestrator(CameraNodesMixin, CameraPoseMixin):
                 if isinstance(sender_id, str) and "lb" in sender_id:
                     if status == 'READY' and sender_id not in self.ready_ids:
                         self.ready_ids.add(sender_id)
-                        self.logger.info(f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones})")
                         battery = msg.get('battery')
+                        battery_text = (
+                            f"{battery:.2f} V"
+                            if isinstance(battery, (int, float)) and not isinstance(battery, bool)
+                            and 0 < battery < float('inf') else "unknown"
+                        )
+                        self.logger.info(
+                            f"Drone {sender_id} Ready. ({len(self.ready_ids)}/{total_drones}) "
+                            f"battery: {battery_text}"
+                        )
                         self._blender_notify({
                             "cmd": "drone_status",
                             "id": sender_id,

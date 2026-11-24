@@ -5,7 +5,7 @@
 name: prev_behavior
 drones:
   lb11:
-    target: [0.7, 1.0, 1.0, 0.0]
+    target: [-0.80, 0, 1.0, 0.0]
     waypoints: []
     delta_t: 60.0  # Hold time in seconds after reaching the target.
     iterations: 1

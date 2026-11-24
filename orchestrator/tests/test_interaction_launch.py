@@ -68,6 +68,19 @@ class InteractionLaunchTests(unittest.TestCase):
             self.contact_args(None)
         ))
 
+    def test_manifest_rigidbody_skips_unlabeled_scan_but_pointcloud_still_scans(self):
+        args = self.contact_args(None)
+        rigid = {'id': 'lb11', 'obj_name': 'lb11', 'init_pos': [0, 0, .24],
+                 'interaction_localization': 'rigidbody'}
+        point = {'id': 'lb2', 'init_pos': [0, 0, .24]}
+        self.assertTrue(contact_attitude_skips_pointcloud_dispatcher(args, [rigid]))
+        self.assertFalse(contact_attitude_skips_pointcloud_dispatcher(args, [point]))
+        self.assertFalse(contact_attitude_skips_pointcloud_dispatcher(args, [rigid, point]))
+        self.assertFalse(contact_attitude_skips_pointcloud_dispatcher(args, []))
+        self.assertFalse(contact_attitude_skips_pointcloud_dispatcher(self.contact_args(1), [rigid]))
+        self.assertFalse(contact_attitude_skips_pointcloud_dispatcher(
+            self.contact_args(None, interaction=False), [rigid]))
+
     def test_wrench_mode_restores_pointcloud_default_when_init_position_exists(self):
         args = interaction_mocap_args({
             'id': 'lb11', 'label': 'FLS', 'init_pos': [0, 0, 0.24],
@@ -93,6 +106,17 @@ class InteractionLaunchTests(unittest.TestCase):
             args,
             '--obj-name FLS --vicon-mode rigidbody --vicon-full-pose ',
         )
+
+    def test_manifest_rigidbody_position_only_uses_named_object_and_skips_scan(self):
+        drone = dict(id='lb11', obj_name='lb11', init_pos=[0, -1, .24],
+                     interaction_localization='rigidbody_position_only')
+        self.assertEqual(interaction_mocap_args(drone),
+                         '--vicon-rigidbody-position-only lb11 ')
+        self.assertTrue(contact_attitude_skips_pointcloud_dispatcher(
+            self.contact_args(None), [drone]))
+        with self.assertRaisesRegex(ValueError, 'obj_name or label'):
+            interaction_mocap_args(dict(id='lb11',
+                interaction_localization='rigidbody_position_only'))
 
     def test_legacy_mode_keeps_pointcloud_default(self):
         args = interaction_mocap_args({
